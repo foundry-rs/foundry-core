@@ -22,7 +22,7 @@ build: ## Build the project.
 
 .PHONY: test-unit
 test-unit: ## Run unit tests.
-	cargo nextest run -E 'kind(test)'
+	cargo nextest run
 
 .PHONY: test-doc
 test-doc: ## Run doc tests.
