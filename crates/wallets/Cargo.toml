@@ -13,8 +13,6 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-foundry-config.workspace = true
-
 alloy-primitives.workspace = true
 alloy-signer = { workspace = true, features = ["eip712"] }
 alloy-signer-local = { workspace = true, features = ["mnemonic", "keystore"] }
@@ -27,7 +25,6 @@ alloy-dyn-abi.workspace = true
 
 # browser wallet
 axum.workspace = true
-foundry-common.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 uuid.workspace = true

@@ -98,10 +98,6 @@ redundant_lifetimes = "warn"
 all = "warn"
 
 [workspace.dependencies]
-# Internal dependencies (from foundry, will be replaced with published versions)
-foundry-config = { path = "../foundry/crates/config" }
-foundry-common = { path = "../foundry/crates/common" }
-
 ## alloy
 alloy-consensus = { version = "2.0.0", default-features = false }
 alloy-dyn-abi = "1.5.2"
@@ -141,11 +137,4 @@ toml = "0.9"
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
-uuid = "1.19.0"
-
-[patch.crates-io]
-## op-alloy
-op-alloy-consensus = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
-op-alloy-network = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
-op-alloy-rpc-types = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
-alloy-op-hardforks = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
+uuid = { version = "1.19.0", features = ["v4", "serde"] }

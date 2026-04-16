@@ -32,16 +32,17 @@ impl<N: Network> BrowserSigner<N> {
 
         server.start().await.map_err(alloy_signer::Error::other)?;
 
-        let _ = sh_warn!("Browser wallet is still in early development. Use with caution!");
-        let _ = sh_println!("Opening browser for wallet connection...");
-        let _ = sh_println!("Waiting for wallet connection...");
+        // TODO: use sh_* macros once extracted from foundry-common
+        eprintln!("Warning: Browser wallet is still in early development. Use with caution!");
+        println!("Opening browser for wallet connection...");
+        println!("Waiting for wallet connection...");
 
         let start = Instant::now();
 
         loop {
             if let Some(Connection { address, chain_id }) = server.get_connection().await {
-                let _ = sh_println!("Wallet connected: {}", address);
-                let _ = sh_println!("Chain ID: {}", chain_id);
+                println!("Wallet connected: {address}");
+                println!("Chain ID: {chain_id}");
 
                 return Ok(Self { server: Arc::new(Mutex::new(server)), address, chain_id });
             }

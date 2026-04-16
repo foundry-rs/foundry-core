@@ -10,7 +10,6 @@ use alloy_signer::Signer;
 use clap::Parser;
 use derive_builder::Builder;
 use eyre::Result;
-use foundry_config::Config;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -308,7 +307,10 @@ impl MultiWalletOpts {
             return Ok(Some(keystore_paths.iter().map(PathBuf::from).collect()));
         }
         if let Some(keystore_account_names) = &self.keystore_account_names {
-            let default_keystore_dir = Config::foundry_keystores_dir()
+            // TODO: temporary replacement for `Config::foundry_keystores_dir` to not depend on
+            // `foundry-config` crate
+            let default_keystore_dir = dirs::home_dir()
+                .map(|p| p.join(".foundry").join("keystores"))
                 .ok_or_else(|| eyre::eyre!("Could not find the default keystore directory."))?;
             return Ok(Some(
                 keystore_account_names
@@ -527,7 +529,7 @@ mod tests {
     #[test]
     fn parse_keystore_password_file() {
         let keystore =
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../cast/tests/fixtures/keystore"));
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/keystore"));
         let keystore_file = keystore
             .join("UTC--2022-12-20T10-30-43.591916000Z--ec554aeafe75601aaab43bd4621a22284db566c2");
 

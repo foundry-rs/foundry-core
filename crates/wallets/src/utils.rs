@@ -4,7 +4,6 @@ use alloy_signer_ledger::HDPath as LedgerHDPath;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_signer_trezor::HDPath as TrezorHDPath;
 use eyre::{Context, Result};
-use foundry_config::Config;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -91,7 +90,10 @@ pub fn maybe_get_keystore_path(
     maybe_path: Option<&str>,
     maybe_name: Option<&str>,
 ) -> Result<Option<PathBuf>> {
-    let default_keystore_dir = Config::foundry_keystores_dir()
+    // TODO: temporary replacement for `Config::foundry_keystores_dir` to not depend on
+    // `foundry-config` crate
+    let default_keystore_dir = dirs::home_dir()
+        .map(|p| p.join(".foundry").join("keystores"))
         .ok_or_else(|| eyre::eyre!("Could not find the default keystore directory."))?;
     Ok(maybe_path
         .map(PathBuf::from)
