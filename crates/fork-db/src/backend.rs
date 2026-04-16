@@ -527,22 +527,22 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 Err(err) => {
                                     let err = Arc::new(err);
                                     if let Some(listeners) = pin.account_requests.remove(&addr) {
-                                        listeners.into_iter().for_each(|l| {
+                                        for l in listeners {
                                             let _ = l.send(Err(DatabaseError::GetAccount(
                                                 addr,
                                                 Arc::clone(&err),
                                             )));
-                                        })
+                                        }
                                     }
                                     continue;
                                 }
                             };
 
                             // convert it to revm-style types
-                            let (code, code_hash) = if !code.is_empty() {
-                                (code.clone(), keccak256(&code))
-                            } else {
+                            let (code, code_hash) = if code.is_empty() {
                                 (Bytes::default(), KECCAK_EMPTY)
+                            } else {
+                                (code.clone(), keccak256(&code))
                             };
 
                             // update the cache
@@ -557,9 +557,9 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
 
                             // notify all listeners
                             if let Some(listeners) = pin.account_requests.remove(&addr) {
-                                listeners.into_iter().for_each(|l| {
+                                for l in listeners {
                                     let _ = l.send(Ok(acc.clone()));
-                                })
+                                }
                             }
                             continue;
                         }
@@ -574,13 +574,13 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                     if let Some(listeners) =
                                         pin.storage_requests.remove(&(addr, idx))
                                     {
-                                        listeners.into_iter().for_each(|l| {
+                                        for l in listeners {
                                             let _ = l.send(Err(DatabaseError::GetStorage(
                                                 addr,
                                                 idx,
                                                 Arc::clone(&err),
                                             )));
-                                        })
+                                        }
                                     }
                                     continue;
                                 }
@@ -591,9 +591,9 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
 
                             // notify all listeners
                             if let Some(listeners) = pin.storage_requests.remove(&(addr, idx)) {
-                                listeners.into_iter().for_each(|l| {
+                                for l in listeners {
                                     let _ = l.send(Ok(value));
-                                })
+                                }
                             }
                             continue;
                         }
@@ -606,12 +606,12 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                     let err = Arc::new(err);
                                     // notify all listeners
                                     if let Some(listeners) = pin.block_requests.remove(&number) {
-                                        listeners.into_iter().for_each(|l| {
+                                        for l in listeners {
                                             let _ = l.send(Err(DatabaseError::GetBlockHash(
                                                 number,
                                                 Arc::clone(&err),
                                             )));
-                                        })
+                                        }
                                     }
                                     continue;
                                 }
@@ -622,9 +622,9 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
 
                             // notify all listeners
                             if let Some(listeners) = pin.block_requests.remove(&number) {
-                                listeners.into_iter().for_each(|l| {
+                                for l in listeners {
                                     let _ = l.send(Ok(value));
-                                })
+                                }
                             }
                             continue;
                         }
@@ -677,7 +677,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
 
 /// Mode for the `SharedBackend` how to block in the non-async [`DatabaseRef`] when interacting with
 /// [`BackendHandler`].
-#[derive(Default, Clone, Debug, PartialEq)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub enum BlockingMode {
     /// This mode use `tokio::task::block_in_place()` to block in place.
     ///
@@ -1410,7 +1410,7 @@ mod tests {
         });
 
         let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string());
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone());
 
         let db = BlockchainDb::new(meta, None);
         let provider_inner = provider.clone();

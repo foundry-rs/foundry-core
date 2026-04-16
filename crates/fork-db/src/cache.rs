@@ -76,11 +76,11 @@ impl<B: ForkBlockEnv> BlockchainDb<B> {
                     }
                     let mut existing = cache.meta().write();
                     existing.hosts.extend(meta.hosts.clone());
-                    if meta != *existing {
+                    if meta == *existing {
+                        true
+                    } else {
                         warn!(target: "cache", "non-matching block metadata");
                         false
-                    } else {
-                        true
                     }
                 })
             })
@@ -222,7 +222,7 @@ impl<'de, B: DeserializeOwned + Default + Serialize> Deserialize<'de>
             let default_value = serde_json::to_value(B::default()).unwrap();
             for (key, value) in default_value.as_object().unwrap() {
                 if !obj.contains_key(key) {
-                    obj.insert(key.to_string(), value.clone());
+                    obj.insert(key.clone(), value.clone());
                 }
             }
         }
