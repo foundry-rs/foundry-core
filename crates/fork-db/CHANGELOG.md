@@ -477,7 +477,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merge pull request [#10](https://github.com/foundry-rs/foundry-fork-db/issues/10) from Ethanol48/update_state
 - Eliminated tmp ETH_RPC
 - Added tmp file for testing
-- Eliminate reduntant code
+- Eliminate redundant code
 - Add tests to verify if the data was properly updated
 - Added db to test to verify data
 - Add minor changes
@@ -487,7 +487,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update revm
 - Merge pull request [#12](https://github.com/foundry-rs/foundry-fork-db/issues/12) from Ethanol48/flush_to_file
 - Change to &Path
-- Eliminate reduntant code
+- Eliminate redundant code
 - Merge branch 'main' of https://github.com/Ethanol48/foundry-fork-db into flush_to_file
 
 ### Refactor
@@ -510,7 +510,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
-- Formating
+- Formatting
 - Add documentation
 - Add flush to arbitrary file
 

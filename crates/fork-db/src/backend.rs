@@ -1386,7 +1386,7 @@ mod tests {
         let endpoint = format!("http://{}", server.server_addr());
 
         // Spin an in-memory server that responds to "foo_callCustomMethod" rpc call.
-        let expected_bytes_innner = expected_response_bytes.clone();
+        let expected_bytes_inner = expected_response_bytes.clone();
         let server_handle = std::thread::spawn(move || {
             #[derive(Debug, Deserialize)]
             struct Request {
@@ -1400,7 +1400,7 @@ mod tests {
                 "foo_callCustomMethod" => request
                     .respond(Response::from_string(format!(
                         r#"{{"result": "{}"}}"#,
-                        alloy_primitives::hex::encode_prefixed(expected_bytes_innner),
+                        alloy_primitives::hex::encode_prefixed(expected_bytes_inner),
                     )))
                     .unwrap(),
                 _ => request
