@@ -119,7 +119,7 @@ alloy-signer-turnkey = { version = "2.0.0", default-features = false }
 alloy-sol-types = "1.5.2"
 
 # Tempo
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "39b9262", default-features = false, features = [
+tempo-primitives = { version = "1.6", default-features = false, features = [
     "serde",
 ] }
 
