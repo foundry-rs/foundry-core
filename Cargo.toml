@@ -120,6 +120,7 @@ alloy-sol-types = "1.5.2"
 
 # Tempo
 tempo-primitives = { version = "1.6", default-features = false, features = [
+    "std",
     "serde",
 ] }
 
