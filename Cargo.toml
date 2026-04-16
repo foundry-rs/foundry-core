@@ -1,0 +1,162 @@
+[workspace]
+members = ["crates/wallets"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+authors = ["Foundry Contributors"]
+license = "MIT OR Apache-2.0"
+homepage = "https://getfoundry.sh"
+repository = "https://github.com/foundry-rs/foundry-core"
+
+[workspace.lints.clippy]
+borrow_as_ptr = "warn"
+branches_sharing_code = "warn"
+clear_with_drain = "warn"
+cloned_instead_of_copied = "warn"
+collection_is_never_read = "warn"
+dbg_macro = "warn"
+derive_partial_eq_without_eq = "warn"
+empty_line_after_doc_comments = "warn"
+empty_line_after_outer_attr = "warn"
+enum_glob_use = "warn"
+equatable_if_let = "warn"
+explicit_into_iter_loop = "warn"
+explicit_iter_loop = "warn"
+flat_map_option = "warn"
+from_iter_instead_of_collect = "warn"
+if_then_some_else_none = "warn"
+implicit_clone = "warn"
+if_not_else = "warn"
+imprecise_flops = "warn"
+iter_on_empty_collections = "warn"
+iter_with_drain = "warn"
+iter_without_into_iter = "warn"
+large_stack_frames = "warn"
+manual_assert = "warn"
+manual_clamp = "warn"
+manual_string_new = "warn"
+missing_const_for_fn = "warn"
+mutex_integer = "warn"
+naive_bytecount = "warn"
+needless_bitwise_bool = "warn"
+needless_continue = "warn"
+needless_for_each = "warn"
+nonstandard_macro_braces = "warn"
+option_as_ref_cloned = "warn"
+path_buf_push_overwrite = "warn"
+read_zero_byte_vec = "warn"
+redundant_clone = "warn"
+single_char_pattern = "warn"
+redundant_else = "warn"
+string_lit_as_bytes = "warn"
+string_lit_chars_any = "warn"
+suboptimal_flops = "warn"
+suspicious_operation_groupings = "warn"
+trailing_empty_array = "warn"
+trait_duplication_in_bounds = "warn"
+transmute_undefined_repr = "warn"
+trivial_regex = "warn"
+tuple_array_conversions = "warn"
+uninhabited_references = "warn"
+unnecessary_struct_initialization = "warn"
+uninlined_format_args = "warn"
+unnecessary_self_imports = "warn"
+unnested_or_patterns = "warn"
+unused_peekable = "warn"
+unused_rounding = "warn"
+use_self = "warn"
+useless_let_if_seq = "warn"
+while_float = "warn"
+zero_sized_map_values = "warn"
+
+# Explicitly allowed nursery lints — too noisy or have known false positives.
+as_ptr_cast_mut = "allow"
+cognitive_complexity = "allow"
+debug_assert_with_mut_call = "allow"
+fallible_impl_from = "allow"
+future_not_send = "allow"
+needless_collect = "allow"
+non_send_fields_in_send_ty = "allow"
+redundant_pub_crate = "allow"
+significant_drop_in_scrutinee = "allow"
+significant_drop_tightening = "allow"
+too_long_first_doc_paragraph = "allow"
+
+# Specific allows.
+result_large_err = "allow"
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_must_use = "deny"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+
+[workspace.lints.rustdoc]
+all = "warn"
+
+[workspace.dependencies]
+# Internal dependencies (from foundry, will be replaced with published versions)
+foundry-config = { path = "../foundry/crates/config" }
+foundry-common = { path = "../foundry/crates/common" }
+
+## alloy
+alloy-consensus = { version = "2.0.0", default-features = false }
+alloy-dyn-abi = "1.5.2"
+alloy-network = { version = "2.0.0", default-features = false }
+alloy-primitives = { version = "1.5.2", features = [
+    "getrandom",
+    "rand",
+    "map-fxhash",
+    "map-foldhash",
+] }
+alloy-rlp = "0.3"
+alloy-signer = { version = "2.0.0", default-features = false }
+alloy-signer-aws = { version = "2.0.0", default-features = false }
+alloy-signer-gcp = { version = "2.0.0", default-features = false }
+alloy-signer-ledger = { version = "2.0.0", default-features = false }
+alloy-signer-local = { version = "2.0.0", default-features = false }
+alloy-signer-trezor = { version = "2.0.0", default-features = false }
+alloy-signer-turnkey = { version = "2.0.0", default-features = false }
+alloy-sol-types = "1.5.2"
+
+# Tempo
+tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "39b9262", default-features = false, features = [
+    "serde",
+] }
+
+# misc
+async-trait = "0.1"
+axum = "0.8"
+dirs = "6"
+eyre = "0.6"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+thiserror = "2"
+tokio = "1"
+toml = "0.9"
+tower = "0.5"
+tower-http = "0.6"
+tracing = "0.1"
+uuid = "1.19.0"
+
+[patch.crates-io]
+## op-alloy / alloy-op-evm
+op-alloy-consensus = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
+op-alloy-network = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
+op-alloy-rpc-types = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
+op-alloy = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
+alloy-op-evm = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
+alloy-op-hardforks = { git = "https://github.com/foundry-rs/optimism", branch = "develop" }
+
+## foundry-fork-db
+foundry-fork-db = { git = "https://github.com/foundry-rs/foundry-fork-db", branch = "main" }
+
+# solar
+solar = { package = "solar-compiler", git = "https://github.com/paradigmxyz/solar", rev = "530f129" }
+solar-interface = { package = "solar-interface", git = "https://github.com/paradigmxyz/solar", rev = "530f129" }
+solar-ast = { package = "solar-ast", git = "https://github.com/paradigmxyz/solar", rev = "530f129" }
+solar-sema = { package = "solar-sema", git = "https://github.com/paradigmxyz/solar", rev = "530f129" }
