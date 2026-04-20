@@ -29,6 +29,7 @@ chrono = { version = "0.4", features = ["serde"] }
 [features]
 default = ["rustls"]
 rustls = ["reqwest/rustls"]
+openssl = ["reqwest/native-tls"]
 
 [dev-dependencies]
 serde_json.workspace = true
