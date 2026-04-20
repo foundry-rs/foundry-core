@@ -7,4 +7,3 @@ Bindings for [Etherscan](https://etherscan.io) and other block explorer APIs, us
 - `foundry-compilers`: Enables contract verification support via [`foundry-compilers`](https://github.com/foundry-rs/foundry-core/tree/main/crates/compilers).
 - `compilers-full`: Enables all compiler backends when `foundry-compilers` is active.
 - `rustls`: Uses `rustls` for TLS (default).
-- `openssl`: Uses the system's native TLS via OpenSSL.

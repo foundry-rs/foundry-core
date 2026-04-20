@@ -7,4 +7,3 @@ See also [Blobscan on GitHub](https://github.com/Blobscan/blobscan).
 ## Features
 
 - `rustls`: Uses `rustls` for TLS (default).
-- `openssl`: Uses the system's native TLS via OpenSSL.
