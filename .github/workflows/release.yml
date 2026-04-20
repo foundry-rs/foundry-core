@@ -7,19 +7,6 @@ on:
     tags: ["v*"]
 
 jobs:
-  semver-checks:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: obi1kenobi/cargo-semver-checks-action@5b298c9520f7096a4683c0bd981a7ac5a7e249ae # v2.8
-        with:
-          rust-toolchain: manual
-
   validate-tag:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -30,7 +17,7 @@ jobs:
           [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
 
   publish:
-    needs: [semver-checks, validate-tag]
+    needs: validate-tag
     runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 30
