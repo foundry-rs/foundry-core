@@ -58,24 +58,27 @@ jobs:
           toolchain: stable
       - uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1
         id: auth
-      - run: cargo publish -p foundry-compilers-core
+      - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - run: cargo publish -p foundry-compilers-artifacts-solc
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - run: cargo publish -p foundry-compilers-artifacts-vyper
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - run: cargo publish -p foundry-compilers-artifacts
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - run: cargo publish -p foundry-compilers
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - run: cargo publish -p foundry-fork-db
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - run: cargo publish -p foundry-wallets
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          publish_if_new() {
+            local crate="$1"
+            local version
+            version=$(cargo metadata --no-deps --format-version 1 | jq -r ".packages[] | select(.name == \"$crate\") | .version")
+            if curl -s "https://crates.io/api/v1/crates/$crate/$version" | jq -e '.version' > /dev/null 2>&1; then
+              echo "Skipping $crate@$version (already published)"
+            else
+              echo "Publishing $crate@$version"
+              cargo publish -p "$crate"
+            fi
+          }
+
+          # Publish in dependency order
+          publish_if_new foundry-compilers-core
+          publish_if_new foundry-compilers-artifacts-solc
+          publish_if_new foundry-compilers-artifacts-vyper
+          publish_if_new foundry-compilers-artifacts
+          publish_if_new foundry-compilers
+          publish_if_new foundry-fork-db
+          publish_if_new foundry-wallets
