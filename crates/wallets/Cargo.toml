@@ -1,5 +1,6 @@
 [package]
 name = "foundry-wallets"
+description = "Wallet integrations for Foundry"
 
 version.workspace = true
 edition.workspace = true
