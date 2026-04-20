@@ -1,5 +1,5 @@
 use crate::error::StoreError;
-use rusqlite::OptionalExtension;
+use rusqlite::{Connection, OptionalExtension};
 use std::{path::Path, sync::Mutex};
 
 /// A payment channel persisted in SQLite.
@@ -28,7 +28,7 @@ pub struct Channel {
 
 /// SQLite-backed channel store.
 pub struct ChannelDb {
-    conn: Mutex<rusqlite::Connection>,
+    conn: Mutex<Connection>,
 }
 
 impl ChannelDb {
