@@ -3,6 +3,7 @@ members = [
     "crates/compilers/crates/artifacts/*",
     "crates/compilers/crates/compilers",
     "crates/compilers/crates/core",
+    "crates/explorers/*",
     "crates/fork-db",
     "crates/wallets",
 ]
@@ -124,6 +125,10 @@ alloy-signer-local = { version = "2.0.0", default-features = false }
 alloy-signer-trezor = { version = "2.0.0", default-features = false }
 alloy-signer-turnkey = { version = "2.0.0", default-features = false }
 alloy-sol-types = "1.5.2"
+alloy-chains = "0.2"
+alloy-eips = { version = "2.0.0", default-features = false }
+alloy-rpc-types-eth = { version = "2.0.0", default-features = false }
+alloy-serde = { version = "2.0.0", default-features = false }
 
 ## compilers
 foundry-compilers.path = "crates/compilers/crates/compilers"
