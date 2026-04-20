@@ -64,4 +64,4 @@ jobs:
       - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo release publish --execute --no-confirm
+        run: cargo release --execute --no-confirm --no-push --no-tag
