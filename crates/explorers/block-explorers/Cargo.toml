@@ -32,14 +32,14 @@ alloy-primitives = { workspace = true, features = [
 reqwest = { workspace = true, features = ["json", "query", "form"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-thiserror = "2.0"
-tracing = "0.1.41"
-semver = "1.0"
+thiserror.workspace = true
+tracing.workspace = true
+semver.workspace = true
 
-foundry-compilers = { version = "0.19.0", optional = true }
+foundry-compilers = { workspace = true, optional = true }
 
 [dev-dependencies]
-tempfile = "3.20"
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 serial_test = "3.2.0"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
