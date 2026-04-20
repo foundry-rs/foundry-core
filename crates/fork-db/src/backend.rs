@@ -1382,7 +1382,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn shared_backend_any_request() {
         let expected_response_bytes: Bytes = vec![0xff, 0xee].into();
-        let server = Server::http("0.0.0.0:0").expect("failed starting in-memory http server");
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
         let endpoint = format!("http://{}", server.server_addr());
 
         // Spin an in-memory server that responds to "foo_callCustomMethod" rpc call.
