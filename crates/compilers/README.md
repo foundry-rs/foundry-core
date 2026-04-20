@@ -4,6 +4,8 @@ Compiler abstraction and Foundry project implementation.
 
 Originally part of [`ethers-rs`](https://github.com/gakonst/ethers-rs) as `ethers-solc`, this is the compilation backend for [Foundry](https://github.com/foundry-rs/foundry).
 
+> **Note:** This crate was previously maintained at [foundry-rs/compilers](https://github.com/foundry-rs/compilers).
+
 ## Features
 
 - `full`: Enables `async` + `svm-solc`.
