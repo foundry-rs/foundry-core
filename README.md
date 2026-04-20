@@ -4,8 +4,10 @@ Core libraries extracted from [Foundry](https://github.com/foundry-rs/foundry), 
 
 ## Crates
 
+- [`foundry-fork-db`] - Fork database used by Foundry
 - [`foundry-wallets`] - Wallet management and signing support (local, hardware, cloud KMS, browser)
 
+[`foundry-fork-db`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/fork-db
 [`foundry-wallets`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/wallets
 
 ## Supported Rust Versions (MSRV)

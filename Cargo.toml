@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wallets"]
+members = ["crates/fork-db", "crates/wallets"]
 resolver = "2"
 
 [workspace.package]
