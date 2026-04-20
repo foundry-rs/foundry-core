@@ -57,7 +57,8 @@ pub struct ArtifactId {
 
 impl ArtifactId {
     /// Converts any `\\` separators in the `path` to `/`
-    pub const fn slash_paths(&mut self) {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             self.path = self.path.to_slash_lossy().as_ref().into();
@@ -66,7 +67,8 @@ impl ArtifactId {
     }
 
     /// Convenience function for [`Self::slash_paths()`]
-    pub const fn with_slashed_paths(mut self) -> Self {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn with_slashed_paths(mut self) -> Self {
         self.slash_paths();
         self
     }
@@ -217,7 +219,8 @@ impl<T: Serialize> Artifacts<T> {
 
 impl<T> Artifacts<T> {
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub const fn slash_paths(&mut self) {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             self.0 = std::mem::take(&mut self.0)

@@ -165,7 +165,8 @@ impl fmt::Display for Remapping {
 
 impl Remapping {
     /// Converts any `\\` separators in the `path` to `/`.
-    pub const fn slash_path(&mut self) {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn slash_path(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathExt;

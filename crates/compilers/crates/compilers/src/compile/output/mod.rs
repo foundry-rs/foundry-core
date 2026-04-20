@@ -562,7 +562,8 @@ impl<C: Compiler> Default for AggregatedCompilerOutput<C> {
 
 impl<C: Compiler> AggregatedCompilerOutput<C> {
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub const fn slash_paths(&mut self) {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn slash_paths(&mut self) {
         self.sources.slash_paths();
         self.contracts.slash_paths();
     }

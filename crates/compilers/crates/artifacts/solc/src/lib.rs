@@ -636,7 +636,8 @@ impl Libraries {
     }
 
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub const fn slash_paths(&mut self) {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathBufExt;

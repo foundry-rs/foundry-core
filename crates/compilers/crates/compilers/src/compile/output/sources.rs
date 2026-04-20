@@ -14,7 +14,8 @@ pub struct VersionedSourceFiles(pub BTreeMap<PathBuf, Vec<VersionedSourceFile>>)
 
 impl VersionedSourceFiles {
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub const fn slash_paths(&mut self) {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathExt;

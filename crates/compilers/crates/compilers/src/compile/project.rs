@@ -430,7 +430,8 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
     ///
     /// This effectively ensures that `solc` can find imported files like `/src/Cheats.sol` in the
     /// VFS (the `CompilerInput` as json) under `src/Cheats.sol`.
-    const fn slash_paths(&mut self) {
+    #[allow(clippy::missing_const_for_fn)]
+    fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathBufExt;
