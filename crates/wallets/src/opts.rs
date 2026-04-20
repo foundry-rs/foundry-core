@@ -270,8 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn find_keystore() {
-        let keystore =
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test-data/keystore"));
+        let keystore = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test-data/keystore"));
         let keystore_file = keystore
             .join("UTC--2022-12-20T10-30-43.591916000Z--ec554aeafe75601aaab43bd4621a22284db566c2");
         let password_file = keystore.join("password-ec554");
