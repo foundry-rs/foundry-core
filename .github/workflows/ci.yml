@@ -18,7 +18,7 @@ env:
 
 jobs:
   rustfmt:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -33,7 +33,7 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -52,7 +52,7 @@ jobs:
           RUSTFLAGS: -Dwarnings
 
   feature-checks:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -72,7 +72,7 @@ jobs:
         run: cargo hack check --feature-powerset --depth 1
 
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -88,7 +88,7 @@ jobs:
       - run: cargo check --workspace --all-features
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -104,7 +104,7 @@ jobs:
       - run: cargo test --workspace
 
   doctest:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -120,7 +120,7 @@ jobs:
       - run: cargo test --workspace --doc
 
   docs:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
@@ -138,7 +138,7 @@ jobs:
           RUSTDOCFLAGS: --cfg docsrs -D warnings --show-type-layout --generate-link-to-definition --enable-index-page -Zunstable-options
 
   typos:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
