@@ -34,7 +34,7 @@ pub struct VerifyContract {
     /// For instances (e.g. blockscout) that might support the proper spelling, the field
     /// `blockscout_constructor_arguments` is populated with the exact arguments passed to this
     /// field as well.
-    #[serde(rename = "constructorArguements", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "constructorArguments", skip_serializing_if = "Option::is_none")]
     pub constructor_arguments: Option<String>,
     /// Properly spelled constructor arguments. This is needed as some blockscout instances
     /// can identify the correct spelling instead of the misspelled version above.

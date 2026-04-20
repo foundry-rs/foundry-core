@@ -202,7 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Styling
 
-- [`blob-explorers`] Accomodate new blobscan API changes ([#68](https://github.com/foundry-rs/block-explorers/issues/68))
+- [`blob-explorers`] Accommodate new blobscan API changes ([#68](https://github.com/foundry-rs/block-explorers/issues/68))
 
 ## [foundry-block-explorers-v0.9.0](https://github.com/foundry-rs/block-explorers/releases/tag/vfoundry-block-explorers-v0.9.0) - 2024-11-18
 
