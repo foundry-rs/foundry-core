@@ -855,7 +855,7 @@ pub fn collect_ordered_deps<P: SourceParser<ParsedSource: MaybeSolData>>(
             }
         }
 
-        // If both filenames and dependecy counts are equal, fallback to comparing file paths
+        // If both filenames and dependency counts are equal, fallback to comparing file paths
         path_0.cmp(path_1)
     });
 

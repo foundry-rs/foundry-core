@@ -109,7 +109,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         self.cached_artifacts.slash_paths();
     }
 
-    /// Convenience function fo [`Self::slash_paths()`]
+    /// Convenience function for [`Self::slash_paths()`]
     pub fn with_slashed_paths(mut self) -> Self {
         self.slash_paths();
         self

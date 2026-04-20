@@ -65,7 +65,7 @@ impl ArtifactId {
         }
     }
 
-    /// Convenience function fo [`Self::slash_paths()`]
+    /// Convenience function for [`Self::slash_paths()`]
     pub const fn with_slashed_paths(mut self) -> Self {
         self.slash_paths();
         self

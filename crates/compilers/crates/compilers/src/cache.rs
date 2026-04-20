@@ -77,7 +77,7 @@ impl<S: CompilerSettings> CompilerCache<S> {
         self.files.remove(file)
     }
 
-    /// How many entries the cache contains where each entry represents a sourc file
+    /// How many entries the cache contains where each entry represents a source file
     pub fn len(&self) -> usize {
         self.files.len()
     }
@@ -130,7 +130,7 @@ impl<S: CompilerSettings> CompilerCache<S> {
     /// the `ProjectPathsConfig`.
     ///
     /// This expects the `artifact` files to be relative to the artifacts dir of the `paths` and the
-    /// `CachEntry` paths to be relative to the root dir of the `paths`
+    /// `CacheEntry` paths to be relative to the root dir of the `paths`
     ///
     ///
     ///
@@ -201,7 +201,7 @@ impl<S: CompilerSettings> CompilerCache<S> {
         self
     }
 
-    /// Sets the artifact files location to `base` adjoined to the `CachEntries` artifacts.
+    /// Sets the artifact files location to `base` adjoined to the `CacheEntries` artifacts.
     #[instrument(skip_all)]
     pub fn join_artifacts_files(&mut self, base: &Path) -> &mut Self {
         self.files.values_mut().for_each(|entry| entry.join_artifacts_files(base));

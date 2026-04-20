@@ -64,7 +64,7 @@ impl fmt::Display for VyperLanguage {
     }
 }
 
-/// Vyper compiler. Wrapper aound vyper binary.
+/// Vyper compiler. Wrapper around vyper binary.
 #[derive(Clone, Debug)]
 pub struct Vyper {
     pub path: PathBuf,

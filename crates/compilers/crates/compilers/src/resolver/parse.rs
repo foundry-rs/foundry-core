@@ -516,10 +516,10 @@ import "ds-test/test.sol" as Test;
 import { FloatMath as Math, Math as FloatMath } from "./Math.sol";
 "#;
 
-        let caputred_imports =
+        let captured_imports =
             capture_imports(content).into_iter().map(|s| s.data.aliases).collect::<Vec<_>>();
         assert_eq!(
-            caputred_imports,
+            captured_imports,
             vec![
                 vec![SolImportAlias::File("T".into())],
                 vec![SolImportAlias::Contract("Test".into(), "DsTest".into())],

@@ -376,7 +376,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Release 0.13.1
 - Clippy + winnow 0.7 ([#244](https://github.com/foundry-rs/compilers/issues/244))
-- Call shrink_to_fit afte parsing source maps ([#242](https://github.com/foundry-rs/compilers/issues/242))
+- Call shrink_to_fit after parsing source maps ([#242](https://github.com/foundry-rs/compilers/issues/242))
 
 ## [0.13.0](https://github.com/foundry-rs/compilers/releases/tag/v0.13.0) - 2025-01-21
 
