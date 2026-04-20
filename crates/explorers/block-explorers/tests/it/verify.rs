@@ -42,9 +42,13 @@ async fn test_can_flatten_and_verify_contract_single_file_mainnet() {
             .submit_contract_verification(&contract)
             .await
             .expect("failed to send the request");
-        // `Error!` result means that request was malformatted
-        assert_ne!(resp.result, "Error!", "{resp:?}");
-        assert_ne!(resp.message, "NOTOK", "{resp:?}");
+        // The API returns NOTOK with "Contract source code already verified" for
+        // already-verified contracts — that's a valid response, not a failure.
+        if resp.result != "Contract source code already verified" {
+            // `Error!` result means that request was malformatted
+            assert_ne!(resp.result, "Error!", "{resp:?}");
+            assert_ne!(resp.message, "NOTOK", "{resp:?}");
+        }
     })
     .await
 }
