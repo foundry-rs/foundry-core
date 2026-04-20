@@ -169,7 +169,7 @@ impl Source {
     }
 
     /// Returns `true` if the source should be compiled with full output selection.
-    pub fn is_dirty(&self) -> bool {
+    pub const fn is_dirty(&self) -> bool {
         self.kind.is_dirty()
     }
 
@@ -306,7 +306,7 @@ pub enum SourceCompilationKind {
 
 impl SourceCompilationKind {
     /// Whether this file should be compiled with full output selection
-    pub fn is_dirty(&self) -> bool {
+    pub const fn is_dirty(&self) -> bool {
         matches!(self, Self::Complete)
     }
 }

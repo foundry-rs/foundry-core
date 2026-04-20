@@ -92,12 +92,12 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     ProjectCompileOutput<C, T>
 {
     /// Returns the parser used to parse the sources.
-    pub fn parser(&self) -> &C::Parser {
+    pub const fn parser(&self) -> &C::Parser {
         self.edges.parser()
     }
 
     /// Returns the parser used to parse the sources.
-    pub fn parser_mut(&mut self) -> &mut C::Parser {
+    pub const fn parser_mut(&mut self) -> &mut C::Parser {
         self.edges.parser_mut()
     }
 
@@ -276,12 +276,12 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     ///     project.compile()?.into_output().contracts_into_iter().collect();
     /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
-    pub fn output(&self) -> &AggregatedCompilerOutput<C> {
+    pub const fn output(&self) -> &AggregatedCompilerOutput<C> {
         &self.compiler_output
     }
 
     /// Returns a mutable reference to the (merged) solc compiler output.
-    pub fn output_mut(&mut self) -> &mut AggregatedCompilerOutput<C> {
+    pub const fn output_mut(&mut self) -> &mut AggregatedCompilerOutput<C> {
         &mut self.compiler_output
     }
 
@@ -302,13 +302,13 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
     /// Returns the set of `Artifacts` that were cached and got reused during
     /// [`crate::Project::compile()`]
-    pub fn cached_artifacts(&self) -> &Artifacts<T::Artifact> {
+    pub const fn cached_artifacts(&self) -> &Artifacts<T::Artifact> {
         &self.cached_artifacts
     }
 
     /// Returns the set of `Artifacts` that were compiled with `solc` in
     /// [`crate::Project::compile()`]
-    pub fn compiled_artifacts(&self) -> &Artifacts<T::Artifact> {
+    pub const fn compiled_artifacts(&self) -> &Artifacts<T::Artifact> {
         &self.compiled_artifacts
     }
 
@@ -326,10 +326,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let mut contracts: BTreeMap<_, Vec<_>> = BTreeMap::new();
         let versioned_contracts = &self.compiler_output.contracts;
         for (_, name, contract, version) in versioned_contracts.contracts_with_files_and_version() {
-            contracts
-                .entry(version.to_owned())
-                .or_default()
-                .push((name.to_string(), contract.clone()));
+            contracts.entry(version.to_owned()).or_default().push((name.clone(), contract.clone()));
         }
         contracts
     }
@@ -477,7 +474,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     }
 
     /// Returns the source graph of the project.
-    pub fn graph(&self) -> &GraphEdges<C::Parser> {
+    pub const fn graph(&self) -> &GraphEdges<C::Parser> {
         &self.edges
     }
 }
@@ -565,12 +562,12 @@ impl<C: Compiler> Default for AggregatedCompilerOutput<C> {
 
 impl<C: Compiler> AggregatedCompilerOutput<C> {
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub fn slash_paths(&mut self) {
+    pub const fn slash_paths(&mut self) {
         self.sources.slash_paths();
         self.contracts.slash_paths();
     }
 
-    pub fn diagnostics<'a>(
+    pub const fn diagnostics<'a>(
         &'a self,
         ignored_error_codes: &'a [u64],
         ignored_error_codes_from: &'a [(PathBuf, Vec<u64>)],

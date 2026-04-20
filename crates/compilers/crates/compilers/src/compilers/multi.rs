@@ -75,11 +75,11 @@ impl Default for MultiCompilerLanguage {
 }
 
 impl MultiCompilerLanguage {
-    pub fn is_vyper(&self) -> bool {
+    pub const fn is_vyper(&self) -> bool {
         matches!(self, Self::Vyper(_))
     }
 
-    pub fn is_solc(&self) -> bool {
+    pub const fn is_solc(&self) -> bool {
         matches!(self, Self::Solc(_))
     }
 }
@@ -118,22 +118,22 @@ pub struct MultiCompilerParser {
 
 impl MultiCompilerParser {
     /// Returns the parser used to parse Solc sources.
-    pub fn solc(&self) -> &SolParser {
+    pub const fn solc(&self) -> &SolParser {
         &self.solc
     }
 
     /// Returns the parser used to parse Solc sources.
-    pub fn solc_mut(&mut self) -> &mut SolParser {
+    pub const fn solc_mut(&mut self) -> &mut SolParser {
         &mut self.solc
     }
 
     /// Returns the parser used to parse Vyper sources.
-    pub fn vyper(&self) -> &VyperParser {
+    pub const fn vyper(&self) -> &VyperParser {
         &self.vyper
     }
 
     /// Returns the parser used to parse Vyper sources.
-    pub fn vyper_mut(&mut self) -> &mut VyperParser {
+    pub const fn vyper_mut(&mut self) -> &mut VyperParser {
         &mut self.vyper
     }
 }
@@ -158,14 +158,14 @@ impl From<VyperParsedSource> for MultiCompilerParsedSource {
 }
 
 impl MultiCompilerParsedSource {
-    fn solc(&self) -> Option<&SolData> {
+    const fn solc(&self) -> Option<&SolData> {
         match self {
             Self::Solc(parsed) => Some(parsed),
             _ => None,
         }
     }
 
-    fn vyper(&self) -> Option<&VyperParsedSource> {
+    const fn vyper(&self) -> Option<&VyperParsedSource> {
         match self {
             Self::Vyper(parsed) => Some(parsed),
             _ => None,
@@ -271,7 +271,7 @@ impl From<MultiCompilerSettings> for VyperSettings {
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum MultiCompilerInput {
-    Solc(SolcVersionedInput),
+    Solc(Box<SolcVersionedInput>),
     Vyper(VyperVersionedInput),
 }
 
@@ -286,9 +286,9 @@ impl CompilerInput for MultiCompilerInput {
         version: Version,
     ) -> Self {
         match language {
-            MultiCompilerLanguage::Solc(language) => {
-                Self::Solc(SolcVersionedInput::build(sources, settings.solc, language, version))
-            }
+            MultiCompilerLanguage::Solc(language) => Self::Solc(Box::new(
+                SolcVersionedInput::build(sources, settings.solc, language, version),
+            )),
             MultiCompilerLanguage::Vyper(language) => {
                 Self::Vyper(VyperVersionedInput::build(sources, settings.vyper, language, version))
             }

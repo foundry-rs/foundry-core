@@ -12,7 +12,7 @@ pub enum Jump {
 
 impl Jump {
     /// Returns the string representation of the jump instruction.
-    pub fn to_str(self) -> &'static str {
+    pub const fn to_str(self) -> &'static str {
         match self {
             Self::In => "i",
             Self::Out => "o",
@@ -20,7 +20,7 @@ impl Jump {
         }
     }
 
-    fn to_int(self) -> u32 {
+    const fn to_int(self) -> u32 {
         match self {
             Self::In => 0,
             Self::Out => 1,
@@ -208,25 +208,25 @@ impl Default for SourceElement {
 
 impl SourceElement {
     /// Creates a new source element with default values.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { offset: 0, length: 0, index: -1, jump_and_modifier_depth: 0 }
     }
 
     /// Creates a new source element with default values.
     #[deprecated = "use `new` instead"]
-    pub fn new_invalid() -> Self {
+    pub const fn new_invalid() -> Self {
         Self::new()
     }
 
     /// The byte-offset to the start of the range in the source file.
     #[inline]
-    pub fn offset(&self) -> u32 {
+    pub const fn offset(&self) -> u32 {
         self.offset
     }
 
     /// The length of the source range in bytes.
     #[inline]
-    pub fn length(&self) -> u32 {
+    pub const fn length(&self) -> u32 {
         self.length
     }
 
@@ -237,7 +237,7 @@ impl SourceElement {
     /// sections stemming from compiler-generated inline assembly statements.
     /// This case is represented as a `None` value.
     #[inline]
-    pub fn index(&self) -> Option<u32> {
+    pub const fn index(&self) -> Option<u32> {
         if self.index == -1 { None } else { Some(self.index as u32) }
     }
 
@@ -245,7 +245,7 @@ impl SourceElement {
     ///
     /// See [`Self::index`] for more information.
     #[inline]
-    pub fn index_i32(&self) -> i32 {
+    pub const fn index_i32(&self) -> i32 {
         self.index
     }
 
@@ -256,7 +256,7 @@ impl SourceElement {
     }
 
     #[inline]
-    fn set_jump(&mut self, jump: Jump) {
+    const fn set_jump(&mut self, jump: Jump) {
         self.set_jump_and_modifier_depth(jump, self.modifier_depth());
     }
 
@@ -265,7 +265,7 @@ impl SourceElement {
     /// This depth is increased whenever the placeholder statement (`_`) is entered in a modifier
     /// and decreased when it is left again.
     #[inline]
-    pub fn modifier_depth(&self) -> u32 {
+    pub const fn modifier_depth(&self) -> u32 {
         (self.jump_and_modifier_depth << 2) >> 2
     }
 
@@ -279,7 +279,7 @@ impl SourceElement {
     }
 
     #[inline]
-    fn set_jump_and_modifier_depth(&mut self, jump: Jump, modifier_depth: u32) {
+    const fn set_jump_and_modifier_depth(&mut self, jump: Jump, modifier_depth: u32) {
         self.jump_and_modifier_depth = (jump.to_int() << 30) | modifier_depth;
     }
 }

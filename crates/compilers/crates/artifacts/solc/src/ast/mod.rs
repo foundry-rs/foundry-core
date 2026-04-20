@@ -760,7 +760,7 @@ ast_node!(
 
 impl FunctionDefinition {
     /// The kind of function this node defines.
-    pub fn kind(&self) -> &FunctionKind {
+    pub const fn kind(&self) -> &FunctionKind {
         if let Some(kind) = &self.kind {
             kind
         } else if self.is_constructor {
@@ -774,7 +774,7 @@ impl FunctionDefinition {
     ///
     /// Note: Before Solidity 0.5.x, this is an approximation, as there was no distinction between
     /// `view` and `pure`.
-    pub fn state_mutability(&self) -> &StateMutability {
+    pub const fn state_mutability(&self) -> &StateMutability {
         if let Some(state_mutability) = &self.state_mutability {
             state_mutability
         } else if self.is_declared_const {
@@ -1122,24 +1122,26 @@ mod tests {
 
     #[test]
     fn can_parse_ast() {
-        fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data").join("ast"))
-            .unwrap()
-            .for_each(|path| {
-                let path = path.unwrap().path();
-                let path_str = path.to_string_lossy();
+        for path in fs::read_dir(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data").join("ast"),
+        )
+        .unwrap()
+        {
+            let path = path.unwrap().path();
+            let path_str = path.to_string_lossy();
 
-                let input = fs::read_to_string(&path).unwrap();
-                let deserializer = &mut serde_json::Deserializer::from_str(&input);
-                let result: Result<SourceUnit, _> = serde_path_to_error::deserialize(deserializer);
-                match result {
-                    Err(e) => {
-                        println!("... {path_str} fail: {e}");
-                        panic!();
-                    }
-                    Ok(_) => {
-                        println!("... {path_str} ok");
-                    }
+            let input = fs::read_to_string(&path).unwrap();
+            let deserializer = &mut serde_json::Deserializer::from_str(&input);
+            let result: Result<SourceUnit, _> = serde_path_to_error::deserialize(deserializer);
+            match result {
+                Err(e) => {
+                    println!("... {path_str} fail: {e}");
+                    panic!();
                 }
-            })
+                Ok(_) => {
+                    println!("... {path_str} ok");
+                }
+            }
+        }
     }
 }

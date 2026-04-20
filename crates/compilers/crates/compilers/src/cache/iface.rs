@@ -50,17 +50,17 @@ pub(crate) fn interface_representation_ast(
                 // If function is not exposed we remove the entire span (signature and
                 // body). Otherwise we keep function signature and
                 // remove only the body.
-                if !is_exposed {
-                    spans_to_remove.push(contract_item.span);
-                } else {
+                if is_exposed {
                     spans_to_remove.push(function.body_span);
+                } else {
+                    spans_to_remove.push(contract_item.span);
                 }
             }
         }
     }
     let updates =
         spans_to_remove.iter().map(|&span| (sess.source_map().span_to_range(span).unwrap(), ""));
-    let content = replace_source_content(content, updates).replace("\n", "");
+    let content = replace_source_content(content, updates).replace('\n', "");
     crate::utils::RE_TWO_OR_MORE_SPACES.replace_all(&content, "").into_owned()
 }
 

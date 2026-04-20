@@ -165,7 +165,7 @@ impl fmt::Display for Remapping {
 
 impl Remapping {
     /// Converts any `\\` separators in the `path` to `/`.
-    pub fn slash_path(&mut self) {
+    pub const fn slash_path(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathExt;

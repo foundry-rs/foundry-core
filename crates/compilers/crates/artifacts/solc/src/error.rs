@@ -191,32 +191,32 @@ impl fmt::Display for Error {
 
 impl Error {
     /// The style of the diagnostic severity.
-    pub fn error_style(&self) -> Style {
+    pub const fn error_style(&self) -> Style {
         self.severity.color().bold()
     }
 
     /// The style of the diagnostic message.
-    pub fn message_style() -> Style {
+    pub const fn message_style() -> Style {
         Color::White.bold()
     }
 
     /// The style of the secondary source location.
-    pub fn secondary_style() -> Style {
+    pub const fn secondary_style() -> Style {
         Color::Cyan.bold()
     }
 
     /// The style of the source location highlight.
-    pub fn highlight_style() -> Style {
+    pub const fn highlight_style() -> Style {
         Style::new().fg(Color::Yellow)
     }
 
     /// The style of the diagnostics.
-    pub fn diag_style() -> Style {
+    pub const fn diag_style() -> Style {
         Color::Yellow.bold()
     }
 
     /// The style of the source location frame.
-    pub fn frame_style() -> Style {
+    pub const fn frame_style() -> Style {
         Style::new().fg(Color::Blue)
     }
 

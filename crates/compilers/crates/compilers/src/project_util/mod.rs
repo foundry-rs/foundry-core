@@ -197,21 +197,21 @@ impl<C: Compiler + Default, T: ArtifactOutput<CompilerContract = C::CompilerCont
         Ok(project)
     }
 
-    pub fn project(&self) -> &Project<C, T> {
+    pub const fn project(&self) -> &Project<C, T> {
         &self.inner
     }
 
-    pub fn project_mut(&mut self) -> &mut Project<C, T> {
+    pub const fn project_mut(&mut self) -> &mut Project<C, T> {
         &mut self.inner
     }
 
     /// The configured paths of the project
-    pub fn paths(&self) -> &ProjectPathsConfig<C::Language> {
+    pub const fn paths(&self) -> &ProjectPathsConfig<C::Language> {
         &self.project().paths
     }
 
     /// The configured paths of the project
-    pub fn paths_mut(&mut self) -> &mut ProjectPathsConfig<C::Language> {
+    pub const fn paths_mut(&mut self) -> &mut ProjectPathsConfig<C::Language> {
         &mut self.project_mut().paths
     }
 
@@ -338,17 +338,17 @@ contract {name} {{}}
     }
 
     /// Returns the path to the artifacts directory
-    pub fn artifacts_path(&self) -> &PathBuf {
+    pub const fn artifacts_path(&self) -> &PathBuf {
         &self.paths().artifacts
     }
 
     /// Returns the path to the sources directory
-    pub fn sources_path(&self) -> &PathBuf {
+    pub const fn sources_path(&self) -> &PathBuf {
         &self.paths().sources
     }
 
     /// Returns the path to the cache file
-    pub fn cache_path(&self) -> &PathBuf {
+    pub const fn cache_path(&self) -> &PathBuf {
         &self.paths().cache
     }
 
@@ -513,7 +513,7 @@ impl ArtifactsSnapshot<ConfigurableContractArtifact, MultiCompilerSettings> {
 }
 
 /// commonly used options for copying entire folders
-fn dir_copy_options() -> dir::CopyOptions {
+const fn dir_copy_options() -> dir::CopyOptions {
     dir::CopyOptions {
         overwrite: true,
         skip_exist: false,
@@ -525,7 +525,7 @@ fn dir_copy_options() -> dir::CopyOptions {
 }
 
 /// commonly used options for copying files
-fn file_copy_options() -> file::CopyOptions {
+const fn file_copy_options() -> file::CopyOptions {
     file::CopyOptions {
         overwrite: true,
         skip_exist: false,

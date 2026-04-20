@@ -125,7 +125,7 @@ impl SolcIoError {
     }
 
     /// The underlying `io::Error`
-    pub fn source(&self) -> &io::Error {
+    pub const fn source(&self) -> &io::Error {
         &self.io
     }
 }

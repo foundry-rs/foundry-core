@@ -2,14 +2,13 @@
 name = "foundry-compilers-artifacts"
 description = "Rust bindings for compilers JSON artifacts"
 
-version.workspace = true
+version = "0.19.14"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-exclude.workspace = true
 
 [lints]
 workspace = true

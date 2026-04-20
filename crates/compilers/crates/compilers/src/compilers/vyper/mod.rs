@@ -46,10 +46,10 @@ impl<'de> serde::Deserialize<'de> for VyperLanguage {
         D: serde::Deserializer<'de>,
     {
         let res = String::deserialize(deserializer)?;
-        if res != "vyper" {
-            Err(serde::de::Error::custom(format!("Invalid Vyper language: {res}")))
-        } else {
+        if res == "vyper" {
             Ok(Self)
+        } else {
+            Err(serde::de::Error::custom(format!("Invalid Vyper language: {res}")))
         }
     }
 }
@@ -186,7 +186,7 @@ impl Vyper {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 Ok(Version::from_str(
-                    &stdout.trim().replace("rc", "-rc").replace("b", "-b").replace("a", "-a"),
+                    &stdout.trim().replace("rc", "-rc").replace('b', "-b").replace('a', "-a"),
                 )?)
             } else {
                 Err(SolcError::solc_output(&output))

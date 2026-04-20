@@ -179,11 +179,11 @@ impl MockProjectGenerator {
         self.populate_imports(settings)
     }
 
-    fn next_file_id(&self) -> usize {
+    const fn next_file_id(&self) -> usize {
         self.inner.files.len()
     }
 
-    fn next_lib_id(&self) -> usize {
+    const fn next_lib_id(&self) -> usize {
         self.inner.libraries.len()
     }
 
@@ -428,7 +428,7 @@ pub struct MockFile {
 
 impl MockFile {
     /// Returns `true` if this file is part of an external lib
-    pub fn is_external(&self) -> bool {
+    pub const fn is_external(&self) -> bool {
         self.lib_id.is_some()
     }
 
@@ -503,7 +503,7 @@ pub enum MockImport {
 }
 
 impl MockImport {
-    pub fn file_id(&self) -> usize {
+    pub const fn file_id(&self) -> usize {
         *match self {
             Self::Internal(id) => id,
             Self::External(_, id) => id,
@@ -525,11 +525,11 @@ pub struct MockLib {
 }
 
 impl MockLib {
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.num_files
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
@@ -567,7 +567,7 @@ impl MockProjectSettings {
     }
 
     /// Generates settings for a large project
-    pub fn large() -> Self {
+    pub const fn large() -> Self {
         // arbitrary thresholds
         Self {
             num_sources: 35,

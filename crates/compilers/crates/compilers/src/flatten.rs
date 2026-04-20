@@ -39,7 +39,7 @@ impl ItemLocation {
         Some(Self { path, start, end })
     }
 
-    fn length(&self) -> usize {
+    const fn length(&self) -> usize {
         self.end - self.start
     }
 }
@@ -89,7 +89,7 @@ impl Visitor for ReferencesCollector {
             self.references.entry(referenced_declaration).or_default().insert(ItemLocation {
                 start,
                 end,
-                path: self.path.to_path_buf(),
+                path: self.path.clone(),
             });
         }
     }
@@ -307,7 +307,7 @@ impl Flattener {
         let mut top_level_names = HashMap::new();
 
         for (name, ids) in top_level_definitions {
-            let mut definition_name = name.to_string();
+            let mut definition_name = name.clone();
             let needs_rename = ids.len() > 1;
 
             let mut ids = ids.clone().into_iter().collect::<Vec<_>>();
@@ -448,11 +448,8 @@ impl Flattener {
             let exported_symbols = ast
                 .exported_symbols
                 .iter()
-                .filter_map(
-                    |(name, ids)| {
-                        if !ids.is_empty() { Some((name.as_str(), ids[0])) } else { None }
-                    },
-                )
+                .filter(|(_, ids)| !ids.is_empty())
+                .map(|(name, ids)| (name.as_str(), ids[0]))
                 .collect::<HashMap<_, _>>();
 
             // Collect all docs in all contracts
@@ -519,14 +516,14 @@ impl Flattener {
 
                         if let Some(new_name) = new_name {
                             trace!("updating tag value with {new_name}");
-                            updates.entry(path.to_path_buf()).or_default().insert((
+                            updates.entry(path.clone()).or_default().insert((
                                 src_start + name_start,
                                 src_start + name_end,
-                                new_name.to_string(),
+                                new_name.clone(),
                             ));
                         } else {
                             trace!("name is unknown, removing @inheritdoc tag");
-                            updates.entry(path.to_path_buf()).or_default().insert((
+                            updates.entry(path.clone()).or_default().insert((
                                 src_start + tag_start,
                                 src_start + name_end,
                                 String::new(),

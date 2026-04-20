@@ -37,12 +37,12 @@ impl Clone for SolParser {
 
 impl SolParser {
     /// Returns a reference to the compiler.
-    pub fn compiler(&self) -> &solar::sema::Compiler {
+    pub const fn compiler(&self) -> &solar::sema::Compiler {
         &self.compiler
     }
 
     /// Returns a mutable reference to the compiler.
-    pub fn compiler_mut(&mut self) -> &mut solar::sema::Compiler {
+    pub const fn compiler_mut(&mut self) -> &mut solar::sema::Compiler {
         &mut self.compiler
     }
 
@@ -320,8 +320,8 @@ pub enum SolImportAlias {
 }
 
 impl SolImport {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path, aliases: vec![] }
+    pub const fn new(path: PathBuf) -> Self {
+        Self { path, aliases: Vec::new() }
     }
 
     pub fn path(&self) -> &Path {
@@ -353,7 +353,7 @@ impl SolLibrary {
     /// ABI, they can take parameters of internal types like mappings or storage references.
     ///
     /// See also <https://docs.soliditylang.org/en/latest/contracts.html#libraries>
-    pub fn is_inlined(&self) -> bool {
+    pub const fn is_inlined(&self) -> bool {
         self.is_inlined
     }
 }
@@ -369,12 +369,12 @@ pub struct Spanned<T> {
 
 impl<T> Spanned<T> {
     /// Creates a new data unit with the given data and location.
-    pub fn new(data: T, span: Range<usize>) -> Self {
+    pub const fn new(data: T, span: Range<usize>) -> Self {
         Self { data, span }
     }
 
     /// Returns the underlying data.
-    pub fn data(&self) -> &T {
+    pub const fn data(&self) -> &T {
         &self.data
     }
 
@@ -386,7 +386,7 @@ impl<T> Spanned<T> {
     /// Returns the location adjusted by an offset.
     ///
     /// Used to determine new position of the unit within the file after content manipulation.
-    pub fn loc_by_offset(&self, offset: isize) -> Range<usize> {
+    pub const fn loc_by_offset(&self, offset: isize) -> Range<usize> {
         utils::range_by_offset(&self.span, offset)
     }
 }

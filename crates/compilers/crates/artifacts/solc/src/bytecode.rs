@@ -85,7 +85,7 @@ impl CompactBytecode {
     }
 
     /// Returns the bytes of the bytecode object.
-    pub fn bytes(&self) -> Option<&Bytes> {
+    pub const fn bytes(&self) -> Option<&Bytes> {
         self.object.as_bytes()
     }
 
@@ -179,7 +179,7 @@ impl Bytecode {
         S: AsRef<str>,
         T: AsRef<str>,
     {
-        for (file, lib, addr) in libs.into_iter() {
+        for (file, lib, addr) in libs {
             if self.link(file.as_ref(), lib.as_ref(), addr) {
                 return true;
             }
@@ -193,7 +193,7 @@ impl Bytecode {
         I: IntoIterator<Item = (S, Address)>,
         S: AsRef<str>,
     {
-        for (name, addr) in libs.into_iter() {
+        for (name, addr) in libs {
             if self.link_fully_qualified(name.as_ref(), addr) {
                 return true;
             }
@@ -202,7 +202,7 @@ impl Bytecode {
     }
 
     /// Returns a reference to the underlying `Bytes` if the object is a valid bytecode.
-    pub fn bytes(&self) -> Option<&Bytes> {
+    pub const fn bytes(&self) -> Option<&Bytes> {
         self.object.as_bytes()
     }
 
@@ -226,7 +226,7 @@ pub enum BytecodeObject {
 
 impl BytecodeObject {
     /// Returns a reference to the underlying `Bytes` if the object is a valid bytecode.
-    pub fn as_bytes(&self) -> Option<&Bytes> {
+    pub const fn as_bytes(&self) -> Option<&Bytes> {
         match self {
             Self::Bytecode(bytes) => Some(bytes),
             Self::Unlinked(_) => None,
@@ -249,7 +249,7 @@ impl BytecodeObject {
     }
 
     /// Returns a reference to the underlying `String` if the object is unlinked.
-    pub fn as_str(&self) -> Option<&str> {
+    pub const fn as_str(&self) -> Option<&str> {
         match self {
             Self::Bytecode(_) => None,
             Self::Unlinked(s) => Some(s.as_str()),
@@ -265,12 +265,12 @@ impl BytecodeObject {
     }
 
     /// Whether this object is still unlinked.
-    pub fn is_unlinked(&self) -> bool {
+    pub const fn is_unlinked(&self) -> bool {
         matches!(self, Self::Unlinked(_))
     }
 
     /// Whether this object a valid bytecode.
-    pub fn is_bytecode(&self) -> bool {
+    pub const fn is_bytecode(&self) -> bool {
         matches!(self, Self::Bytecode(_))
     }
 
@@ -322,7 +322,7 @@ impl BytecodeObject {
         S: AsRef<str>,
         T: AsRef<str>,
     {
-        for (file, lib, addr) in libs.into_iter() {
+        for (file, lib, addr) in libs {
             self.link(file.as_ref(), lib.as_ref(), addr);
         }
         self

@@ -19,7 +19,7 @@ use winnow::{
     token::{take_till, take_while},
 };
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VyperImport {
     pub level: usize,
     pub path: Option<String>,

@@ -11,7 +11,7 @@ use std::{borrow::Cow, collections::btree_map::BTreeMap};
 pub const HH_ARTIFACT_VERSION: &str = "hh-sol-artifact-1";
 
 /// A hardhat artifact
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HardhatArtifact {
     #[serde(rename = "_format")]

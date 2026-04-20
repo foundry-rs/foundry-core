@@ -458,7 +458,7 @@ impl Solc {
     }
 
     /// Returns the SemVer [`Version`], stripping the pre-release and build metadata.
-    pub fn version_short(&self) -> Version {
+    pub const fn version_short(&self) -> Version {
         Version::new(self.version.major, self.version.minor, self.version.patch)
     }
 
@@ -748,10 +748,10 @@ mod tests {
     fn test_version_req() {
         let versions = ["=0.1.2", "^0.5.6", ">=0.7.1", ">0.8.0"];
 
-        versions.iter().for_each(|version| {
+        for version in &versions {
             let version_req = SolData::parse_version_req(version).unwrap();
             assert_eq!(version_req, VersionReq::from_str(version).unwrap());
-        });
+        }
 
         // Solidity defines version ranges with a space, whereas the semver package
         // requires them to be separated with a comma

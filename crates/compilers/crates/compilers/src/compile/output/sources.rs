@@ -14,7 +14,7 @@ pub struct VersionedSourceFiles(pub BTreeMap<PathBuf, Vec<VersionedSourceFile>>)
 
 impl VersionedSourceFiles {
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub fn slash_paths(&mut self) {
+    pub const fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathExt;
@@ -71,9 +71,9 @@ impl VersionedSourceFiles {
     /// Same as [Self::find_file] but also checks for version
     pub fn find_file_and_version(&self, path: &Path, version: &Version) -> Option<&SourceFile> {
         self.0.get(path).and_then(|contracts| {
-            contracts.iter().find_map(|source| {
-                if source.version == *version { Some(&source.source_file) } else { None }
-            })
+            contracts
+                .iter()
+                .find_map(|source| (source.version == *version).then_some(&source.source_file))
         })
     }
 
@@ -113,7 +113,7 @@ impl VersionedSourceFiles {
     /// ```
     pub fn remove_by_path(&mut self, path: &Path) -> Option<SourceFile> {
         self.0.get_mut(path).and_then(|all_sources| {
-            if !all_sources.is_empty() { Some(all_sources.remove(0).source_file) } else { None }
+            (!all_sources.is_empty()).then(|| all_sources.remove(0).source_file)
         })
     }
 

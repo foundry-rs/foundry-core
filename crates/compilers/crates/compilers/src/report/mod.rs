@@ -148,7 +148,7 @@ pub trait Reporter: 'static + std::fmt::Debug {
     /// with the provided `TypeId`. Failure to ensure this will result in
     /// undefined behaviour, so implementing `downcast_raw` is unsafe.
     unsafe fn downcast_raw(&self, id: TypeId) -> Option<NonNull<()>> {
-        if id == TypeId::of::<Self>() { Some(NonNull::from(self).cast()) } else { None }
+        (id == TypeId::of::<Self>()).then(|| NonNull::from(self).cast())
     }
 }
 

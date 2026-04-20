@@ -79,7 +79,7 @@ pub fn capture_outer_and_inner<'a>(
         .captures_iter(content)
         .filter_map(|cap| {
             let cap_match = names.iter().find_map(|name| cap.name(name));
-            cap_match.and_then(|m| cap.get(0).map(|outer| (outer.to_owned(), m)))
+            cap.get(0).zip(cap_match)
         })
         .collect()
 }

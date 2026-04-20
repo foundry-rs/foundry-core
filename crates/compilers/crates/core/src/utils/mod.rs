@@ -105,7 +105,7 @@ fn encode_hash(x: u64) -> String {
 }
 
 /// Move a range by a specified offset
-pub fn range_by_offset(range: &Range<usize>, offset: isize) -> Range<usize> {
+pub const fn range_by_offset(range: &Range<usize>, offset: isize) -> Range<usize> {
     Range {
         start: offset.saturating_add(range.start as isize) as usize,
         end: offset.saturating_add(range.end as isize) as usize,
@@ -392,7 +392,7 @@ pub fn common_ancestor(a: &Path, b: &Path) -> Option<PathBuf> {
             break;
         }
     }
-    if found { Some(ret) } else { None }
+    found.then_some(ret)
 }
 
 /// Returns the right subpath in a dir

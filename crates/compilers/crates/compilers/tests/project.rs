@@ -2689,7 +2689,7 @@ fn can_create_standard_json_input_with_external_file() {
         .unwrap()
         .errors
         .into_iter()
-        .filter_map(|e| if e.severity.is_error() { Some(e.message) } else { None })
+        .filter_map(|e| e.severity.is_error().then_some(e.message))
         .collect::<Vec<_>>();
     assert!(compiler_errors.is_empty(), "{compiler_errors:?}");
 }
@@ -2778,7 +2778,7 @@ fn can_create_standard_json_input_with_symlink() {
         .unwrap()
         .errors
         .into_iter()
-        .filter_map(|e| if e.severity.is_error() { Some(e.message) } else { None })
+        .filter_map(|e| e.severity.is_error().then_some(e.message))
         .collect::<Vec<_>>();
     assert!(compiler_errors.is_empty(), "{compiler_errors:?}");
 }
@@ -4705,7 +4705,7 @@ contract Test is PBTSimple {
             .unwrap()
             .errors
             .into_iter()
-            .filter_map(|e| if e.severity.is_error() { Some(e.message) } else { None })
+            .filter_map(|e| e.severity.is_error().then_some(e.message))
             .collect();
         assert!(
             compiler_errors.is_empty(),

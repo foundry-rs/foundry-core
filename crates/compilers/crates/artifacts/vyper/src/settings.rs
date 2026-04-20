@@ -71,8 +71,8 @@ impl VyperSettings {
     /// Sanitize the output selection.
     #[allow(clippy::collapsible_if)]
     pub fn sanitize_output_selection(&mut self, version: &Version) {
-        self.output_selection.0.values_mut().for_each(|selection| {
-            selection.values_mut().for_each(|selection| {
+        for selection in self.output_selection.0.values_mut() {
+            for selection in selection.values_mut() {
                 // During caching we prune output selection for some of the sources, however, Vyper
                 // will reject `[]` as an output selection, so we are adding "abi" as a default
                 // output selection which is cheap to be produced.
@@ -104,8 +104,8 @@ impl VyperSettings {
 
                     true
                 });
-            })
-        });
+            }
+        }
     }
 
     /// Sanitize the settings based on the compiler version.

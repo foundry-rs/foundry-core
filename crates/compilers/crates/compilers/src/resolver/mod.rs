@@ -147,17 +147,17 @@ impl<P: SourceParser> Default for GraphEdges<P> {
 
 impl<P: SourceParser> GraphEdges<P> {
     /// Returns the parser used to parse the sources.
-    pub fn parser(&self) -> &P {
+    pub const fn parser(&self) -> &P {
         self.parser.as_ref().unwrap()
     }
 
     /// Returns the parser used to parse the sources.
-    pub fn parser_mut(&mut self) -> &mut P {
+    pub const fn parser_mut(&mut self) -> &mut P {
         self.parser.as_mut().unwrap()
     }
 
     /// How many files are source files
-    pub fn num_source_files(&self) -> usize {
+    pub const fn num_source_files(&self) -> usize {
         self.num_input_files
     }
 
@@ -177,12 +177,12 @@ impl<P: SourceParser> GraphEdges<P> {
     }
 
     /// Returns all additional `--include-paths`
-    pub fn include_paths(&self) -> &BTreeSet<PathBuf> {
+    pub const fn include_paths(&self) -> &BTreeSet<PathBuf> {
         &self.resolved_solc_include_paths
     }
 
     /// Returns all imports that we failed to resolve
-    pub fn unresolved_imports(&self) -> &HashSet<(PathBuf, PathBuf)> {
+    pub const fn unresolved_imports(&self) -> &HashSet<(PathBuf, PathBuf)> {
         &self.unresolved_imports
     }
 
@@ -267,7 +267,7 @@ type L<P> = <<P as SourceParser>::ParsedSource as ParsedSource>::Language;
 
 impl<P: SourceParser> Graph<P> {
     /// Returns the parser used to parse the sources.
-    pub fn parser(&self) -> &P {
+    pub const fn parser(&self) -> &P {
         self.edges.parser()
     }
 
@@ -299,12 +299,12 @@ impl<P: SourceParser> Graph<P> {
     }
 
     /// Returns all the resolved files and their index in the graph.
-    pub fn files(&self) -> &HashMap<PathBuf, usize> {
+    pub const fn files(&self) -> &HashMap<PathBuf, usize> {
         &self.edges.indices
     }
 
     /// Returns `true` if the graph is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
@@ -455,7 +455,7 @@ impl<P: SourceParser> Graph<P> {
                     .err(),
                     Err(err) => Some(err),
                 } {
-                    unresolved_imports.insert((import_path.to_path_buf(), node.path.clone()));
+                    unresolved_imports.insert((import_path.clone(), node.path.clone()));
                     trace!("failed to resolve import component \"{:?}\" for {:?}", err, node.path)
                 }
             }
@@ -737,29 +737,24 @@ impl<P: SourceParser> Graph<P> {
             // check if the version is even valid
             let f = utils::source_name(&failed_node.path, &self.root).display();
             return Err(format!("Encountered invalid solc version in {f}: {version_err}"));
-        } else {
-            // if the node requirement makes sense, it means that there is at least one node
-            // which requirement conflicts with it
+        }
 
-            // retain only versions compatible with the `failed_node`
-            if let Some(req) = self.version_requirement(failed_node_idx, project) {
-                all_versions.retain(|v| req.matches(v.as_ref()));
-            }
+        // if the node requirement makes sense, it means that there is at least one node
+        // which requirement conflicts with it
 
-            // iterate over all the nodes once again and find the one incompatible
-            for node in &nodes {
-                if self.check_available_version(*node, &all_versions, project).is_err() {
-                    let mut msg = "Found incompatible versions:\n".white().to_string();
+        // retain only versions compatible with the `failed_node`
+        if let Some(req) = self.version_requirement(failed_node_idx, project) {
+            all_versions.retain(|v| req.matches(v.as_ref()));
+        }
 
-                    self.format_imports_list(
-                        idx,
-                        [*node, failed_node_idx].into(),
-                        project,
-                        &mut msg,
-                    )
+        // iterate over all the nodes once again and find the one incompatible
+        for node in &nodes {
+            if self.check_available_version(*node, &all_versions, project).is_err() {
+                let mut msg = "Found incompatible versions:\n".white().to_string();
+
+                self.format_imports_list(idx, [*node, failed_node_idx].into(), project, &mut msg)
                     .unwrap();
-                    return Err(msg);
-                }
+                return Err(msg);
             }
         }
 
@@ -1113,7 +1108,7 @@ pub struct Node<S> {
 }
 
 impl<S> Node<S> {
-    pub fn new(path: PathBuf, source: Source, data: S) -> Self {
+    pub const fn new(path: PathBuf, source: Source, data: S) -> Self {
         Self { path, source, data }
     }
 

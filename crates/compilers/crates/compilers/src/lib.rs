@@ -161,7 +161,7 @@ impl Project {
 
 impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler> Project<C, T> {
     /// Returns the handler that takes care of processing all artifacts
-    pub fn artifacts_handler(&self) -> &T {
+    pub const fn artifacts_handler(&self) -> &T {
         &self.artifacts
     }
 
@@ -541,27 +541,30 @@ impl<C: Compiler, T: ArtifactOutput<CompilerContract = C::CompilerContract>> Pro
     }
 
     #[must_use]
-    pub fn set_compiler_severity_filter(mut self, compiler_severity_filter: Severity) -> Self {
+    pub const fn set_compiler_severity_filter(
+        mut self,
+        compiler_severity_filter: Severity,
+    ) -> Self {
         self.compiler_severity_filter = compiler_severity_filter;
         self
     }
 
     /// Disables cached builds
     #[must_use]
-    pub fn ephemeral(self) -> Self {
+    pub const fn ephemeral(self) -> Self {
         self.set_cached(false)
     }
 
     /// Sets the cache status
     #[must_use]
-    pub fn set_cached(mut self, cached: bool) -> Self {
+    pub const fn set_cached(mut self, cached: bool) -> Self {
         self.cached = cached;
         self
     }
 
     /// Sets the build info value
     #[must_use]
-    pub fn set_build_info(mut self, build_info: bool) -> Self {
+    pub const fn set_build_info(mut self, build_info: bool) -> Self {
         self.build_info = build_info;
         self
     }
@@ -570,13 +573,13 @@ impl<C: Compiler, T: ArtifactOutput<CompilerContract = C::CompilerContract>> Pro
     ///
     /// Prevents network possible access to download/check solc installs
     #[must_use]
-    pub fn offline(self) -> Self {
+    pub const fn offline(self) -> Self {
         self.set_offline(true)
     }
 
     /// Sets the offline status
     #[must_use]
-    pub fn set_offline(mut self, offline: bool) -> Self {
+    pub const fn set_offline(mut self, offline: bool) -> Self {
         self.offline = offline;
         self
     }
@@ -585,20 +588,20 @@ impl<C: Compiler, T: ArtifactOutput<CompilerContract = C::CompilerContract>> Pro
     ///
     /// If set to `true` all `\\` separators are replaced with `/`, same as solc
     #[must_use]
-    pub fn set_slashed_paths(mut self, slashed_paths: bool) -> Self {
+    pub const fn set_slashed_paths(mut self, slashed_paths: bool) -> Self {
         self.slash_paths = slashed_paths;
         self
     }
 
     /// Disables writing artifacts to disk
     #[must_use]
-    pub fn no_artifacts(self) -> Self {
+    pub const fn no_artifacts(self) -> Self {
         self.set_no_artifacts(true)
     }
 
     /// Sets the no artifacts status
     #[must_use]
-    pub fn set_no_artifacts(mut self, artifacts: bool) -> Self {
+    pub const fn set_no_artifacts(mut self, artifacts: bool) -> Self {
         self.no_artifacts = artifacts;
         self
     }

@@ -143,14 +143,14 @@ impl SolcInput {
 
     /// Sets the EVM version for compilation
     #[must_use]
-    pub fn evm_version(mut self, version: EvmVersion) -> Self {
+    pub const fn evm_version(mut self, version: EvmVersion) -> Self {
         self.settings.evm_version = Some(version);
         self
     }
 
     /// Sets the optimizer runs (default = 200)
     #[must_use]
-    pub fn optimizer(mut self, runs: usize) -> Self {
+    pub const fn optimizer(mut self, runs: usize) -> Self {
         self.settings.optimizer.runs(runs);
         self
     }
@@ -196,7 +196,7 @@ pub struct StandardJsonCompilerInput {
 // === impl StandardJsonCompilerInput ===
 
 impl StandardJsonCompilerInput {
-    pub fn new(sources: Vec<(PathBuf, Source)>, settings: Settings) -> Self {
+    pub const fn new(sources: Vec<(PathBuf, Source)>, settings: Settings) -> Self {
         Self { language: SolcLanguage::Solidity, sources, settings }
     }
 
@@ -444,14 +444,14 @@ impl Settings {
 
     /// Sets the `viaIR` value.
     #[must_use]
-    pub fn set_via_ir(mut self, via_ir: bool) -> Self {
+    pub const fn set_via_ir(mut self, via_ir: bool) -> Self {
         self.via_ir = Some(via_ir);
         self
     }
 
     /// Enables `viaIR`.
     #[must_use]
-    pub fn with_via_ir(self) -> Self {
+    pub const fn with_via_ir(self) -> Self {
         self.set_via_ir(true)
     }
 
@@ -636,7 +636,7 @@ impl Libraries {
     }
 
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub fn slash_paths(&mut self) {
+    pub const fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathBufExt;
@@ -681,15 +681,15 @@ pub struct Optimizer {
 }
 
 impl Optimizer {
-    pub fn runs(&mut self, runs: usize) {
+    pub const fn runs(&mut self, runs: usize) {
         self.runs = Some(runs);
     }
 
-    pub fn disable(&mut self) {
+    pub const fn disable(&mut self) {
         self.enabled.take();
     }
 
-    pub fn enable(&mut self) {
+    pub const fn enable(&mut self) {
         self.enabled = Some(true)
     }
 }
@@ -779,7 +779,7 @@ pub struct YulDetails {
 
 impl YulDetails {
     /// Returns true if no settings are set.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.stack_allocation.is_none() && self.optimizer_steps.is_none()
     }
 }
@@ -847,10 +847,10 @@ impl EvmVersion {
     /// Normalizes this EVM version by checking against the given Solc [`Version`].
     pub fn normalize_version_solc(self, version: &Version) -> Option<Self> {
         // The EVM version flag was only added in 0.4.21; we work our way backwards
-        if *version >= BYZANTIUM_SOLC {
+        (*version >= BYZANTIUM_SOLC).then(|| {
             // If the Solc version is the latest, it supports all EVM versions.
             // For all other cases, cap at the at-the-time highest possible fork.
-            let normalized = if *version >= OSAKA_SOLC {
+            if *version >= OSAKA_SOLC {
                 self
             } else if self >= Self::Prague && *version >= PRAGUE_SOLC {
                 Self::Prague
@@ -874,11 +874,8 @@ impl EvmVersion {
                 Self::Byzantium
             } else {
                 self
-            };
-            Some(normalized)
-        } else {
-            None
-        }
+            }
+        })
     }
 
     /// Returns the EVM version as a string.
@@ -1062,7 +1059,7 @@ pub struct SettingsMetadata {
 }
 
 impl SettingsMetadata {
-    pub fn new(hash: BytecodeHash, cbor: bool) -> Self {
+    pub const fn new(hash: BytecodeHash, cbor: bool) -> Self {
         Self { use_literal_content: None, bytecode_hash: Some(hash), cbor_metadata: Some(cbor) }
     }
 }
@@ -1545,7 +1542,7 @@ impl CompilerOutput {
 }
 
 /// A wrapper helper type for the `Contracts` type alias
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputContracts(pub Contracts);
 
 impl OutputContracts {

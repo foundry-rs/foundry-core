@@ -13,7 +13,7 @@ pub struct CompiledMany {
 }
 
 impl CompiledMany {
-    pub fn new(outputs: Vec<CompileElement>) -> Self {
+    pub const fn new(outputs: Vec<CompileElement>) -> Self {
         Self { outputs }
     }
 

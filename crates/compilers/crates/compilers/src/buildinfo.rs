@@ -52,7 +52,7 @@ impl<L: Language> BuildContext<L> {
         let input_sources = input.sources().map(|(path, _)| path).collect::<HashSet<_>>();
         for (path, source) in &output.sources {
             if input_sources.contains(path.as_path()) {
-                source_id_to_path.insert(source.id, path.to_path_buf());
+                source_id_to_path.insert(source.id, path.clone());
             }
         }
 

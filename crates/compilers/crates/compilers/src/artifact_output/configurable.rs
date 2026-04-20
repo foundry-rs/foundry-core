@@ -472,7 +472,7 @@ pub struct ExtraOutputValues {
 
 impl ExtraOutputValues {
     /// Returns an instance where all values are set to `true`
-    pub fn all() -> Self {
+    pub const fn all() -> Self {
         Self {
             ast: true,
             userdoc: true,
@@ -501,7 +501,7 @@ impl ExtraOutputValues {
         settings: impl IntoIterator<Item = ContractOutputSelection>,
     ) -> Self {
         let mut config = Self::default();
-        for value in settings.into_iter() {
+        for value in settings {
             match value {
                 ContractOutputSelection::DevDoc => {
                     config.devdoc = true;
@@ -603,7 +603,7 @@ pub struct ExtraOutputFiles {
 
 impl ExtraOutputFiles {
     /// Returns an instance where all values are set to `true`
-    pub fn all() -> Self {
+    pub const fn all() -> Self {
         Self {
             abi: true,
             metadata: true,
@@ -625,7 +625,7 @@ impl ExtraOutputFiles {
         settings: impl IntoIterator<Item = ContractOutputSelection>,
     ) -> Self {
         let mut config = Self::default();
-        for value in settings.into_iter() {
+        for value in settings {
             match value {
                 ContractOutputSelection::Abi => {
                     config.abi = true;
@@ -663,9 +663,9 @@ impl ExtraOutputFiles {
                     EvmOutputSelection::ByteCode(BytecodeOutputSelection::SourceMap) => {
                         config.source_map = true;
                     }
-                    EvmOutputSelection::DeployedByteCode(DeployedBytecodeOutputSelection::All)
-                    | EvmOutputSelection::DeployedByteCode(
-                        DeployedBytecodeOutputSelection::Object,
+                    EvmOutputSelection::DeployedByteCode(
+                        DeployedBytecodeOutputSelection::All
+                        | DeployedBytecodeOutputSelection::Object,
                     ) => {
                         config.deployed_bytecode = true;
                     }

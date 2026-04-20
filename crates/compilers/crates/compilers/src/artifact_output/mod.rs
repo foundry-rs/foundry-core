@@ -57,7 +57,7 @@ pub struct ArtifactId {
 
 impl ArtifactId {
     /// Converts any `\\` separators in the `path` to `/`
-    pub fn slash_paths(&mut self) {
+    pub const fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             self.path = self.path.to_slash_lossy().as_ref().into();
@@ -66,7 +66,7 @@ impl ArtifactId {
     }
 
     /// Convenience function fo [`Self::slash_paths()`]
-    pub fn with_slashed_paths(mut self) -> Self {
+    pub const fn with_slashed_paths(mut self) -> Self {
         self.slash_paths();
         self
     }
@@ -217,7 +217,7 @@ impl<T: Serialize> Artifacts<T> {
 
 impl<T> Artifacts<T> {
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub fn slash_paths(&mut self) {
+    pub const fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             self.0 = std::mem::take(&mut self.0)
@@ -799,7 +799,7 @@ pub trait ArtifactOutput {
         T: Into<PathBuf>,
     {
         let mut artifacts = BTreeMap::default();
-        for path in files.into_iter() {
+        for path in files {
             let path = path.into();
             let artifact = Self::read_cached_artifact(&path)?;
             artifacts.insert(path, artifact);
@@ -939,9 +939,9 @@ pub trait ArtifactOutput {
                     };
 
                     artifacts
-                        .entry(file.to_path_buf())
+                        .entry(file.clone())
                         .or_default()
-                        .entry(name.to_string())
+                        .entry(name.clone())
                         .or_default()
                         .push(artifact);
                 }

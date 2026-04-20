@@ -459,7 +459,7 @@ pub struct CacheEntry {
 
 impl CacheEntry {
     /// Returns the last modified timestamp `Duration`
-    pub fn last_modified(&self) -> Duration {
+    pub const fn last_modified(&self) -> Duration {
         Duration::from_millis(self.last_modification_date)
     }
 
@@ -531,7 +531,7 @@ impl CacheEntry {
         I: IntoIterator<Item = (&'a String, A)>,
         A: IntoIterator<Item = &'a ArtifactFile<T>>,
     {
-        for (name, artifacts) in artifacts.into_iter() {
+        for (name, artifacts) in artifacts {
             for artifact in artifacts {
                 self.artifacts
                     .entry(name.clone())
@@ -755,7 +755,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
             // If we are missing artifact for file, compile it.
             if self.is_missing_artifacts(file, version, profile) {
-                compile_complete.insert(file.to_path_buf());
+                compile_complete.insert(file.clone());
             }
 
             // Ensure that we have a cache entry for all sources.
@@ -878,12 +878,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 }
             }
 
-            if !self.cache.preprocessed {
-                // Perform DFS to find direct/indirect importers of dirty files.
-                for file in &self.dirty_sources.clone() {
-                    populate_dirty_files(file, &mut self.dirty_sources, &edges);
-                }
-            } else {
+            if self.cache.preprocessed {
                 // Mark sources as dirty based on their imports
                 for file in sources.keys() {
                     if self.dirty_sources.contains(file) {
@@ -912,6 +907,11 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                             self.dirty_sources.insert(file.clone());
                         }
                     }
+                }
+            } else {
+                // Perform DFS to find direct/indirect importers of dirty files.
+                for file in &self.dirty_sources.clone() {
+                    populate_dirty_files(file, &mut self.dirty_sources, &edges);
                 }
             }
         } else {
@@ -1132,7 +1132,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     }
 
     /// Returns the graph data for this project
-    pub fn graph(&self) -> &GraphEdges<C::Parser> {
+    pub const fn graph(&self) -> &GraphEdges<C::Parser> {
         match self {
             ArtifactsCache::Ephemeral(graph, _) => graph,
             ArtifactsCache::Cached(inner) => &inner.edges,
@@ -1143,7 +1143,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     #[allow(unused)]
     #[doc(hidden)]
     // only useful for debugging for debugging purposes
-    pub fn as_cached(&self) -> Option<&ArtifactsCacheInner<'a, T, C>> {
+    pub const fn as_cached(&self) -> Option<&ArtifactsCacheInner<'a, T, C>> {
         match self {
             ArtifactsCache::Ephemeral(..) => None,
             ArtifactsCache::Cached(cached) => Some(cached),
@@ -1157,7 +1157,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         }
     }
 
-    pub fn project(&self) -> &'a Project<C, T> {
+    pub const fn project(&self) -> &'a Project<C, T> {
         match self {
             ArtifactsCache::Ephemeral(_, project) => project,
             ArtifactsCache::Cached(cache) => cache.project,

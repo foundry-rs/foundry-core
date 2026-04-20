@@ -309,7 +309,7 @@ impl<L> ProjectPathsConfig<L> {
     }
 
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub fn slash_paths(&mut self) {
+    pub const fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathBufExt;
@@ -863,7 +863,7 @@ impl ProjectPathsConfigBuilder {
 
     pub fn libs(mut self, libs: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         let libraries = self.libraries.get_or_insert_with(Vec::new);
-        for lib in libs.into_iter() {
+        for lib in libs {
             libraries.push(utils::canonicalized(lib));
         }
         self
@@ -876,7 +876,7 @@ impl ProjectPathsConfigBuilder {
 
     pub fn remappings(mut self, remappings: impl IntoIterator<Item = Remapping>) -> Self {
         let our_remappings = self.remappings.get_or_insert_with(Vec::new);
-        for remapping in remappings.into_iter() {
+        for remapping in remappings {
             our_remappings.push(remapping);
         }
         self
@@ -1027,7 +1027,7 @@ impl SolcConfigBuilder {
         self
     }
 
-    pub fn ast(mut self, yes: bool) -> Self {
+    pub const fn ast(mut self, yes: bool) -> Self {
         self.ast = yes;
         self
     }

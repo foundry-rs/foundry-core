@@ -26,7 +26,7 @@ where
     C: CompilerContract,
 {
     /// Converts all `\\` separators in _all_ paths to `/`
-    pub fn slash_paths(&mut self) {
+    pub const fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathExt;

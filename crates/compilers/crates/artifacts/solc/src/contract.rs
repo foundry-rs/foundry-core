@@ -69,7 +69,7 @@ impl<'a> From<&'a Contract> for CompactContractBytecodeCow<'a> {
 ///
 /// Unlike `CompactContractSome` which contains the `BytecodeObject`, this holds the whole
 /// `Bytecode` object.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractBytecode {
     /// The Ethereum Contract ABI. If empty, it is represented as an empty
     /// array. See <https://docs.soliditylang.org/en/develop/abi-spec.html>
@@ -127,7 +127,7 @@ impl From<Contract> for ContractBytecode {
 ///
 /// Unlike `CompactContractSome` which contains the `BytecodeObject`, this holds the whole
 /// `Bytecode` object.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactContractBytecode {
     /// The Ethereum Contract ABI. If empty, it is represented as an empty
@@ -204,7 +204,7 @@ impl From<CompactContractBytecode> for ContractBytecode {
 }
 
 /// A [CompactContractBytecode] that is either owns or borrows its content
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactContractBytecodeCow<'a> {
     pub abi: Option<Cow<'a, JsonAbi>>,
@@ -257,7 +257,7 @@ impl<'a> From<&'a CompactContractBytecodeCow<'_>> for CompactContractBytecodeCow
 ///
 /// Unlike `CompactContractSome` which contains the `BytecodeObject`, this holds the whole
 /// `Bytecode` object.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractBytecodeSome {
     pub abi: JsonAbi,
     pub bytecode: Bytecode,
@@ -276,7 +276,7 @@ impl TryFrom<ContractBytecode> for ContractBytecodeSome {
 }
 
 /// Minimal representation of a contract's artifact with a present abi and bytecode.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactContractSome {
     /// The Ethereum Contract ABI. If empty, it is represented as an empty
     /// array. See <https://docs.soliditylang.org/en/develop/abi-spec.html>
@@ -300,7 +300,7 @@ impl TryFrom<CompactContract> for CompactContractSome {
 /// The general purpose minimal representation of a contract's abi with bytecode
 /// Unlike `CompactContractSome` all fields are optional so that every possible compiler output can
 /// be represented by it
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactContract {
     /// The Ethereum Contract ABI. If empty, it is represented as an empty
     /// array. See <https://docs.soliditylang.org/en/develop/abi-spec.html>
@@ -513,7 +513,7 @@ impl<'a> CompactContractRef<'a> {
     ///
     /// Panics if any field is `None`.
     #[track_caller]
-    pub fn unwrap(self) -> CompactContractRefSome<'a> {
+    pub const fn unwrap(self) -> CompactContractRefSome<'a> {
         CompactContractRefSome {
             abi: self.abi.unwrap(),
             bin: self.bin.unwrap(),
