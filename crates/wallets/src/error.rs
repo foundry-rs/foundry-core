@@ -16,6 +16,12 @@ use alloy_signer_turnkey::TurnkeySignerError;
 use crate::wallet_browser::error::BrowserWalletError;
 
 #[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("Store error: {0}")]
+    Internal(String),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum PrivateKeyError {
     #[error("Failed to create wallet from private key. Private key is invalid hex: {0}")]
     InvalidHex(#[from] FromHexError),

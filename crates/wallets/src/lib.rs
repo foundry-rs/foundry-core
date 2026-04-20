@@ -8,6 +8,7 @@
 #[macro_use]
 extern crate tracing;
 
+pub mod channel_db;
 pub mod error;
 pub mod opts;
 pub mod signer;
@@ -17,6 +18,8 @@ pub mod wallet_browser;
 pub mod wallet_multi;
 pub mod wallet_raw;
 
+pub use channel_db::{Channel, ChannelDb};
+pub use error::StoreError;
 pub use opts::WalletOpts;
 pub use signer::{PendingSigner, WalletSigner};
 pub use tempo::TempoAccessKeyConfig;
