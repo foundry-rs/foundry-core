@@ -1,0 +1,24 @@
+[package]
+name = "foundry-compilers-artifacts"
+description = "Rust bindings for compilers JSON artifacts"
+
+version = "0.19.14"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+foundry-compilers-artifacts-solc.workspace = true
+foundry-compilers-artifacts-vyper.workspace = true
+
+[features]
+async = ["foundry-compilers-artifacts-solc/async"]
+checksum = ["foundry-compilers-artifacts-solc/checksum"]
+walkdir = ["foundry-compilers-artifacts-solc/walkdir"]
+rayon = ["foundry-compilers-artifacts-solc/rayon"]

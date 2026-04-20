@@ -1,0 +1,49 @@
+[package]
+name = "foundry-compilers-artifacts-solc"
+description = "Rust bindings for Solc JSON artifacts"
+
+version = "0.19.14"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+foundry-compilers-core.workspace = true
+
+alloy-json-abi.workspace = true
+alloy-primitives.workspace = true
+memchr.workspace = true
+semver.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+yansi.workspace = true
+regex.workspace = true
+
+# async
+tokio = { workspace = true, optional = true, features = ["fs"] }
+futures-util = { workspace = true, optional = true }
+
+# rayon
+rayon = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+path-slash.workspace = true
+
+[dev-dependencies]
+serde_path_to_error = "0.1"
+similar-asserts.workspace = true
+foundry-compilers-core = { workspace = true, features = ["test-utils"] }
+
+[features]
+async = ["dep:tokio", "dep:futures-util"]
+checksum = ["foundry-compilers-core/hasher"]
+walkdir = ["rayon", "foundry-compilers-core/walkdir"]
+rayon = ["dep:rayon"]
