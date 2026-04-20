@@ -357,11 +357,7 @@ where
     let mut iter = paths.into_iter();
     let mut ret = iter.next()?.as_ref().to_path_buf();
     for path in iter {
-        if let Some(r) = common_ancestor(&ret, path.as_ref()) {
-            ret = r;
-        } else {
-            return None;
-        }
+        ret = common_ancestor(&ret, path.as_ref())?;
     }
     Some(ret)
 }
