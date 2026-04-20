@@ -1,16 +1,5 @@
 # foundry-fork-db
 
-#### License
+Fork database used by [Foundry](https://github.com/foundry-rs/foundry).
 
-<sup>
-Licensed under either of <a href="LICENSE-APACHE">Apache License, Version
-2.0</a> or <a href="LICENSE-MIT">MIT license</a> at your option.
-</sup>
-
-<br>
-
-<sub>
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in these crates by you, as defined in the Apache-2.0 license,
-shall be dual licensed as above, without any additional terms or conditions.
-</sub>
+Provides a shared, caching database layer backed by a remote RPC provider, allowing EVM execution against forked chain state. Built on top of [revm](https://github.com/bluealloy/revm).
