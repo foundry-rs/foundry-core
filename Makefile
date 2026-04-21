@@ -33,6 +33,19 @@ test: ## Run all tests.
 	$(MAKE) test-unit && \
 	$(MAKE) test-doc
 
+.PHONY: coverage-unit
+coverage-unit: ## Run unit tests with coverage.
+	cargo llvm-cov nextest \
+		--lcov \
+		--output-path lcov.info \
+		--locked \
+		--workspace
+
+.PHONY: coverage
+coverage: coverage-unit ## Run unit tests with coverage, generate an HTML coverage report and open it in the browser.
+	cargo llvm-cov report --html
+	open target/llvm-cov/html/index.html
+
 ##@ Linting
 
 .PHONY: fmt
@@ -94,7 +107,7 @@ clean: ## Clean the project.
 
 .PHONY: deny
 deny: ## Perform a `cargo` deny check.
-	cargo deny --all-features check all
+	cargo deny --locked --all-features check all
 
 .PHONY: check
 check: ## Run a feature check on all crates and binaries.
