@@ -5,31 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0000-00-00
-
-### foundry-core
-
-#### Features
-
-- Migrate `foundry-block-explorers`/`foundry-blob-explorers` ([#14](https://github.com/foundry-rs/foundry-core/pull/14))
-- Migrate `foundry-compilers` ([#9](https://github.com/foundry-rs/foundry-core/pull/9))
-- Migrate `foundry-fork-db` ([#7](https://github.com/foundry-rs/foundry-core/pull/7))
-
-#### Documentation
-
-- Link to previous repositories ([#12](https://github.com/foundry-rs/foundry-core/pull/12))
-- Add README for each crate ([#11](https://github.com/foundry-rs/foundry-core/pull/11))
-
-#### Bug Fixes
-
-- Fix test server address to support all platforms ([#10](https://github.com/foundry-rs/foundry-core/pull/10))
-
-#### Miscellaneous Tasks
-
-- Reorder workspace deps and normalize formatting ([#13](https://github.com/foundry-rs/foundry-core/pull/13))
-- Enhance CI, add CodeQL ([#4](https://github.com/foundry-rs/foundry-core/pull/4))
-- Basic repo layout ([#1](https://github.com/foundry-rs/foundry-core/pull/1))
-
 ## 2026-04-16
 
 ### fork-db v0.25.0
