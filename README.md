@@ -9,6 +9,8 @@ Core libraries extracted from [Foundry](https://github.com/foundry-rs/foundry), 
   - [`foundry-compilers-artifacts-solc`] - Rust bindings for Solc JSON artifacts
   - [`foundry-compilers-artifacts-vyper`] - Rust bindings for Vyper JSON artifacts
   - [`foundry-compilers-core`] - Core utilities for foundry-compilers crates
+- [`foundry-block-explorers`] - Bindings for Etherscan and other block explorer APIs
+- [`foundry-blob-explorers`] - Bindings for Blobscan and other blob explorer APIs
 - [`foundry-fork-db`] - Fork database used by Foundry
 - [`foundry-wallets`] - Wallet management and signing support
 
@@ -17,6 +19,8 @@ Core libraries extracted from [Foundry](https://github.com/foundry-rs/foundry), 
 [`foundry-compilers-artifacts-solc`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/compilers/crates/artifacts/solc
 [`foundry-compilers-artifacts-vyper`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/compilers/crates/artifacts/vyper
 [`foundry-compilers-core`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/compilers/crates/core
+[`foundry-block-explorers`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/explorers/block-explorers
+[`foundry-blob-explorers`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/explorers/blob-explorers
 [`foundry-fork-db`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/fork-db
 [`foundry-wallets`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/wallets
 

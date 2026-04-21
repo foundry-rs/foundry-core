@@ -1,0 +1,53 @@
+[package]
+name = "foundry-block-explorers"
+description = "Bindings for Etherscan.io and other block explorer APIs"
+keywords = ["crypto", "ethers", "ethereum", "web3", "etherscan"]
+
+version = "0.20.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[package.metadata.playground]
+all-features = true
+
+[dependencies]
+alloy-chains.workspace = true
+alloy-json-abi = { workspace = true, features = [
+    "std",
+    "serde_json",
+] }
+alloy-primitives = { workspace = true, features = [
+    "std",
+    "serde",
+] }
+
+reqwest = { workspace = true, features = ["json", "query", "form"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+semver.workspace = true
+
+foundry-compilers = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+serial_test = "3.2.0"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+
+[features]
+default = ["rustls"]
+rustls = ["reqwest/rustls"]
+openssl = ["reqwest/native-tls"]
+
+foundry-compilers = ["dep:foundry-compilers"]
+compilers-full = ["foundry-compilers?/full"]
