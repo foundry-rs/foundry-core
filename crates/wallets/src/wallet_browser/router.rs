@@ -29,7 +29,7 @@ pub async fn build_router<N: Network>(state: Arc<BrowserWalletState<N>>, port: u
 
     // Allow default port of 5173 in development mode.
     if state.is_development() {
-        origins.push("https://localhost:5173".to_string().parse().unwrap());
+        origins.push("http://localhost:5173".to_string().parse().unwrap());
     }
 
     let security_headers = ServiceBuilder::new()
@@ -47,7 +47,7 @@ pub async fn build_router<N: Network>(state: Arc<BrowserWalletState<N>>, port: u
                 "script-src 'self'; ",
                 "form-action 'none'; ",
                 "worker-src 'none'; ",
-                "frame-src https://id.porto.sh;"
+                "frame-src 'none';"
             )),
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
