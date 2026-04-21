@@ -33,18 +33,11 @@ test: ## Run all tests.
 	$(MAKE) test-unit && \
 	$(MAKE) test-doc
 
-.PHONY: coverage-unit
-coverage-unit: ## Run unit tests with coverage.
-	cargo llvm-cov nextest \
-		--lcov \
-		--output-path lcov.info \
-		--locked \
-		--workspace
-
-.PHONY: coverage
-coverage: coverage-unit ## Run unit tests with coverage, generate an HTML coverage report and open it in the browser.
-	cargo llvm-cov report --html
-	open target/llvm-cov/html/index.html
+.PHONY: test-coverage
+test-coverage: ## Run unit and doc tests with coverage and open the report.
+	cargo +nightly llvm-cov --no-report nextest --locked --workspace && \
+	cargo +nightly llvm-cov --no-report --doc --locked && \
+	cargo +nightly llvm-cov report --doctests --open
 
 ##@ Linting
 
@@ -100,6 +93,10 @@ doc: ## Build the documentation.
 		--locked
 
 ##@ Other
+
+.PHONY: lock
+lock: ## Update the Cargo.lock file with the current dependencies.
+	cargo fetch
 
 .PHONY: clean
 clean: ## Clean the project.
