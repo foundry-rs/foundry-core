@@ -47,7 +47,7 @@ jobs:
           components: clippy
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo clippy --workspace --all-targets --all-features --locked
         env:
           RUSTFLAGS: -Dwarnings
 
@@ -69,7 +69,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: cargo hack
-        run: cargo hack check --feature-powerset --depth 1
+        run: cargo hack check --locked --feature-powerset --depth 1
 
   test:
     name: test ${{ matrix.rust }} ${{ matrix.flags }} (${{ matrix.os }})
@@ -102,7 +102,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: test
         shell: bash
-        run: cargo nextest run --workspace ${{ matrix.flags }} --retries 2
+        run: cargo nextest run --workspace --locked ${{ matrix.flags }} --retries 2
         env:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
 
@@ -120,7 +120,7 @@ jobs:
           toolchain: stable
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo test --workspace --doc --all-features
+      - run: cargo test --workspace --doc --all-features --locked
 
   docs:
     runs-on: ubuntu-latest
@@ -136,7 +136,7 @@ jobs:
           toolchain: nightly
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo doc --workspace --all-features --no-deps --document-private-items
+      - run: cargo doc --workspace --all-features --no-deps --document-private-items --locked
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings --show-type-layout --generate-link-to-definition --enable-index-page -Zunstable-options
 
