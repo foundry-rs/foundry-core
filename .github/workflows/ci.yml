@@ -103,6 +103,8 @@ jobs:
       - name: test
         shell: bash
         run: cargo nextest run --workspace ${{ matrix.flags }} --retries 2
+        env:
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
 
   doctest:
     runs-on: ubuntu-latest
