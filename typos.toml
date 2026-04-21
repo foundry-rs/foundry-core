@@ -11,9 +11,12 @@ extend-exclude = [
     "**/test/**",
     "**/*_test.*",
     "**/*_tests.*",
+    "crates/wallets/src/wallet_browser/app/assets/",
 ]
 
 [default.extend-words]
 ser = "ser"
 froms = "froms"
 consts = "consts"
+Arguements = "Arguements"
+Lod = "Lod"

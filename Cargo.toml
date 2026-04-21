@@ -3,6 +3,7 @@ members = [
     "crates/compilers/crates/artifacts/*",
     "crates/compilers/crates/compilers",
     "crates/compilers/crates/core",
+    "crates/explorers/*",
     "crates/fork-db",
     "crates/wallets",
 ]
@@ -124,6 +125,10 @@ alloy-signer-local = { version = "2.0.0", default-features = false }
 alloy-signer-trezor = { version = "2.0.0", default-features = false }
 alloy-signer-turnkey = { version = "2.0.0", default-features = false }
 alloy-sol-types = "1.5.2"
+alloy-chains = "0.2"
+alloy-eips = { version = "2.0.0", default-features = false }
+alloy-rpc-types-eth = { version = "2.0.0", default-features = false }
+alloy-serde = { version = "2.0.0", default-features = false }
 
 # tempo
 tempo-primitives = { version = "1.6", default-features = false, features = [
@@ -140,7 +145,6 @@ dunce = "1.0"
 eyre = "0.6"
 futures-util = "0.3"
 memchr = "2.7"
-memmap2 = "0.9"
 path-slash = "0.2"
 rayon = "1.11"
 regex = "1.11"
