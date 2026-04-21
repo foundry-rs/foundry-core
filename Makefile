@@ -111,7 +111,7 @@ deny: ## Perform a `cargo` deny check.
 
 .PHONY: check
 check: ## Run a feature check on all crates and binaries.
-	cargo hack check --locked
+	cargo hack check --locked --feature-powerset --depth 1
 
 .PHONY: shear
 shear: ## Run `cargo shear` to check for unused dependencies.
@@ -122,5 +122,4 @@ pr: ## Run all checks and tests.
 	$(MAKE) deny && \
 	$(MAKE) lint && \
 	$(MAKE) test && \
-	$(MAKE) doc && \
-	$(MAKE) check
+	$(MAKE) doc
