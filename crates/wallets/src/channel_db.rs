@@ -1,5 +1,5 @@
 use crate::error::StoreError;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Result as SqlResult, Row, params};
 use std::{path::Path, sync::Mutex};
 
 /// A payment channel persisted in SQLite.
@@ -34,8 +34,8 @@ pub struct ChannelDb {
 impl ChannelDb {
     /// Opens (or creates) a channel database at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let conn = rusqlite::Connection::open(path.as_ref())
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let conn =
+            Connection::open(path.as_ref()).map_err(|e| StoreError::Internal(e.to_string()))?;
         let store = Self { conn: Mutex::new(conn) };
         store.init_table()?;
         Ok(store)
@@ -43,8 +43,7 @@ impl ChannelDb {
 
     /// Opens an in-memory channel database (for testing).
     pub fn open_in_memory() -> Result<Self, StoreError> {
-        let conn = rusqlite::Connection::open_in_memory()
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        let conn = Connection::open_in_memory().map_err(|e| StoreError::Internal(e.to_string()))?;
         let store = Self { conn: Mutex::new(conn) };
         store.init_table()?;
         Ok(store)
@@ -80,7 +79,7 @@ impl ChannelDb {
         Ok(())
     }
 
-    fn row_to_channel(row: &rusqlite::Row<'_>) -> rusqlite::Result<Channel> {
+    fn row_to_channel(row: &Row<'_>) -> SqlResult<Channel> {
         Ok(Channel {
             channel_id: row.get("channel_id")?,
             version: row.get("version")?,
@@ -109,7 +108,7 @@ impl ChannelDb {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT * FROM channels WHERE channel_id = ?1",
-            rusqlite::params![channel_id],
+            params![channel_id],
             Self::row_to_channel,
         )
         .optional()
@@ -123,7 +122,7 @@ impl ChannelDb {
             .prepare("SELECT * FROM channels WHERE origin = ?1")
             .map_err(|e| StoreError::Internal(e.to_string()))?;
         let rows = stmt
-            .query_map(rusqlite::params![origin], Self::row_to_channel)
+            .query_map(params![origin], Self::row_to_channel)
             .map_err(|e| StoreError::Internal(e.to_string()))?;
         let mut channels = Vec::new();
         for row in rows {
@@ -171,7 +170,7 @@ impl ChannelDb {
                 close_requested_at=excluded.close_requested_at,
                 grace_ready_at=excluded.grace_ready_at,
                 last_used_at=excluded.last_used_at",
-            rusqlite::params![
+            params![
                 ch.channel_id,
                 ch.version,
                 ch.origin,
@@ -201,7 +200,7 @@ impl ChannelDb {
     pub fn delete(&self, channel_id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count = conn
-            .execute("DELETE FROM channels WHERE channel_id = ?1", rusqlite::params![channel_id])
+            .execute("DELETE FROM channels WHERE channel_id = ?1", params![channel_id])
             .map_err(|e| StoreError::Internal(e.to_string()))?;
         Ok(count > 0)
     }
