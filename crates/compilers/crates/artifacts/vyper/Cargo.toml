@@ -22,11 +22,6 @@ alloy-primitives.workspace = true
 alloy-json-abi.workspace = true
 semver.workspace = true
 
-[target.'cfg(windows)'.dependencies]
-path-slash.workspace = true
-
 [dev-dependencies]
-serde_path_to_error = "0.1"
-similar-asserts.workspace = true
 foundry-compilers-core = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true
