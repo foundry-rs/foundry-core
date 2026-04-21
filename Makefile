@@ -16,17 +16,17 @@ help: ## Display this help.
 
 .PHONY: build
 build: ## Build the project.
-	cargo build --profile "$(PROFILE)"
+	cargo build --locked --profile "$(PROFILE)"
 
 ##@ Test
 
 .PHONY: test-unit
 test-unit: ## Run unit tests.
-	cargo nextest run
+	cargo nextest run --workspace --locked
 
 .PHONY: test-doc
 test-doc: ## Run doc tests.
-	cargo test --doc --workspace
+	cargo test --doc --workspace --locked
 
 .PHONY: test
 test: ## Run all tests.
@@ -45,6 +45,7 @@ lint-clippy: ## Run clippy on the codebase.
 	--workspace \
 	--all-targets \
 	--all-features \
+	--locked \
 	-- -D warnings
 
 .PHONY: lint-clippy-fix
@@ -56,6 +57,7 @@ lint-clippy-fix: ## Run clippy on the codebase and fix warnings.
 	--fix \
 	--allow-dirty \
 	--allow-staged \
+	--locked \
 	-- -D warnings
 
 .PHONY: lint-typos
@@ -72,6 +74,18 @@ lint: ## Run all linters.
 	$(MAKE) lint-clippy && \
 	$(MAKE) lint-typos
 
+##@ Documentation
+
+.PHONY: doc
+doc: ## Build the documentation.
+	RUSTDOCFLAGS="--cfg docsrs -D warnings -Zunstable-options --show-type-layout --generate-link-to-definition" \
+		cargo +nightly doc \
+		--workspace \
+		--all-features \
+		--document-private-items \
+		--no-deps \
+		--locked
+
 ##@ Other
 
 .PHONY: clean
@@ -82,8 +96,18 @@ clean: ## Clean the project.
 deny: ## Perform a `cargo` deny check.
 	cargo deny --all-features check all
 
+.PHONY: check
+check: ## Run a feature check on all crates and binaries.
+	cargo hack check --locked
+
+.PHONY: shear
+shear: ## Run `cargo shear` to check for unused dependencies.
+	cargo shear --locked
+
 .PHONY: pr
 pr: ## Run all checks and tests.
 	$(MAKE) deny && \
 	$(MAKE) lint && \
-	$(MAKE) test
+	$(MAKE) test && \
+	$(MAKE) doc && \
+	$(MAKE) check
