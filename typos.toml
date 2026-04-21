@@ -11,6 +11,7 @@ extend-exclude = [
     "**/test/**",
     "**/*_test.*",
     "**/*_tests.*",
+    "crates/wallets/src/wallet_browser/app/assets/",
 ]
 
 [default.extend-words]
