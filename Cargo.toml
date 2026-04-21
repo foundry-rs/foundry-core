@@ -149,6 +149,7 @@ path-slash = "0.2"
 rayon = "1.11"
 regex = "1.11"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+rusqlite = { version = "0.35", features = ["bundled"] }
 semver = { version = "1.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision"] }
