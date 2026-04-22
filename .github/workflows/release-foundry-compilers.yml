@@ -1,0 +1,23 @@
+name: "Release: foundry-compilers"
+
+permissions: {}
+
+on:
+  push:
+    tags: ["foundry-compilers-v*"]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Dry run (validate and build without publishing)"
+        type: boolean
+        default: true
+
+jobs:
+  release:
+    uses: ./.github/workflows/release.yml
+    with:
+      dry-run: ${{ inputs.dry-run || false }}
+      crate: foundry-compilers
+      packages: "-p foundry-compilers-core -p foundry-compilers-artifacts-solc -p foundry-compilers-artifacts-vyper -p foundry-compilers-artifacts -p foundry-compilers"
+      include-path: "crates/compilers/"
+      tag-prefix: "foundry-compilers-v"

@@ -1,0 +1,23 @@
+name: "Release: foundry-fork-db"
+
+permissions: {}
+
+on:
+  push:
+    tags: ["foundry-fork-db-v*"]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Dry run (validate and build without publishing)"
+        type: boolean
+        default: true
+
+jobs:
+  release:
+    uses: ./.github/workflows/release.yml
+    with:
+      dry-run: ${{ inputs.dry-run || false }}
+      crate: foundry-fork-db
+      packages: "-p foundry-fork-db"
+      include-path: "crates/fork-db/"
+      tag-prefix: "foundry-fork-db-v"

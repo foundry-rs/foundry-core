@@ -4,6 +4,39 @@
 allow-branch = ["main"]
 sign-commit = true
 sign-tag = true
-shared-version = true
-pre-release-commit-message = "chore: release {{version}}"
-tag-prefix = "" # tag only once instead of per every crate
+tag = false
+pre-release-commit-message = "chore: release {{crate_name}} {{version}}"
+
+# compilers group — all sub-crates share a version and release together
+[packages.foundry-compilers]
+tag = true
+tag-name = "foundry-compilers-v{{version}}"
+
+[packages.foundry-compilers-core]
+tag = false
+
+[packages.foundry-compilers-artifacts]
+tag = false
+
+[packages.foundry-compilers-artifacts-solc]
+tag = false
+
+[packages.foundry-compilers-artifacts-vyper]
+tag = false
+
+# standalone crates — each gets its own tag
+[packages.foundry-block-explorers]
+tag = true
+tag-name = "foundry-block-explorers-v{{version}}"
+
+[packages.foundry-blob-explorers]
+tag = true
+tag-name = "foundry-blob-explorers-v{{version}}"
+
+[packages.foundry-fork-db]
+tag = true
+tag-name = "foundry-fork-db-v{{version}}"
+
+[packages.foundry-wallets]
+tag = true
+tag-name = "foundry-wallets-v{{version}}"

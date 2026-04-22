@@ -1,0 +1,23 @@
+name: "Release: foundry-wallets"
+
+permissions: {}
+
+on:
+  push:
+    tags: ["foundry-wallets-v*"]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Dry run (validate and build without publishing)"
+        type: boolean
+        default: true
+
+jobs:
+  release:
+    uses: ./.github/workflows/release.yml
+    with:
+      dry-run: ${{ inputs.dry-run || false }}
+      crate: foundry-wallets
+      packages: "-p foundry-wallets"
+      include-path: "crates/wallets/"
+      tag-prefix: "foundry-wallets-v"

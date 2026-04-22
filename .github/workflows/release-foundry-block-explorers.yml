@@ -1,0 +1,23 @@
+name: "Release: foundry-block-explorers"
+
+permissions: {}
+
+on:
+  push:
+    tags: ["foundry-block-explorers-v*"]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Dry run (validate and build without publishing)"
+        type: boolean
+        default: true
+
+jobs:
+  release:
+    uses: ./.github/workflows/release.yml
+    with:
+      dry-run: ${{ inputs.dry-run || false }}
+      crate: foundry-block-explorers
+      packages: "-p foundry-block-explorers"
+      include-path: "crates/explorers/block-explorers/"
+      tag-prefix: "foundry-block-explorers-v"
