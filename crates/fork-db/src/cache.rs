@@ -12,16 +12,22 @@ use revm::{
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeMap,
 };
+#[cfg(not(feature = "zstd"))]
+use std::io::{BufWriter, Write};
 use std::{
     collections::BTreeSet,
     fs,
-    io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
 use url::Url;
+#[cfg(feature = "zstd")]
+use zstd::{Encoder, decode_all};
 
 pub type StorageInfo = StorageKeyMap<U256>;
+
+/// Zstd frame magic number: `0x28B52FFD` (little-endian).
+const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 /// A shareable Block database
 #[derive(Clone, Debug)]
@@ -386,7 +392,11 @@ impl<B> JsonBlockCacheDB<B> {
 }
 
 impl<B: ForkBlockEnv> JsonBlockCacheDB<B> {
-    /// Loads the contents of the diskmap file and returns the read object
+    /// Loads the contents of the diskmap file and returns the read object.
+    ///
+    /// When the `zstd` feature is enabled, this will transparently detect and decompress
+    /// zstd-compressed cache files (by checking for the zstd magic bytes `0x28B52FFD`).
+    /// Plain JSON files are always supported regardless of feature flags.
     ///
     /// # Errors
     /// This will fail if
@@ -395,14 +405,46 @@ impl<B: ForkBlockEnv> JsonBlockCacheDB<B> {
     pub fn load(path: impl Into<PathBuf>) -> eyre::Result<Self> {
         let path = path.into();
         trace!(target: "cache", ?path, "reading json cache");
-        let contents = std::fs::read_to_string(&path).inspect_err(|err| {
+        let raw = fs::read(&path).inspect_err(|err| {
             warn!(?err, ?path, "Failed to read cache file");
         })?;
-        let data = serde_json::from_str(&contents).inspect_err(|err| {
+
+        let json_bytes = maybe_decompress(&raw, &path).inspect_err(|err| {
+            warn!(target: "cache", ?err, ?path, "Failed to decode cache file");
+        })?;
+
+        let data = serde_json::from_slice(&json_bytes).inspect_err(|err| {
             warn!(target: "cache", ?err, ?path, "Failed to deserialize cache data");
         })?;
         trace!(target: "cache", ?path, "read json cache");
         Ok(Self { cache_path: Some(path), data })
+    }
+}
+
+/// Decompresses the raw bytes if they are zstd-compressed, otherwise returns them as-is.
+///
+/// When the `zstd` feature is **not** enabled and zstd-compressed data is detected, this
+/// returns an error with a helpful message.
+fn maybe_decompress(raw: &[u8], path: &Path) -> eyre::Result<Vec<u8>> {
+    if !raw.starts_with(&ZSTD_FRAME_MAGIC) {
+        return Ok(raw.to_vec());
+    }
+
+    #[cfg(feature = "zstd")]
+    {
+        trace!(target: "cache", ?path, "decompressing zstd cache");
+        let decompressed = decode_all(raw).inspect_err(|err| {
+            warn!(target: "cache", ?err, ?path, "Failed to decompress zstd cache");
+        })?;
+        Ok(decompressed)
+    }
+
+    #[cfg(not(feature = "zstd"))]
+    {
+        eyre::bail!(
+            "cache file at `{}` is zstd-compressed but the `zstd` feature is not enabled",
+            path.display()
+        );
     }
 }
 
@@ -414,7 +456,10 @@ impl<B: Serialize + Clone> JsonBlockCacheDB<B> {
         self.flush_to(path.as_path());
     }
 
-    /// Flushes the DB to a specific file
+    /// Flushes the DB to a specific file.
+    ///
+    /// When the `zstd` feature is enabled, the cache is written as zstd-compressed JSON.
+    /// Otherwise, plain JSON is written.
     pub fn flush_to(&self, cache_path: &Path) {
         let path: &Path = cache_path;
 
@@ -429,12 +474,30 @@ impl<B: Serialize + Clone> JsonBlockCacheDB<B> {
             Err(e) => return warn!(target: "cache", %e, "Failed to open json cache for writing"),
         };
 
-        let mut writer = BufWriter::new(file);
-        if let Err(e) = serde_json::to_writer(&mut writer, &self.data) {
-            return warn!(target: "cache", %e, "Failed to write to json cache");
+        #[cfg(feature = "zstd")]
+        {
+            // Default zstd compression level (3) offers a good balance of speed and ratio.
+            let mut encoder = match Encoder::new(file, 3) {
+                Ok(enc) => enc,
+                Err(e) => return warn!(target: "cache", %e, "Failed to create zstd encoder"),
+            };
+            if let Err(e) = serde_json::to_writer(&mut encoder, &self.data) {
+                return warn!(target: "cache", %e, "Failed to write to zstd json cache");
+            }
+            if let Err(e) = encoder.finish() {
+                return warn!(target: "cache", %e, "Failed to finish zstd compression");
+            }
         }
-        if let Err(e) = writer.flush() {
-            return warn!(target: "cache", %e, "Failed to flush to json cache");
+
+        #[cfg(not(feature = "zstd"))]
+        {
+            let mut writer = BufWriter::new(file);
+            if let Err(e) = serde_json::to_writer(&mut writer, &self.data) {
+                return warn!(target: "cache", %e, "Failed to write to json cache");
+            }
+            if let Err(e) = writer.flush() {
+                return warn!(target: "cache", %e, "Failed to flush to json cache");
+            }
         }
 
         trace!(target: "cache", "saved json cache");
@@ -675,5 +738,112 @@ mod tests {
             None,
         );
         assert_eq!(None, cache_db.cache_path());
+    }
+
+    #[test]
+    fn is_zstd_detection() {
+        // zstd magic bytes
+        assert!([0x28, 0xB5, 0x2F, 0xFD, 0x00].starts_with(&ZSTD_FRAME_MAGIC));
+        // plain JSON
+        assert!(!b"{\"meta\":{}}".starts_with(&ZSTD_FRAME_MAGIC));
+        // too short
+        assert!(![0x28, 0xB5].starts_with(&ZSTD_FRAME_MAGIC));
+        // empty
+        assert!(![].starts_with(&ZSTD_FRAME_MAGIC));
+    }
+
+    #[test]
+    fn flush_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+
+        let meta = BlockchainDbMeta::<BlockEnv>::default();
+        let db = BlockchainDb::new(meta, Some(path.clone()));
+
+        // Insert some data
+        db.accounts().write().insert(
+            Address::ZERO,
+            AccountInfo { balance: U256::from(42u64), nonce: 1, ..Default::default() },
+        );
+
+        db.cache().flush();
+        assert!(path.exists());
+
+        let raw = fs::read(&path).unwrap();
+        #[cfg(feature = "zstd")]
+        assert!(
+            raw.starts_with(&ZSTD_FRAME_MAGIC),
+            "should be zstd-compressed with the zstd feature"
+        );
+        #[cfg(not(feature = "zstd"))]
+        assert!(!raw.starts_with(&ZSTD_FRAME_MAGIC), "should be plain JSON without zstd feature");
+
+        // Reload
+        let loaded = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
+        assert_eq!(loaded.db().accounts.read().len(), 1);
+        assert_eq!(loaded.db().accounts.read()[&Address::ZERO].balance, U256::from(42u64));
+    }
+
+    #[cfg(not(feature = "zstd"))]
+    #[test]
+    fn load_errors_on_zstd_data_without_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json.zst");
+
+        fs::write(&path, [0x28, 0xB5, 0x2F, 0xFD, 0x00]).unwrap();
+
+        let err = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap_err();
+        assert!(err.to_string().contains("zstd-compressed but the `zstd` feature is not enabled"));
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_flush_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json.zst");
+
+        let meta = BlockchainDbMeta::<BlockEnv>::default();
+        let db = BlockchainDb::new(meta, Some(path.clone()));
+
+        db.accounts().write().insert(
+            Address::ZERO,
+            AccountInfo { balance: U256::from(100u64), nonce: 5, ..Default::default() },
+        );
+        db.storage().write().insert(Address::ZERO, Default::default());
+
+        db.cache().flush();
+        assert!(path.exists());
+
+        // Verify on-disk bytes have zstd magic
+        let raw = fs::read(&path).unwrap();
+        assert!(
+            raw.starts_with(&ZSTD_FRAME_MAGIC),
+            "should be zstd-compressed with the zstd feature"
+        );
+
+        // Reload and verify data integrity
+        let loaded = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
+        assert_eq!(loaded.db().accounts.read().len(), 1);
+        assert_eq!(loaded.db().accounts.read()[&Address::ZERO].nonce, 5);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_can_load_plain_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+
+        // Write plain JSON manually
+        let meta = BlockchainDbMeta::<BlockEnv>::default();
+        let data = JsonBlockCacheData::<BlockEnv> {
+            meta: Arc::new(RwLock::new(meta)),
+            data: Arc::new(MemDb::default()),
+        };
+        let json = serde_json::to_vec(&data).unwrap();
+        fs::write(&path, &json).unwrap();
+
+        // Should load fine even with zstd feature enabled
+        let loaded = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
+        assert_eq!(loaded.db().accounts.read().len(), 0);
     }
 }
