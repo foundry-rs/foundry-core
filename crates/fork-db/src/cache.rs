@@ -12,17 +12,22 @@ use revm::{
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeMap,
 };
+#[cfg(not(feature = "zstd"))]
+use std::io::{BufWriter, Write};
 use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
-#[cfg(not(feature = "zstd"))]
-use std::io::{BufWriter, Write};
 use url::Url;
+#[cfg(feature = "zstd")]
+use zstd::{Encoder, decode_all};
 
 pub type StorageInfo = StorageKeyMap<U256>;
+
+/// Zstd frame magic number: `0x28B52FFD` (little-endian).
+const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 /// A shareable Block database
 #[derive(Clone, Debug)]
@@ -416,27 +421,19 @@ impl<B: ForkBlockEnv> JsonBlockCacheDB<B> {
     }
 }
 
-/// Zstd magic number: `0x28B52FFD` (little-endian).
-const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
-
-/// Returns whether the given bytes start with the zstd frame magic number.
-fn is_zstd(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && bytes[..4] == ZSTD_MAGIC
-}
-
 /// Decompresses the raw bytes if they are zstd-compressed, otherwise returns them as-is.
 ///
 /// When the `zstd` feature is **not** enabled and zstd-compressed data is detected, this
 /// returns an error with a helpful message.
 fn maybe_decompress(raw: &[u8], path: &Path) -> eyre::Result<Vec<u8>> {
-    if !is_zstd(raw) {
+    if !raw.starts_with(&ZSTD_FRAME_MAGIC) {
         return Ok(raw.to_vec());
     }
 
     #[cfg(feature = "zstd")]
     {
         trace!(target: "cache", ?path, "decompressing zstd cache");
-        let decompressed = zstd::decode_all(raw).inspect_err(|err| {
+        let decompressed = decode_all(raw).inspect_err(|err| {
             warn!(target: "cache", ?err, ?path, "Failed to decompress zstd cache");
         })?;
         Ok(decompressed)
@@ -480,11 +477,9 @@ impl<B: Serialize + Clone> JsonBlockCacheDB<B> {
         #[cfg(feature = "zstd")]
         {
             // Default zstd compression level (3) offers a good balance of speed and ratio.
-            let mut encoder = match zstd::Encoder::new(file, 3) {
+            let mut encoder = match Encoder::new(file, 3) {
                 Ok(enc) => enc,
-                Err(e) => {
-                    return warn!(target: "cache", %e, "Failed to create zstd encoder")
-                }
+                Err(e) => return warn!(target: "cache", %e, "Failed to create zstd encoder"),
             };
             if let Err(e) = serde_json::to_writer(&mut encoder, &self.data) {
                 return warn!(target: "cache", %e, "Failed to write to zstd json cache");
@@ -748,13 +743,13 @@ mod tests {
     #[test]
     fn is_zstd_detection() {
         // zstd magic bytes
-        assert!(is_zstd(&[0x28, 0xB5, 0x2F, 0xFD, 0x00]));
+        assert!([0x28, 0xB5, 0x2F, 0xFD, 0x00].starts_with(&ZSTD_FRAME_MAGIC));
         // plain JSON
-        assert!(!is_zstd(b"{\"meta\":{}}"));
+        assert!(!b"{\"meta\":{}}".starts_with(&ZSTD_FRAME_MAGIC));
         // too short
-        assert!(!is_zstd(&[0x28, 0xB5]));
+        assert!(![0x28, 0xB5].starts_with(&ZSTD_FRAME_MAGIC));
         // empty
-        assert!(!is_zstd(&[]));
+        assert!(![].starts_with(&ZSTD_FRAME_MAGIC));
     }
 
     #[test]
@@ -776,9 +771,12 @@ mod tests {
 
         let raw = fs::read(&path).unwrap();
         #[cfg(feature = "zstd")]
-        assert!(is_zstd(&raw), "should be zstd-compressed with the zstd feature");
+        assert!(
+            raw.starts_with(&ZSTD_FRAME_MAGIC),
+            "should be zstd-compressed with the zstd feature"
+        );
         #[cfg(not(feature = "zstd"))]
-        assert!(!is_zstd(&raw), "should be plain JSON without zstd feature");
+        assert!(!raw.starts_with(&ZSTD_FRAME_MAGIC), "should be plain JSON without zstd feature");
 
         // Reload
         let loaded = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
@@ -795,9 +793,7 @@ mod tests {
         fs::write(&path, [0x28, 0xB5, 0x2F, 0xFD, 0x00]).unwrap();
 
         let err = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("zstd-compressed but the `zstd` feature is not enabled"));
+        assert!(err.to_string().contains("zstd-compressed but the `zstd` feature is not enabled"));
     }
 
     #[cfg(feature = "zstd")]
@@ -820,7 +816,10 @@ mod tests {
 
         // Verify on-disk bytes have zstd magic
         let raw = fs::read(&path).unwrap();
-        assert!(is_zstd(&raw), "should be zstd-compressed with the zstd feature");
+        assert!(
+            raw.starts_with(&ZSTD_FRAME_MAGIC),
+            "should be zstd-compressed with the zstd feature"
+        );
 
         // Reload and verify data integrity
         let loaded = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
