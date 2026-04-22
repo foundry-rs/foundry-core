@@ -93,52 +93,71 @@ doc: ## Build the documentation.
 		--locked
 
 ##@ Release
+# Prepare a release: update changelog, run semver-checks, bump versions.
+# Open a PR with the changes, merge, then push the tag to trigger CI publish.
+#
 # Usage:
-#   make release-<crate> version=X.Y.Z              # dry run
-#   make release-<crate> version=X.Y.Z execute=true # publish for real
-
-EXECUTE_FLAGS := $(if $(execute),--execute --no-confirm,)
+#   make release-compilers version=X.Y.Z
+#   # open PR, merge, then:
+#   git tag compilers-vX.Y.Z && git push origin compilers-vX.Y.Z
 
 .PHONY: release-compilers
-release-compilers: ## Release compilers crates (version=X.Y.Z).
+release-compilers: ## Prepare compilers release (version=X.Y.Z).
 	@test -n "$(version)" || (echo "usage: make release-compilers version=X.Y.Z" && exit 1)
-	cd crates/compilers && git cliff --unreleased --prepend CHANGELOG.md
-	cargo +stable semver-checks -p foundry-compilers
-	PUBLISH_GRACE_SLEEP=10 cargo release $(version) \
+	cd crates/compilers && git cliff --unreleased --tag "compilers-v$(version)" --prepend CHANGELOG.md
+	cargo +stable semver-checks \
+	-p foundry-compilers \
+	-p foundry-compilers-core \
+	-p foundry-compilers-artifacts \
+	-p foundry-compilers-artifacts-solc \
+	-p foundry-compilers-artifacts-vyper
+	cargo release $(version) \
 	-p foundry-compilers \
 	-p foundry-compilers-core \
 	-p foundry-compilers-artifacts \
 	-p foundry-compilers-artifacts-solc \
 	-p foundry-compilers-artifacts-vyper \
-	$(EXECUTE_FLAGS)
+	--no-publish \
+	--no-tag \
+	--no-push \
+	--execute --no-confirm
 
 .PHONY: release-explorers
-release-explorers: ## Release explorers crates (version=X.Y.Z).
+release-explorers: ## Prepare explorers release (version=X.Y.Z).
 	@test -n "$(version)" || (echo "usage: make release-explorers version=X.Y.Z" && exit 1)
-	cd crates/explorers && git cliff --unreleased --prepend CHANGELOG.md
+	cd crates/explorers && git cliff --unreleased --tag "explorers-v$(version)" --prepend CHANGELOG.md
 	cargo +stable semver-checks -p foundry-block-explorers -p foundry-blob-explorers
-	PUBLISH_GRACE_SLEEP=10 cargo release $(version) \
+	cargo release $(version) \
 	-p foundry-block-explorers \
 	-p foundry-blob-explorers \
-	$(EXECUTE_FLAGS)
+	--no-publish \
+	--no-tag \
+	--no-push \
+	--execute --no-confirm
 
 .PHONY: release-fork-db
-release-fork-db: ## Release fork-db crate (version=X.Y.Z).
+release-fork-db: ## Prepare fork-db release (version=X.Y.Z).
 	@test -n "$(version)" || (echo "usage: make release-fork-db version=X.Y.Z" && exit 1)
-	cd crates/fork-db && git cliff --unreleased --prepend CHANGELOG.md
+	cd crates/fork-db && git cliff --unreleased --tag "fork-db-v$(version)" --prepend CHANGELOG.md
 	cargo +stable semver-checks -p foundry-fork-db
-	PUBLISH_GRACE_SLEEP=10 cargo release $(version) \
+	cargo release $(version) \
 	-p foundry-fork-db \
-	$(EXECUTE_FLAGS)
+	--no-publish \
+	--no-tag \
+	--no-push \
+	--execute --no-confirm
 
 .PHONY: release-wallets
-release-wallets: ## Release wallets crate (version=X.Y.Z).
+release-wallets: ## Prepare wallets release (version=X.Y.Z).
 	@test -n "$(version)" || (echo "usage: make release-wallets version=X.Y.Z" && exit 1)
-	cd crates/wallets && git cliff --unreleased --prepend CHANGELOG.md
+	cd crates/wallets && git cliff --unreleased --tag "wallets-v$(version)" --prepend CHANGELOG.md
 	cargo +stable semver-checks -p foundry-wallets
-	PUBLISH_GRACE_SLEEP=10 cargo release $(version) \
+	cargo release $(version) \
 	-p foundry-wallets \
-	$(EXECUTE_FLAGS)
+	--no-publish \
+	--no-tag \
+	--no-push \
+	--execute --no-confirm
 
 ##@ Other
 
