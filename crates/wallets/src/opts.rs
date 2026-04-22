@@ -278,6 +278,8 @@ impl From<RawWalletOpts> for WalletOpts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(redundant_imports)]
+    use alloy_signer::Signer;
     use std::{path::Path, str::FromStr};
 
     #[tokio::test]
