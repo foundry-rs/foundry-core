@@ -94,47 +94,51 @@ doc: ## Build the documentation.
 
 ##@ Release
 # Usage:
-#   make release-<crate> bump=patch      # dry run (default)
-#   make release-<crate> bump=minor exec=--execute  # publish for real
+#   make release-<crate> version=X.Y.Z              # dry run
+#   make release-<crate> version=X.Y.Z execute=true # publish for real
 
-BUMP ?= patch
+EXECUTE_FLAGS := $(if $(execute),--execute --no-confirm,)
 
 .PHONY: release-compilers
-release-compilers: ## Release compilers crates.
+release-compilers: ## Release compilers crates (version=X.Y.Z).
+	@test -n "$(version)" || (echo "usage: make release-compilers version=X.Y.Z" && exit 1)
 	cd crates/compilers && git cliff --unreleased --prepend CHANGELOG.md
 	cargo +stable semver-checks -p foundry-compilers
-	PUBLISH_GRACE_SLEEP=10 cargo release $(BUMP) \
+	PUBLISH_GRACE_SLEEP=10 cargo release $(version) \
 	-p foundry-compilers \
 	-p foundry-compilers-core \
 	-p foundry-compilers-artifacts \
 	-p foundry-compilers-artifacts-solc \
 	-p foundry-compilers-artifacts-vyper \
-	$(exec)
+	$(EXECUTE_FLAGS)
 
 .PHONY: release-explorers
-release-explorers: ## Release explorers crates.
+release-explorers: ## Release explorers crates (version=X.Y.Z).
+	@test -n "$(version)" || (echo "usage: make release-explorers version=X.Y.Z" && exit 1)
 	cd crates/explorers && git cliff --unreleased --prepend CHANGELOG.md
 	cargo +stable semver-checks -p foundry-block-explorers -p foundry-blob-explorers
-	PUBLISH_GRACE_SLEEP=10 cargo release $(BUMP) \
+	PUBLISH_GRACE_SLEEP=10 cargo release $(version) \
 	-p foundry-block-explorers \
 	-p foundry-blob-explorers \
-	$(exec)
+	$(EXECUTE_FLAGS)
 
 .PHONY: release-fork-db
-release-fork-db: ## Release fork-db crate.
+release-fork-db: ## Release fork-db crate (version=X.Y.Z).
+	@test -n "$(version)" || (echo "usage: make release-fork-db version=X.Y.Z" && exit 1)
 	cd crates/fork-db && git cliff --unreleased --prepend CHANGELOG.md
 	cargo +stable semver-checks -p foundry-fork-db
-	PUBLISH_GRACE_SLEEP=10 cargo release $(BUMP) \
+	PUBLISH_GRACE_SLEEP=10 cargo release $(version) \
 	-p foundry-fork-db \
-	$(exec)
+	$(EXECUTE_FLAGS)
 
 .PHONY: release-wallets
-release-wallets: ## Release wallets crate.
+release-wallets: ## Release wallets crate (version=X.Y.Z).
+	@test -n "$(version)" || (echo "usage: make release-wallets version=X.Y.Z" && exit 1)
 	cd crates/wallets && git cliff --unreleased --prepend CHANGELOG.md
 	cargo +stable semver-checks -p foundry-wallets
-	PUBLISH_GRACE_SLEEP=10 cargo release $(BUMP) \
+	PUBLISH_GRACE_SLEEP=10 cargo release $(version) \
 	-p foundry-wallets \
-	$(exec)
+	$(EXECUTE_FLAGS)
 
 ##@ Other
 
