@@ -13,6 +13,7 @@ use alloy_signer_gcp::GcpSignerError;
 #[cfg(feature = "turnkey")]
 use alloy_signer_turnkey::TurnkeySignerError;
 
+#[cfg(feature = "browser")]
 use crate::wallet_browser::error::BrowserWalletError;
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +52,7 @@ pub enum WalletSignerError {
     #[cfg(feature = "turnkey")]
     Turnkey(#[from] TurnkeySignerError),
     #[error(transparent)]
+    #[cfg(feature = "browser")]
     Browser(#[from] BrowserWalletError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
