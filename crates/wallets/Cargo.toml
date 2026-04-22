@@ -64,7 +64,6 @@ reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["macros"] }
 
 [features]
-default = ["browser", "tempo"]
 browser = ["dep:axum", "dep:serde_json", "dep:tokio", "dep:uuid", "dep:webbrowser", "dep:tower", "dep:tower-http"]
 tempo = ["dep:tempo-primitives", "dep:rusqlite", "dep:alloy-rlp", "dep:toml"]
 aws-kms = ["dep:alloy-signer-aws", "dep:aws-config"]
