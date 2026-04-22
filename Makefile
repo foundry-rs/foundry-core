@@ -92,6 +92,50 @@ doc: ## Build the documentation.
 		--no-deps \
 		--locked
 
+##@ Release
+# Usage:
+#   make release-<crate> bump=patch      # dry run (default)
+#   make release-<crate> bump=minor exec=--execute  # publish for real
+
+BUMP ?= patch
+
+.PHONY: release-compilers
+release-compilers: ## Release compilers crates.
+	cd crates/compilers && git cliff --unreleased --prepend CHANGELOG.md
+	cargo +stable semver-checks -p foundry-compilers
+	PUBLISH_GRACE_SLEEP=10 cargo release $(BUMP) \
+	-p foundry-compilers \
+	-p foundry-compilers-core \
+	-p foundry-compilers-artifacts \
+	-p foundry-compilers-artifacts-solc \
+	-p foundry-compilers-artifacts-vyper \
+	$(exec)
+
+.PHONY: release-explorers
+release-explorers: ## Release explorers crates.
+	cd crates/explorers && git cliff --unreleased --prepend CHANGELOG.md
+	cargo +stable semver-checks -p foundry-block-explorers -p foundry-blob-explorers
+	PUBLISH_GRACE_SLEEP=10 cargo release $(BUMP) \
+	-p foundry-block-explorers \
+	-p foundry-blob-explorers \
+	$(exec)
+
+.PHONY: release-fork-db
+release-fork-db: ## Release fork-db crate.
+	cd crates/fork-db && git cliff --unreleased --prepend CHANGELOG.md
+	cargo +stable semver-checks -p foundry-fork-db
+	PUBLISH_GRACE_SLEEP=10 cargo release $(BUMP) \
+	-p foundry-fork-db \
+	$(exec)
+
+.PHONY: release-wallets
+release-wallets: ## Release wallets crate.
+	cd crates/wallets && git cliff --unreleased --prepend CHANGELOG.md
+	cargo +stable semver-checks -p foundry-wallets
+	PUBLISH_GRACE_SLEEP=10 cargo release $(BUMP) \
+	-p foundry-wallets \
+	$(exec)
+
 ##@ Other
 
 .PHONY: lock
