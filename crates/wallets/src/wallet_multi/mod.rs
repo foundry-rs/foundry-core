@@ -1,9 +1,10 @@
+#[cfg(feature = "browser")]
+use crate::{BrowserWalletOpts, wallet_browser::signer::BrowserSigner};
 use crate::{
-    BrowserWalletOpts,
     signer::{PendingSigner, WalletSigner},
     utils,
-    wallet_browser::signer::BrowserSigner,
 };
+#[cfg(feature = "browser")]
 use alloy_network::Network;
 use alloy_primitives::map::AddressHashMap;
 use alloy_signer::Signer;
@@ -233,6 +234,7 @@ pub struct MultiWalletOpts {
     pub turnkey: bool,
 
     /// Browser wallet options
+    #[cfg(feature = "browser")]
     #[command(flatten)]
     pub browser: BrowserWalletOpts,
 }
@@ -498,6 +500,7 @@ impl MultiWalletOpts {
     }
 
     /// Launches and returns the Browser signer if `--browser` flag is set
+    #[cfg(feature = "browser")]
     pub async fn browser_signer<N: Network>(&self) -> Result<Option<BrowserSigner<N>>> {
         self.browser.run().await
     }

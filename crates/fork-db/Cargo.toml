@@ -17,6 +17,10 @@ workspace = true
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = []
+zstd = ["dep:zstd"]
+
 [dependencies]
 alloy-chains = { version = "0.2", default-features = false, features = ["serde"] }
 alloy-primitives = { workspace = true, features = ["map"] }
@@ -38,8 +42,10 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 tracing.workspace = true
 
 url = "2"
+zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 alloy-consensus = { workspace = true }
 alloy-rpc-client = "2.0.0"
+tempfile.workspace = true
 tiny_http = "0.12"

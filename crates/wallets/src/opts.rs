@@ -1,9 +1,19 @@
-use crate::{signer::WalletSigner, tempo::TempoAccessKeyConfig, utils, wallet_raw::RawWalletOpts};
+#[cfg(feature = "tempo")]
+use crate::tempo::TempoAccessKeyConfig;
+use crate::{signer::WalletSigner, utils, wallet_raw::RawWalletOpts};
 use alloy_primitives::Address;
+#[cfg(feature = "tempo")]
 use alloy_signer::Signer;
 use clap::Parser;
 use eyre::Result;
 use serde::Serialize;
+
+/// When the `tempo` feature is enabled this is [`TempoAccessKeyConfig`];
+/// otherwise it is `()` so the API shape stays the same.
+#[cfg(feature = "tempo")]
+pub type MaybeTempoConfig = TempoAccessKeyConfig;
+#[cfg(not(feature = "tempo"))]
+pub type MaybeTempoConfig = ();
 
 /// The wallet options can either be:
 /// 1. Raw (via private key / mnemonic file, see `RawWallet`)
@@ -112,7 +122,8 @@ pub struct WalletOpts {
         long = "tempo.access-key",
         help_heading = "Wallet options - Tempo",
         value_name = "PRIVATE_KEY",
-        env = "TEMPO_ACCESS_KEY"
+        env = "TEMPO_ACCESS_KEY",
+        hide = !cfg!(feature = "tempo")
     )]
     pub tempo_access_key: Option<String>,
 
@@ -124,7 +135,8 @@ pub struct WalletOpts {
         help_heading = "Wallet options - Tempo",
         value_name = "ADDRESS",
         requires = "tempo_access_key",
-        env = "TEMPO_ROOT_ACCOUNT"
+        env = "TEMPO_ROOT_ACCOUNT",
+        hide = !cfg!(feature = "tempo")
     )]
     pub tempo_root_account: Option<Address>,
 }
@@ -132,17 +144,16 @@ pub struct WalletOpts {
 impl WalletOpts {
     /// Attempts to resolve a signer from the configured wallet options.
     ///
-    /// Returns the signer and, for Tempo keychain mode, an [`TempoAccessKeyConfig`] describing the
-    /// root wallet and provisioning data.
+    /// Returns the signer and, when the `tempo` feature is enabled and Tempo keychain mode is
+    /// used, a [`TempoAccessKeyConfig`] describing the root wallet and provisioning data.
     ///
     /// Returns `Ok((None, None))` if no wallet option was configured and no Tempo fallback
     /// matched.
-    pub async fn maybe_signer(
-        &self,
-    ) -> Result<(Option<WalletSigner>, Option<TempoAccessKeyConfig>)> {
+    pub async fn maybe_signer(&self) -> Result<(Option<WalletSigner>, Option<MaybeTempoConfig>)> {
         trace!("start finding signer");
 
         // If a Tempo access key is provided on the CLI, use it directly.
+        #[cfg(feature = "tempo")]
         if let Some(ref access_key) = self.tempo_access_key {
             let root_account = self.tempo_root_account.ok_or_else(|| {
                 eyre::eyre!("--tempo.root-account is required when --tempo.access-key is set")
@@ -209,6 +220,7 @@ impl WalletOpts {
         } else {
             // No explicit wallet option was provided. Try Tempo wallet as a fallback
             // if `--from` is set.
+            #[cfg(feature = "tempo")]
             if let Some(from) = self.from {
                 match crate::tempo::lookup_signer(from)? {
                     crate::tempo::TempoLookup::Direct(signer) => {
@@ -266,6 +278,8 @@ impl From<RawWalletOpts> for WalletOpts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(redundant_imports)]
+    use alloy_signer::Signer;
     use std::{path::Path, str::FromStr};
 
     #[tokio::test]
