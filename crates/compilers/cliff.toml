@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 # https://keats.github.io/tera/docs/#introduction
 body = """
 {% if version %}\
-    ## [{{ version | trim_start_matches(pat="v") }}](https://github.com/foundry-rs/foundry-core/releases/tag/v{{ version | trim_start_matches(pat="v") }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+    ## [{{ version | trim_start_matches(pat="compilers-v") }}](https://github.com/foundry-rs/foundry-core/releases/tag/{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
 {% else %}\
     ## [Unreleased](https://github.com/foundry-rs/foundry-core/compare/{{ previous.version }}...HEAD)
 {% endif %}\
@@ -48,7 +48,8 @@ commit_parsers = [
 ]
 protect_breaking_commits = false
 filter_commits = false
-tag_pattern = "v[0-9]*"
+tag_pattern = "compilers-v[0-9]*"
 skip_tags = "beta|alpha"
 ignore_tags = "rc"
 sort_commits = "newest"
+include_paths = ["crates/compilers/**/*"]

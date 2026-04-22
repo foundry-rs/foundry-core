@@ -1,0 +1,2 @@
+tag-prefix = "compilers-"
+pre-release-commit-message = "chore: release compilers {{version}}"

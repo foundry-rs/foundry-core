@@ -1,0 +1,2 @@
+tag-prefix = "fork-db-"
+pre-release-commit-message = "chore: release fork-db {{version}}"

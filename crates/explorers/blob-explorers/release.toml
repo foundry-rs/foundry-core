@@ -1,0 +1,2 @@
+tag = false
+pre-release-commit-message = "chore: release explorers {{version}}"
