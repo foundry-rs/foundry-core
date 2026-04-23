@@ -14,12 +14,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-foundry-compilers-artifacts = { workspace = true, features = [
+foundry-compilers-artifacts = { version = "0.19.14", path = "../artifacts/artifacts", features = [
     "checksum",
     "walkdir",
     "rayon",
 ] }
-foundry-compilers-core = { workspace = true, features = ["hasher", "regex"] }
+foundry-compilers-core = { version = "0.19.14", path = "../core", features = ["hasher", "regex"] }
 serde.workspace = true
 semver.workspace = true
 alloy-primitives.workspace = true
@@ -61,7 +61,7 @@ tokio = { version = "1.47", features = ["rt-multi-thread", "macros"] }
 reqwest = { workspace = true }
 tempfile = "3.20"
 snapbox.workspace = true
-foundry-compilers-core = { workspace = true, features = ["test-utils"] }
+foundry-compilers-core = { version = "0.19.14", path = "../core", features = ["test-utils"] }
 
 [features]
 default = ["rustls"]

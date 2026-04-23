@@ -167,9 +167,6 @@ uuid = { version = "1.19.0", features = ["v4", "serde"] }
 walkdir = "2.5"
 yansi = "1.0"
 
-# crates
-foundry-compilers = { path = "crates/compilers/crates/compilers" }
-foundry-compilers-artifacts = { path = "crates/compilers/crates/artifacts/artifacts" }
-foundry-compilers-artifacts-solc = { path = "crates/compilers/crates/artifacts/solc" }
-foundry-compilers-artifacts-vyper = { path = "crates/compilers/crates/artifacts/vyper" }
-foundry-compilers-core = { path = "crates/compilers/crates/core" }
+# cross-group crate dependencies
+foundry-compilers = { version = "0.19.14", path = "crates/compilers/crates/compilers" }
+
