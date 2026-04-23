@@ -102,7 +102,12 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: test
         shell: bash
-        run: cargo nextest run --workspace ${{ matrix.flags }} --retries 2
+        run: |
+          args="--workspace ${{ matrix.flags }} --retries 2"
+          if [ -z "$ETHERSCAN_API_KEY" ]; then
+            args="$args --exclude foundry-block-explorers"
+          fi
+          cargo nextest run $args
         env:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
 
