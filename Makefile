@@ -93,71 +93,11 @@ doc: ## Build the documentation.
 		--locked
 
 ##@ Release
-# Prepare a release: update changelog, run semver-checks, bump versions.
-# Open a PR with the changes, merge, then push the tag to trigger CI publish.
-#
-# Usage:
-#   make release-compilers version=X.Y.Z
-#   # open PR, merge, then:
-#   git tag compilers-vX.Y.Z && git push origin compilers-vX.Y.Z
 
-.PHONY: release-compilers
-release-compilers: ## Prepare compilers release (version=X.Y.Z).
-	@test -n "$(version)" || (echo "usage: make release-compilers version=X.Y.Z" && exit 1)
-	cd crates/compilers && git cliff --unreleased --tag "compilers-v$(version)" --prepend CHANGELOG.md
-	cargo +stable semver-checks \
-	-p foundry-compilers \
-	-p foundry-compilers-core \
-	-p foundry-compilers-artifacts \
-	-p foundry-compilers-artifacts-solc \
-	-p foundry-compilers-artifacts-vyper
-	cargo release $(version) \
-	-p foundry-compilers \
-	-p foundry-compilers-core \
-	-p foundry-compilers-artifacts \
-	-p foundry-compilers-artifacts-solc \
-	-p foundry-compilers-artifacts-vyper \
-	--no-publish \
-	--no-tag \
-	--no-push \
-	--execute --no-confirm
-
-.PHONY: release-explorers
-release-explorers: ## Prepare explorers release (version=X.Y.Z).
-	@test -n "$(version)" || (echo "usage: make release-explorers version=X.Y.Z" && exit 1)
-	cd crates/explorers && git cliff --unreleased --tag "explorers-v$(version)" --prepend CHANGELOG.md
-	cargo +stable semver-checks -p foundry-block-explorers -p foundry-blob-explorers
-	cargo release $(version) \
-	-p foundry-block-explorers \
-	-p foundry-blob-explorers \
-	--no-publish \
-	--no-tag \
-	--no-push \
-	--execute --no-confirm
-
-.PHONY: release-fork-db
-release-fork-db: ## Prepare fork-db release (version=X.Y.Z).
-	@test -n "$(version)" || (echo "usage: make release-fork-db version=X.Y.Z" && exit 1)
-	cd crates/fork-db && git cliff --unreleased --tag "fork-db-v$(version)" --prepend CHANGELOG.md
-	cargo +stable semver-checks -p foundry-fork-db
-	cargo release $(version) \
-	-p foundry-fork-db \
-	--no-publish \
-	--no-tag \
-	--no-push \
-	--execute --no-confirm
-
-.PHONY: release-wallets
-release-wallets: ## Prepare wallets release (version=X.Y.Z).
-	@test -n "$(version)" || (echo "usage: make release-wallets version=X.Y.Z" && exit 1)
-	cd crates/wallets && git cliff --unreleased --tag "wallets-v$(version)" --prepend CHANGELOG.md
-	cargo +stable semver-checks -p foundry-wallets
-	cargo release $(version) \
-	-p foundry-wallets \
-	--no-publish \
-	--no-tag \
-	--no-push \
-	--execute --no-confirm
+.PHONY: release
+release: ## Release a crate group. Usage: make release group=wallets version=X.Y.Z [execute=1]
+	@test -n "$(group)" -a -n "$(version)" || (echo "usage: make release group=<compilers|explorers|fork-db|wallets> version=X.Y.Z [execute=1]" && exit 1)
+	.github/scripts/release.sh "$(group)" "$(version)" $(if $(execute),--execute)
 
 ##@ Other
 
