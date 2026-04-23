@@ -38,7 +38,7 @@ jobs:
       - name: Test
         env:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
-        run: cargo nextest run --workspace --all-features --no-fail-fast
+        run: cargo nextest run --workspace --all-features --no-fail-fast --ignore-default-filter
 
   issue:
     name: Open an issue

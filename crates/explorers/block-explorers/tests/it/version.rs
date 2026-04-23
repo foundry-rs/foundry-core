@@ -2,7 +2,7 @@ use foundry_block_explorers::{errors::EtherscanError, utils::lookup_compiler_ver
 use semver::{BuildMetadata, Prerelease, Version};
 
 #[tokio::test]
-async fn can_lookup_compiler_version_build_metadata() {
+async fn external_can_lookup_compiler_version_build_metadata() {
     let v = Version::new(0, 8, 13);
     let version = lookup_compiler_version(&v).await.unwrap();
     assert_eq!(v.major, version.major);
@@ -13,7 +13,7 @@ async fn can_lookup_compiler_version_build_metadata() {
 }
 
 #[tokio::test]
-async fn errors_on_invalid_solc() {
+async fn external_errors_on_invalid_solc() {
     let v = Version::new(100, 0, 0);
     let err = lookup_compiler_version(&v).await.unwrap_err();
     assert!(matches!(err, EtherscanError::MissingSolcVersion(_)));

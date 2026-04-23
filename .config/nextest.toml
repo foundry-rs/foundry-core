@@ -1,0 +1,6 @@
+[test-groups]
+
+[profile.default]
+retries = { backoff = "exponential", count = 2, delay = "5s", jitter = true }
+slow-timeout = { period = "30s", terminate-after = 3 }
+default-filter = "not test(/external_/)"
