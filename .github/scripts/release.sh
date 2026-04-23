@@ -59,7 +59,7 @@ esac
 
 # 1. Dry-run cargo release (always, as a sanity check)
 echo "==> Running cargo release dry-run"
-cargo release "$VERSION" "${PACKAGES[@]}"
+cargo release "$VERSION" "${PACKAGES[@]}" --no-push
 confirm
 
 # 2. Semver-checks
