@@ -14,8 +14,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-foundry-compilers-artifacts-solc.workspace = true
-foundry-compilers-core.workspace = true
+foundry-compilers-artifacts-solc = { version = "0.19.14", path = "../solc" }
+foundry-compilers-core = { version = "0.19.14", path = "../../core" }
 
 serde.workspace = true
 alloy-primitives.workspace = true
@@ -23,5 +23,5 @@ alloy-json-abi.workspace = true
 semver.workspace = true
 
 [dev-dependencies]
-foundry-compilers-core = { workspace = true, features = ["test-utils"] }
+foundry-compilers-core = { version = "0.19.14", path = "../../core", features = ["test-utils"] }
 serde_json.workspace = true
