@@ -92,6 +92,13 @@ doc: ## Build the documentation.
 		--no-deps \
 		--locked
 
+##@ Release
+
+.PHONY: release
+release: ## Release a crate group. Usage: make release group=wallets version=X.Y.Z [execute=1]
+	@test -n "$(group)" -a -n "$(version)" || (echo "usage: make release group=<compilers|explorers|fork-db|wallets> version=X.Y.Z [execute=1]" && exit 1)
+	.github/scripts/release.sh "$(group)" "$(version)" $(if $(execute),--execute)
+
 ##@ Other
 
 .PHONY: lock

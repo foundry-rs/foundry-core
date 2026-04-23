@@ -1,0 +1,7 @@
+tag = false
+pre-release-commit-message = "chore: release compilers {{version}}"
+allow-branch = ["main"]
+sign-commit = true
+sign-tag = true
+rate-limit.existing-packages = 10
+pre-release-hook = ["bash", "-c", "$WORKSPACE_ROOT/.github/scripts/changelog.sh --tag {{version}}"]
