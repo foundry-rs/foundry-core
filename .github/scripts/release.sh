@@ -60,7 +60,7 @@ esac
 # 1. Dry-run cargo release (always, as a sanity check)
 echo "==> Next: cargo release dry-run"
 confirm
-cargo release "$VERSION" "${PACKAGES[@]}" --no-push
+cargo release "$VERSION" "${PACKAGES[@]}" --no-push --no-tag
 
 # 2. Semver-checks
 echo "==> Next: semver-checks"
