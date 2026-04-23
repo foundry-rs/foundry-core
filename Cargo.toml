@@ -6,6 +6,7 @@ members = [
     "crates/explorers/*",
     "crates/fork-db",
     "crates/wallets",
+    "crates/op/*",
 ]
 resolver = "2"
 
@@ -167,6 +168,29 @@ tracing = "0.1"
 uuid = { version = "1.19.0", features = ["v4", "serde"] }
 walkdir = "2.5"
 yansi = "1.0"
+
+# revm
+revm = { version = "38.0.0", default-features = false }
+
+# alloy-evm
+alloy-evm = { version = "0.33.2", default-features = false }
+
+# alloy (additions for OP crates)
+alloy-hardforks = { version = "0.4.7", default-features = false }
+alloy-provider = { version = "2.0.0", default-features = false }
+alloy-network-primitives = { version = "2.0.0", default-features = false }
+
+# misc (additions for OP crates)
+auto_impl = "1"
+derive_more = { version = "2.1", features = ["full"] }
+
+# op crates
+alloy-op-hardforks = { path = "crates/op/alloy-op-hardforks" }
+op-revm = { path = "crates/op/op-revm" }
+op-alloy-consensus = { path = "crates/op/op-alloy-consensus" }
+op-alloy-rpc-types = { path = "crates/op/op-alloy-rpc-types" }
+op-alloy-network = { path = "crates/op/op-alloy-network" }
+alloy-op-evm = { path = "crates/op/alloy-op-evm" }
 
 # crates
 foundry-compilers = { path = "crates/compilers/crates/compilers" }

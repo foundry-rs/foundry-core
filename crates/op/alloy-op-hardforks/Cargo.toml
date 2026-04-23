@@ -1,0 +1,33 @@
+[package]
+name = "alloy-op-hardforks"
+description = "Bindings for named OP hardforks"
+
+version = "0.4.7"
+edition = "2024"
+rust-version.workspace = true
+authors = ["Alloy Contributors", "OpLabsPBC"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/foundry-rs/foundry-core"
+repository = "https://github.com/foundry-rs/foundry-core"
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-hardforks = { workspace = true }
+
+# ethereum
+alloy-chains = { workspace = true }
+alloy-primitives = { workspace = true }
+
+# misc
+auto_impl = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+serde = [
+	"dep:serde",
+	"alloy-hardforks/serde",
+	"alloy-chains/serde",
+	"alloy-primitives/serde"
+]
