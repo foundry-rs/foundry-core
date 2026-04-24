@@ -2,7 +2,6 @@
 
 use crate::error::{SolcError, SolcIoError};
 use alloy_primitives::{hex, keccak256};
-use cfg_if::cfg_if;
 use semver::{Version, VersionReq};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
@@ -406,36 +405,36 @@ pub fn find_fave_or_alt_path(root: &Path, fave: &str, alt: &str) -> PathBuf {
     p
 }
 
-cfg_if! {
-    if #[cfg(any(feature = "async", feature = "svm-solc"))] {
-        use tokio::runtime::{Handle, Runtime};
+#[cfg(any(feature = "async", feature = "svm-solc"))]
+use tokio::runtime::{Handle, Runtime};
 
-        #[derive(Debug)]
-        pub enum RuntimeOrHandle {
-            Runtime(Runtime),
-            Handle(Handle),
+#[cfg(any(feature = "async", feature = "svm-solc"))]
+#[derive(Debug)]
+pub enum RuntimeOrHandle {
+    Runtime(Runtime),
+    Handle(Handle),
+}
+
+#[cfg(any(feature = "async", feature = "svm-solc"))]
+impl Default for RuntimeOrHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(feature = "async", feature = "svm-solc"))]
+impl RuntimeOrHandle {
+    pub fn new() -> Self {
+        match Handle::try_current() {
+            Ok(handle) => Self::Handle(handle),
+            Err(_) => Self::Runtime(Runtime::new().expect("Failed to start runtime")),
         }
+    }
 
-        impl Default for RuntimeOrHandle {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-
-        impl RuntimeOrHandle {
-            pub fn new() -> Self {
-                match Handle::try_current() {
-                    Ok(handle) => Self::Handle(handle),
-                    Err(_) => Self::Runtime(Runtime::new().expect("Failed to start runtime")),
-                }
-            }
-
-            pub fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
-                match &self {
-                    Self::Runtime(runtime) => runtime.block_on(f),
-                    Self::Handle(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
-                }
-            }
+    pub fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
+        match &self {
+            Self::Runtime(runtime) => runtime.block_on(f),
+            Self::Handle(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
         }
     }
 }

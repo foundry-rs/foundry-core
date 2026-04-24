@@ -138,7 +138,6 @@ tempo-primitives = { version = "1.6", default-features = false, features = [
 # misc
 async-trait = "0.1"
 axum = "0.8"
-cfg-if = "1.0"
 dirs = "6"
 dunce = "1.0"
 eyre = "0.6"
