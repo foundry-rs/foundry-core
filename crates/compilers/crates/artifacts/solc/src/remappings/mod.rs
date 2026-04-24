@@ -358,7 +358,6 @@ fn needs_trailing_slash(name_or_path: &str) -> bool {
 mod tests {
     pub use super::*;
 
-
     #[test]
     fn relative_remapping() {
         let remapping = "oz=a/b/c/d";
