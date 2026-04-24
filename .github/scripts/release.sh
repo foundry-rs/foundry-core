@@ -89,7 +89,12 @@ if $EXECUTE; then
     echo "==> Next: create GitHub release for ${TAG}"
     confirm
 
-    gh release create "$TAG" --generate-notes
+    PREV_TAG=$(git tag -l "${GROUP}-v*" --sort=-v:refname | grep -v "^${TAG}$" | head -1)
+    if [[ -n "$PREV_TAG" ]]; then
+        gh release create "$TAG" --generate-notes --notes-start-tag "$PREV_TAG"
+    else
+        gh release create "$TAG" --generate-notes
+    fi
 else
     echo "Dry-run complete. Re-run with --execute to publish."
 fi
