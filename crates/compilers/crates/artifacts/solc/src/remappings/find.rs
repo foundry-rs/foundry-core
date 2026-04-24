@@ -492,7 +492,6 @@ fn last_nested_source_dir(root: &Path, dir: &Path) -> PathBuf {
 mod tests {
     use super::{super::tests::*, *};
     use foundry_compilers_core::utils::{mkdir_or_touch, tempdir, touch};
-    use similar_asserts::assert_eq;
 
     /// Helper function for converting PathBufs to remapping strings.
     fn to_str(p: std::path::PathBuf) -> String {

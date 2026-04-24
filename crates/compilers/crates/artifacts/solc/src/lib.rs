@@ -1837,7 +1837,7 @@ impl SourceFiles {
 mod tests {
     use super::*;
     use alloy_primitives::Address;
-    use similar_asserts::assert_eq;
+
     use std::fs;
 
     #[test]
