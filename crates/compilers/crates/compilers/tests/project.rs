@@ -31,7 +31,7 @@ use foundry_compilers_core::{
     utils::{self, RuntimeOrHandle, canonicalize},
 };
 use semver::Version;
-use similar_asserts::assert_eq;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env,
