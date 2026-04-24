@@ -3,7 +3,7 @@ name = "foundry-blob-explorers"
 description = "Bindings for blobscan.com and other blob explorer APIs"
 keywords = ["ethereum", "blobscan"]
 
-version = "0.20.0"
+version = "0.22.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
