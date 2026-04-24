@@ -357,7 +357,7 @@ fn needs_trailing_slash(name_or_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     pub use super::*;
-    pub use similar_asserts::assert_eq;
+
 
     #[test]
     fn relative_remapping() {
