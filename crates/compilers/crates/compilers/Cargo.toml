@@ -94,6 +94,7 @@ project-util = [
 ]
 
 rustls = ["svm?/rustls"]
+openssl = ["svm?/openssl"]
 
 [[test]]
 name = "project"
