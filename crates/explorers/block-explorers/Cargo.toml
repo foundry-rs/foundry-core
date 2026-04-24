@@ -3,7 +3,7 @@ name = "foundry-block-explorers"
 description = "Bindings for Etherscan.io and other block explorer APIs"
 keywords = ["crypto", "ethers", "ethereum", "web3", "etherscan"]
 
-version = "0.22.0"
+version = "0.23.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
