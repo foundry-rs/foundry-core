@@ -2,7 +2,7 @@
 name = "foundry-compilers"
 description = "Compiler abstraction and Foundry project implementation"
 
-version = "0.19.14"
+version = "0.20.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -14,12 +14,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-foundry-compilers-artifacts = { version = "0.19.14", path = "../artifacts/artifacts", features = [
+foundry-compilers-artifacts = { version = "0.20.0", path = "../artifacts/artifacts", features = [
     "checksum",
     "walkdir",
     "rayon",
 ] }
-foundry-compilers-core = { version = "0.19.14", path = "../core", features = ["hasher", "regex"] }
+foundry-compilers-core = { version = "0.20.0", path = "../core", features = ["hasher", "regex"] }
 serde.workspace = true
 semver.workspace = true
 alloy-primitives.workspace = true
@@ -60,7 +60,7 @@ tokio = { version = "1.47", features = ["rt-multi-thread", "macros"] }
 reqwest = { workspace = true }
 tempfile = "3.20"
 snapbox.workspace = true
-foundry-compilers-core = { version = "0.19.14", path = "../core", features = ["test-utils"] }
+foundry-compilers-core = { version = "0.20.0", path = "../core", features = ["test-utils"] }
 
 [features]
 default = ["rustls"]

@@ -2,7 +2,7 @@
 name = "foundry-compilers-core"
 description = "Core utilities for foundry-compilers crates"
 
-version = "0.19.14"
+version = "0.20.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

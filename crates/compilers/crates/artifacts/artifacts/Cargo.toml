@@ -2,7 +2,7 @@
 name = "foundry-compilers-artifacts"
 description = "Rust bindings for compilers JSON artifacts"
 
-version = "0.19.14"
+version = "0.20.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -14,8 +14,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-foundry-compilers-artifacts-solc = { version = "0.19.14", path = "../solc" }
-foundry-compilers-artifacts-vyper = { version = "0.19.14", path = "../vyper" }
+foundry-compilers-artifacts-solc = { version = "0.20.0", path = "../solc" }
+foundry-compilers-artifacts-vyper = { version = "0.20.0", path = "../vyper" }
 
 [features]
 async = ["foundry-compilers-artifacts-solc/async"]

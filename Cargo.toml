@@ -166,5 +166,5 @@ walkdir = "2.5"
 yansi = "1.0"
 
 # cross-group crate dependencies
-foundry-compilers = { version = "0.19.14", path = "crates/compilers/crates/compilers" }
+foundry-compilers = { version = "0.20.0", path = "crates/compilers/crates/compilers" }
 

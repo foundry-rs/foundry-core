@@ -2,7 +2,7 @@
 name = "foundry-compilers-artifacts-solc"
 description = "Rust bindings for Solc JSON artifacts"
 
-version = "0.19.14"
+version = "0.20.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -14,7 +14,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-foundry-compilers-core = { version = "0.19.14", path = "../../core" }
+foundry-compilers-core = { version = "0.20.0", path = "../../core" }
 
 alloy-json-abi.workspace = true
 alloy-primitives.workspace = true
@@ -39,7 +39,7 @@ path-slash.workspace = true
 
 [dev-dependencies]
 serde_path_to_error = "0.1"
-foundry-compilers-core = { version = "0.19.14", path = "../../core", features = ["test-utils"] }
+foundry-compilers-core = { version = "0.20.0", path = "../../core", features = ["test-utils"] }
 
 [features]
 async = ["dep:tokio", "dep:futures-util"]
