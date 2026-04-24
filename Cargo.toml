@@ -152,7 +152,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 semver = { version = "1.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision"] }
-similar-asserts = "1"
+similar-asserts = "2"
 snapbox = "0.6.21"
 solar = { package = "solar-compiler", version = "=0.1.8", default-features = false }
 svm = { package = "svm-rs", version = "0.5", default-features = false }
