@@ -592,8 +592,7 @@ mod tests {
 
     #[test]
     fn builder_no_proxy_builds() {
-        let client =
-            Client::builder().chain(Chain::mainnet()).unwrap().no_proxy().build().unwrap();
+        let client = Client::builder().chain(Chain::mainnet()).unwrap().no_proxy().build().unwrap();
         assert_eq!(client.etherscan_url.as_str(), "https://etherscan.io/");
     }
 
