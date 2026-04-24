@@ -11,3 +11,5 @@ Originally part of [`ethers-rs`](https://github.com/gakonst/ethers-rs) as `ether
 - `svm-solc`: Enables [svm](https://github.com/alloy-rs/svm-rs) to auto-detect and manage `solc` builds.
 - `project-util`: Utilities for creating and testing project workspaces.
 - `rustls`: Uses `rustls` for TLS (enabled by default).
+- `openssl`: Uses `openssl` for TLS.
+- `test-utils`: Testing utilities.
