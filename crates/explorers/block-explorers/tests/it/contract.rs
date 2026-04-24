@@ -10,7 +10,7 @@ const DEPOSIT_CONTRACT_ABI: &str = include!("../../test-data/deposit_contract.ex
 #[ignore]
 #[tokio::test]
 #[serial]
-async fn can_fetch_ftm_contract_abi() {
+async fn external_can_fetch_ftm_contract_abi() {
     run_with_client(Chain::from_named(NamedChain::Fantom), |client| async move {
         let _abi = client
             .contract_abi("0x80AA7cb0006d5DDD91cce684229Ac6e398864606".parse().unwrap())
@@ -22,7 +22,7 @@ async fn can_fetch_ftm_contract_abi() {
 
 #[tokio::test]
 #[serial]
-async fn can_fetch_contract_abi() {
+async fn external_can_fetch_contract_abi() {
     run_with_client(Chain::mainnet(), |client| async move {
         let abi = client
             .contract_abi("0x00000000219ab540356cBB839Cbe05303d7705Fa".parse().unwrap())
@@ -35,7 +35,7 @@ async fn can_fetch_contract_abi() {
 
 #[tokio::test]
 #[serial]
-async fn can_fetch_and_cache_contract_abi() {
+async fn external_can_fetch_and_cache_contract_abi() {
     async fn fetch_abi(client: &Client, addr: &str) {
         let abi = client.contract_abi(addr.parse().unwrap()).await.unwrap();
         assert_eq!(abi, serde_json::from_str(DEPOSIT_CONTRACT_ABI).unwrap());
@@ -55,7 +55,7 @@ async fn can_fetch_and_cache_contract_abi() {
 
 #[tokio::test]
 #[serial]
-async fn can_fetch_and_cache_contract_source_code() {
+async fn external_can_fetch_and_cache_contract_source_code() {
     async fn fetch_source_code(client: &Client, addr: &str) {
         let meta = client.contract_source_code(addr.parse().unwrap()).await.unwrap();
         assert_eq!(meta.items.len(), 1);
@@ -80,7 +80,7 @@ async fn can_fetch_and_cache_contract_source_code() {
 
 #[tokio::test]
 #[serial]
-async fn can_fetch_deposit_contract_source_code_from_blockscout() {
+async fn external_can_fetch_deposit_contract_source_code_from_blockscout() {
     let client = Client::builder()
         .with_url("https://eth.blockscout.com")
         .unwrap()
@@ -103,7 +103,7 @@ async fn can_fetch_deposit_contract_source_code_from_blockscout() {
 
 #[tokio::test]
 #[serial]
-async fn can_fetch_other_contract_source_code_from_blockscout() {
+async fn external_can_fetch_other_contract_source_code_from_blockscout() {
     let client = Client::builder()
         .with_url("https://eth.blockscout.com")
         .unwrap()
@@ -125,7 +125,7 @@ async fn can_fetch_other_contract_source_code_from_blockscout() {
 
 #[tokio::test]
 #[serial]
-async fn can_fetch_contract_source_code() {
+async fn external_can_fetch_contract_source_code() {
     run_with_client(Chain::mainnet(), |client| async move {
         let meta = client
             .contract_source_code("0x00000000219ab540356cBB839Cbe05303d7705Fa".parse().unwrap())
@@ -143,7 +143,7 @@ async fn can_fetch_contract_source_code() {
 
 #[tokio::test]
 #[serial]
-async fn can_get_error_on_unverified_contract() {
+async fn external_can_get_error_on_unverified_contract() {
     init_tracing();
     run_with_client(Chain::mainnet(), |client| async move {
         let addr = "0xb5c31a0e22cae98ac08233e512bd627885aa24e5".parse().unwrap();
@@ -156,7 +156,7 @@ async fn can_get_error_on_unverified_contract() {
 /// Query a contract that has a single string source entry instead of underlying JSON metadata.
 #[tokio::test]
 #[serial]
-async fn can_fetch_contract_source_tree_for_singleton_contract() {
+async fn external_can_fetch_contract_source_tree_for_singleton_contract() {
     run_with_client(Chain::mainnet(), |client| async move {
         let meta = client
             .contract_source_code("0x00000000219ab540356cBB839Cbe05303d7705Fa".parse().unwrap())
@@ -175,7 +175,7 @@ async fn can_fetch_contract_source_tree_for_singleton_contract() {
 /// Query a contract that has many source entries as JSON metadata and ensure they are reflected.
 #[tokio::test]
 #[serial]
-async fn can_fetch_contract_source_tree_for_multi_entry_contract() {
+async fn external_can_fetch_contract_source_tree_for_multi_entry_contract() {
     run_with_client(Chain::mainnet(), |client| async move {
         let meta = client
             .contract_source_code("0x8d04a8c79cEB0889Bdd12acdF3Fa9D207eD3Ff63".parse().unwrap())
@@ -192,7 +192,7 @@ async fn can_fetch_contract_source_tree_for_multi_entry_contract() {
 /// Query a contract that has a plain source code mapping instead of tagged structures.
 #[tokio::test]
 #[serial]
-async fn can_fetch_contract_source_tree_for_plain_source_code_mapping() {
+async fn external_can_fetch_contract_source_tree_for_plain_source_code_mapping() {
     run_with_client(Chain::mainnet(), |client| async move {
         let meta = client
             .contract_source_code("0x68b26dcf21180d2a8de5a303f8cc5b14c8d99c4c".parse().unwrap())
@@ -208,7 +208,7 @@ async fn can_fetch_contract_source_tree_for_plain_source_code_mapping() {
 
 #[tokio::test]
 #[serial]
-async fn can_fetch_contract_creation_data() {
+async fn external_can_fetch_contract_creation_data() {
     run_with_client(Chain::mainnet(), |client| async move {
         client
             .contract_creation_data("0xdac17f958d2ee523a2206206994597c13d831ec7".parse().unwrap())
@@ -220,7 +220,7 @@ async fn can_fetch_contract_creation_data() {
 
 #[tokio::test]
 #[serial]
-async fn error_when_creation_data_for_eoa() {
+async fn external_error_when_creation_data_for_eoa() {
     init_tracing();
     run_with_client(Chain::mainnet(), |client| async move {
         let addr = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045".parse().unwrap();

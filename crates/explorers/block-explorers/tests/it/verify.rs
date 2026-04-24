@@ -11,7 +11,7 @@ use tracing::trace;
 
 #[tokio::test]
 #[serial]
-async fn test_can_flatten_and_verify_contract_single_file_mainnet() {
+async fn external_can_flatten_and_verify_contract_single_file_mainnet() {
     let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test-data/rewards"));
     let paths = ProjectPathsConfig::builder()
         .sources(root)
@@ -55,7 +55,7 @@ async fn test_can_flatten_and_verify_contract_single_file_mainnet() {
 
 #[tokio::test]
 #[serial]
-async fn can_verify_contract_json_multi_file_mainnet() {
+async fn external_can_verify_contract_json_multi_file_mainnet() {
     let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test-data/rewards"));
 
     let paths = ProjectPathsConfig::builder()
@@ -120,7 +120,7 @@ async fn can_verify_contract_json_multi_file_mainnet() {
 
 #[tokio::test]
 #[serial]
-async fn can_verify_contract_json_multi_file_v2_base() {
+async fn external_can_verify_contract_json_multi_file_v2_base() {
     let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test-data/rewards"));
 
     let compiler_version = "v0.8.17+commit.8df45f5f";
@@ -165,7 +165,7 @@ async fn can_verify_contract_json_multi_file_v2_base() {
 
 #[tokio::test]
 #[serial]
-async fn can_verify_contract_json_multi_file_v2_fails_base() {
+async fn external_can_verify_contract_json_multi_file_v2_fails_base() {
     let compiler_version = "v0.8.17+commit.8df45f5f";
 
     let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test-data/rewards"));
@@ -233,7 +233,7 @@ async fn can_verify_contract_json_multi_file_v2_fails_base() {
 
 #[tokio::test]
 #[serial]
-async fn can_verify_contract_sol_flatten_v2_fails_base() {
+async fn external_can_verify_contract_sol_flatten_v2_fails_base() {
     let compiler_version = "v0.8.17+commit.8df45f5f";
 
     let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test-data/rewards"));
