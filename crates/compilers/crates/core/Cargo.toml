@@ -15,7 +15,6 @@ workspace = true
 
 [dependencies]
 alloy-primitives.workspace = true
-cfg-if.workspace = true
 dunce.workspace = true
 semver.workspace = true
 serde_json.workspace = true
