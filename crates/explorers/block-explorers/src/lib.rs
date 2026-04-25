@@ -256,7 +256,8 @@ pub struct ClientBuilder {
     etherscan_url: Option<Url>,
     /// Path to where ABI files should be cached
     cache: Option<Cache>,
-    /// Whether to disable system proxy detection in the default HTTP client
+    /// Whether to disable system proxy detection in the default HTTP client.
+    /// Ignored when a custom client is set via [`with_client`](Self::with_client).
     no_proxy: bool,
 }
 
