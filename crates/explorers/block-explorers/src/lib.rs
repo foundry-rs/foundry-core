@@ -256,6 +256,9 @@ pub struct ClientBuilder {
     etherscan_url: Option<Url>,
     /// Path to where ABI files should be cached
     cache: Option<Cache>,
+    /// Whether to disable system proxy detection in the default HTTP client.
+    /// Ignored when a custom client is set via [`with_client`](Self::with_client).
+    no_proxy: bool,
 }
 
 // === impl ClientBuilder ===
@@ -300,6 +303,19 @@ impl ClientBuilder {
         self
     }
 
+    /// Disables automatic system proxy detection in the default HTTP client.
+    ///
+    /// Mirrors [`reqwest::ClientBuilder::no_proxy`]. Useful in sandboxed
+    /// environments where `reqwest`'s system proxy lookup can panic (for
+    /// example on macOS when `SCDynamicStore` returns NULL).
+    ///
+    /// Has no effect when a custom client is supplied via
+    /// [`with_client`](Self::with_client).
+    pub fn no_proxy(mut self) -> Self {
+        self.no_proxy = true;
+        self
+    }
+
     /// Configures the Etherscan api url
     ///
     /// # Errors
@@ -330,10 +346,17 @@ impl ClientBuilder {
     ///   - `etherscan_api_url`
     ///   - `etherscan_url`
     pub fn build(self) -> Result<Client> {
-        let ClientBuilder { client, api_key, etherscan_api_url, etherscan_url, cache } = self;
+        let ClientBuilder { client, api_key, etherscan_api_url, etherscan_url, cache, no_proxy } =
+            self;
+
+        let client = match client {
+            Some(c) => c,
+            None if no_proxy => reqwest::Client::builder().no_proxy().build()?,
+            None => reqwest::Client::default(),
+        };
 
         let client = Client {
-            client: client.unwrap_or_default(),
+            client,
             api_key,
             etherscan_api_url: etherscan_api_url
                 .clone()
@@ -566,6 +589,12 @@ mod tests {
     fn local_networks_not_supported() {
         let err = Client::new_from_env(Chain::dev()).unwrap_err();
         assert!(matches!(err, EtherscanError::LocalNetworksNotSupported));
+    }
+
+    #[test]
+    fn builder_no_proxy_builds() {
+        let client = Client::builder().chain(Chain::mainnet()).unwrap().no_proxy().build().unwrap();
+        assert_eq!(client.etherscan_url.as_str(), "https://etherscan.io/");
     }
 
     #[test]
