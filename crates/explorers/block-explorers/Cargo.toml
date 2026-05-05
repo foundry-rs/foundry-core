@@ -42,7 +42,7 @@ foundry-compilers = { workspace = true, optional = true }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 serial_test = "3.2.0"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+tracing-subscriber.workspace = true
 
 [features]
 default = ["rustls"]
