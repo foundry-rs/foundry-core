@@ -22,30 +22,30 @@ default = []
 zstd = ["dep:zstd"]
 
 [dependencies]
-alloy-chains = { version = "0.2", default-features = false, features = ["serde"] }
+alloy-chains = { workspace = true, features = ["serde"] }
 alloy-primitives = { workspace = true, features = ["map"] }
-alloy-provider = { version = "2.0.0", default-features = false }
-alloy-rpc-types = { version = "2.0.0", features = ["eth"] }
+alloy-provider = { version = "2.0.4", default-features = false }
+alloy-rpc-types = { version = "2.0.4", features = ["eth"] }
 
 eyre.workspace = true
-futures = "0.3"
+futures = "0.3.32"
 
-parking_lot = "0.12"
+parking_lot = "0.12.5"
 
 revm = { version = "38.0.0", features = ["std", "serde"] }
 
-serde = { workspace = true }
+serde.workspace = true
 serde_json.workspace = true
 
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tracing.workspace = true
 
-url = "2"
-zstd = { version = "0.13", optional = true }
+url = "2.5.8"
+zstd = { version = "0.13.3", optional = true }
 
 [dev-dependencies]
-alloy-consensus = { workspace = true }
-alloy-rpc-client = "2.0.0"
+alloy-consensus.workspace = true
+alloy-rpc-client = "2.0.4"
 tempfile.workspace = true
-tiny_http = "0.12"
+tiny_http = "0.12.0"

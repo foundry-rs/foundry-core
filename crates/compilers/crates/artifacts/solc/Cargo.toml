@@ -38,7 +38,7 @@ rayon = { workspace = true, optional = true }
 path-slash.workspace = true
 
 [dev-dependencies]
-serde_path_to_error = "0.1"
+serde_path_to_error = "0.1.20"
 foundry-compilers-core = { version = "0.20.0", path = "../../core", features = ["test-utils"] }
 
 [features]

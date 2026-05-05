@@ -24,7 +24,7 @@ alloy-eips.workspace = true
 
 reqwest = { workspace = true, features = ["json", "query"] }
 serde = { workspace = true, features = ["derive"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4.44", features = ["serde"] }
 
 [features]
 default = ["rustls"]

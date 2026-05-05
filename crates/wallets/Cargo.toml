@@ -35,7 +35,7 @@ tower-http = { workspace = true, features = ["cors", "set-header"], optional = t
 
 # aws-kms
 alloy-signer-aws = { workspace = true, features = ["eip712"], optional = true }
-aws-config = { version = "1", default-features = true, optional = true }
+aws-config = { version = "1.8.14", default-features = true, optional = true }
 
 # gcp-kms
 alloy-signer-gcp = { workspace = true, features = ["eip712"], optional = true }
@@ -49,11 +49,11 @@ rusqlite = { workspace = true, optional = true }
 alloy-rlp = { workspace = true, optional = true }
 
 async-trait.workspace = true
-clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
-derive_builder = "0.20"
+clap = { version = "4.6.1", features = ["derive", "env", "unicode", "wrap_help"] }
+derive_builder = "0.20.2"
 dirs.workspace = true
 eyre.workspace = true
-rpassword = "7"
+rpassword = "7.5.2"
 serde.workspace = true
 thiserror.workspace = true
 toml = { workspace = true, optional = true }
