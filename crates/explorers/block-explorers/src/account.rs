@@ -99,9 +99,7 @@ mod json_string {
         if json.is_empty() {
             Ok(Option::None)
         } else {
-            serde_json::from_str(&format!("\"{json}\""))
-                .map(Option::Some)
-                .map_err(D::Error::custom)
+            serde_json::from_str(&format!("\"{json}\"")).map(Option::Some).map_err(D::Error::custom)
         }
     }
 }
