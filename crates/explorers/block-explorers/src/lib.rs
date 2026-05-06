@@ -316,6 +316,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Conditionally disables automatic system proxy detection.
+    ///
+    /// When `no_proxy` is `true`, behaves like [`Self::no_proxy`]. When
+    /// `false`, proxy detection is left enabled (the default).
+    ///
+    /// This is useful for threading a config flag through without a
+    /// conditional branch at the call site.
+    pub fn set_no_proxy(mut self, no_proxy: bool) -> Self {
+        self.no_proxy = no_proxy;
+        self
+    }
+
     /// Configures the Etherscan api url
     ///
     /// # Errors
