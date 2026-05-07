@@ -31,8 +31,12 @@ pub static RE_THREE_OR_MORE_NEWLINES: Lazy<Regex> = Lazy::new(|| Regex::new("\n{
 pub static RE_TWO_OR_MORE_SPACES: Lazy<Regex> = Lazy::new(|| Regex::new(" {2,}").unwrap());
 
 /// A regex that matches version pragma in a Vyper
+///
+/// Vyper accepts both `#pragma version <req>` and `# pragma version <req>` (with optional
+/// whitespace after `#`), as well as the legacy `#@version <req>` form, so any whitespace
+/// between the `#` and the pragma keyword is tolerated.
 pub static RE_VYPER_VERSION: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"#(?:pragma version|@version)\s+(?P<version>.+)").unwrap());
+    Lazy::new(|| Regex::new(r"#\s*(?:pragma\s+version|@version)\s+(?P<version>.+)").unwrap());
 
 /// A regex that matches the contract names in a Solidity file.
 pub static RE_CONTRACT_NAMES: Lazy<Regex> = Lazy::new(|| {
