@@ -179,8 +179,8 @@ impl ParsedSource for VyperParsedSource {
 /// in real-world contracts that `semver::VersionReq::parse` can't handle:
 ///
 /// * The "compatible release" operator `~=`, e.g. `~=0.5.0` (≡ `>=0.5.0, <0.6.0`).
-/// * Implicit pre-release tags without a hyphen, e.g. `0.5.0a1`, `0.5.0b1`, `0.5.0rc1`
-///   (semver requires `0.5.0-a1`).
+/// * Implicit pre-release tags without a hyphen, e.g. `0.5.0a1`, `0.5.0b1`, `0.5.0rc1` (semver
+///   requires `0.5.0-a1`).
 ///
 /// This helper first tries to parse the input as plain semver to preserve existing behavior, and
 /// only falls back to the PEP 440 → semver translation if that fails.
