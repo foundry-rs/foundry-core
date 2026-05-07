@@ -125,9 +125,6 @@ alloy-signer-trezor = "2.0.4"
 alloy-signer-turnkey = "2.0.4"
 alloy-sol-types = "1.5.7"
 alloy-chains = "0.2.34"
-alloy-eips = { version = "2.0.4", default-features = false }
-alloy-rpc-types-eth = { version = "2.0.4", default-features = false }
-alloy-serde = "2.0.4"
 
 # tempo
 tempo-primitives = { version = "1.6.0", default-features = false, features = [
