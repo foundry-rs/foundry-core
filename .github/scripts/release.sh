@@ -41,7 +41,7 @@ case "$GROUP" in
         ;;
     explorers)
         TAG="explorers-v${VERSION}"
-        PACKAGES=(-p foundry-block-explorers -p foundry-blob-explorers)
+        PACKAGES=(-p foundry-block-explorers)
         ;;
     fork-db)
         TAG="fork-db-v${VERSION}"
