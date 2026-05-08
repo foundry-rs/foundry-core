@@ -5,7 +5,7 @@ usage() {
     cat <<EOF
 Usage: ./release.sh <crate-group> <version> [--execute]
 
-Crate groups: compilers, explorers, fork-db, wallets
+Crate groups: block-explorers, compilers, fork-db, wallets
 
 Without --execute, runs a full dry-run.
 With --execute, publishes to crates.io, tags, pushes, and creates a GitHub release.
@@ -39,8 +39,8 @@ case "$GROUP" in
         TAG="compilers-v${VERSION}"
         PACKAGES=(-p foundry-compilers-core -p foundry-compilers-artifacts-solc -p foundry-compilers-artifacts-vyper -p foundry-compilers-artifacts -p foundry-compilers)
         ;;
-    explorers)
-        TAG="explorers-v${VERSION}"
+    block-explorers)
+        TAG="block-explorers-v${VERSION}"
         PACKAGES=(-p foundry-block-explorers)
         ;;
     fork-db)
