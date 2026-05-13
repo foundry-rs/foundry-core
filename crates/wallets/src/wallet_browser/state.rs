@@ -12,6 +12,9 @@ use crate::wallet_browser::{
     },
 };
 
+#[cfg(feature = "tempo")]
+use crate::wallet_browser::types::{BrowserKeychainAuthRequest, BrowserKeychainAuthResponse};
+
 #[derive(Debug, Clone)]
 pub(crate) struct BrowserWalletState<N: Network> {
     /// Current information about the wallet connection.
@@ -21,6 +24,10 @@ pub(crate) struct BrowserWalletState<N: Network> {
         Arc<Mutex<RequestQueue<BrowserTransactionRequest<N>, BrowserTransactionResponse>>>,
     /// Request/response queue for signings.
     signings: Arc<Mutex<RequestQueue<BrowserSignRequest, BrowserSignResponse>>>,
+    /// Request/response queue for Tempo `KeyAuthorization` signings.
+    #[cfg(feature = "tempo")]
+    keychain_auths:
+        Arc<Mutex<RequestQueue<BrowserKeychainAuthRequest, BrowserKeychainAuthResponse>>>,
     /// Unique session token for the wallet browser instance.
     /// The CSP on the served page prevents this token from being loaded by other origins.
     session_token: String,
@@ -38,6 +45,8 @@ impl<N: Network> BrowserWalletState<N> {
             connection: Arc::new(RwLock::new(None)),
             transactions: Arc::new(Mutex::new(RequestQueue::new())),
             signings: Arc::new(Mutex::new(RequestQueue::new())),
+            #[cfg(feature = "tempo")]
+            keychain_auths: Arc::new(Mutex::new(RequestQueue::new())),
             session_token,
             development,
         }
@@ -135,5 +144,49 @@ impl<N: Network> BrowserWalletState<N> {
     /// Get signing response, removing it from the queue.
     pub async fn get_signing_response(&self, id: &Uuid) -> Option<BrowserSignResponse> {
         self.signings.lock().await.get_response(id)
+    }
+
+    // -- Tempo `KeyAuthorization` signings -----------------------------------
+
+    /// Add a Tempo `KeyAuthorization` signing request.
+    #[cfg(feature = "tempo")]
+    pub async fn add_keychain_auth_request(&self, request: BrowserKeychainAuthRequest) {
+        self.keychain_auths.lock().await.add_request(request);
+    }
+
+    /// Check if a Tempo `KeyAuthorization` signing request exists.
+    #[cfg(feature = "tempo")]
+    pub async fn has_keychain_auth_request(&self, id: &Uuid) -> bool {
+        self.keychain_auths.lock().await.has_request(id)
+    }
+
+    /// Read the next Tempo `KeyAuthorization` signing request.
+    #[cfg(feature = "tempo")]
+    pub async fn read_next_keychain_auth_request(&self) -> Option<BrowserKeychainAuthRequest> {
+        self.keychain_auths.lock().await.read_request().cloned()
+    }
+
+    /// Remove a Tempo `KeyAuthorization` signing request.
+    #[cfg(feature = "tempo")]
+    pub async fn remove_keychain_auth_request(&self, id: &Uuid) {
+        self.keychain_auths.lock().await.remove_request(id);
+    }
+
+    /// Add a Tempo `KeyAuthorization` signing response.
+    #[cfg(feature = "tempo")]
+    pub async fn add_keychain_auth_response(&self, response: BrowserKeychainAuthResponse) {
+        let id = response.id;
+        let mut keychain_auths = self.keychain_auths.lock().await;
+        keychain_auths.add_response(id, response);
+        keychain_auths.remove_request(&id);
+    }
+
+    /// Get a Tempo `KeyAuthorization` signing response, removing it from the queue.
+    #[cfg(feature = "tempo")]
+    pub async fn get_keychain_auth_response(
+        &self,
+        id: &Uuid,
+    ) -> Option<BrowserKeychainAuthResponse> {
+        self.keychain_auths.lock().await.get_response(id)
     }
 }

@@ -20,6 +20,9 @@ use crate::wallet_browser::{
     },
 };
 
+#[cfg(feature = "tempo")]
+use crate::wallet_browser::types::{BrowserKeychainAuthRequest, BrowserKeychainAuthResponse};
+
 /// Serve index.html
 pub(crate) async fn serve_index() -> impl axum::response::IntoResponse {
     let mut headers = HeaderMap::new();
@@ -190,6 +193,48 @@ pub(crate) async fn post_connection_update<N: Network>(
     Json(body): Json<Option<Connection>>,
 ) -> Json<BrowserApiResponse> {
     state.set_connection(body).await;
+
+    Json(BrowserApiResponse::ok())
+}
+
+// -- Tempo `KeyAuthorization` signing ---------------------------------------
+
+/// Get the next pending Tempo `KeyAuthorization` signing request.
+/// Route: GET /api/keychain-auth/request
+#[cfg(feature = "tempo")]
+pub(crate) async fn get_next_keychain_auth_request<N: Network>(
+    State(state): State<Arc<BrowserWalletState<N>>>,
+) -> Json<BrowserApiResponse<BrowserKeychainAuthRequest>> {
+    match state.read_next_keychain_auth_request().await {
+        Some(req) => Json(BrowserApiResponse::with_data(req)),
+        None => Json(BrowserApiResponse::error("No pending keychain authorization request")),
+    }
+}
+
+/// Post a Tempo `KeyAuthorization` signing response (signed hex or error).
+/// Route: POST /api/keychain-auth/response
+#[cfg(feature = "tempo")]
+pub(crate) async fn post_keychain_auth_response<N: Network>(
+    State(state): State<Arc<BrowserWalletState<N>>>,
+    Json(body): Json<BrowserKeychainAuthResponse>,
+) -> Json<BrowserApiResponse> {
+    if !state.has_keychain_auth_request(&body.id).await {
+        return Json(BrowserApiResponse::error("Unknown keychain authorization id"));
+    }
+
+    match (&body.signed_hex, &body.error) {
+        (None, None) => {
+            return Json(BrowserApiResponse::error("Either signed_hex or error must be provided"));
+        }
+        (Some(_), Some(_)) => {
+            return Json(BrowserApiResponse::error(
+                "Only one of signed_hex or error can be provided",
+            ));
+        }
+        _ => {}
+    }
+
+    state.add_keychain_auth_response(body).await;
 
     Json(BrowserApiResponse::ok())
 }

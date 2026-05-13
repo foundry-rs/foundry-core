@@ -90,6 +90,35 @@ impl<N: Network> BrowserSigner<N> {
     pub const fn address(&self) -> Address {
         self.address
     }
+
+    pub const fn chain_id(&self) -> ChainId {
+        self.chain_id
+    }
+
+    /// Ask the connected browser wallet to sign a Tempo `KeyAuthorization`.
+    ///
+    /// Cross-checks that the connected wallet is the root account named by
+    /// `key_authorization.chain_id` (when non-zero) and that this signer's
+    /// address matches what we'll send as `root_account`.
+    #[cfg(feature = "tempo")]
+    pub async fn sign_key_authorization(
+        &self,
+        key_authorization: tempo_primitives::transaction::KeyAuthorization,
+        preferred_signature_type: Option<tempo_primitives::transaction::SignatureType>,
+    ) -> Result<tempo_primitives::transaction::SignedKeyAuthorization> {
+        if key_authorization.chain_id != 0 && key_authorization.chain_id != self.chain_id {
+            return Err(alloy_signer::Error::other(format!(
+                "KeyAuthorization chainId {} does not match connected wallet chain ID {}",
+                key_authorization.chain_id, self.chain_id,
+            )));
+        }
+
+        let server = self.server.lock().await;
+        server
+            .request_keychain_auth(key_authorization, self.address, preferred_signature_type)
+            .await
+            .map_err(alloy_signer::Error::other)
+    }
 }
 
 impl<N: Network> Drop for BrowserSigner<N> {
