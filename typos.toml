@@ -21,3 +21,5 @@ froms = "froms"
 consts = "consts"
 Arguements = "Arguements"
 Lod = "Lod"
+# Substring of `[Rr]elease` regex patterns in per-crate `cliff.toml` files.
+elease = "elease"
