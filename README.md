@@ -18,7 +18,7 @@ Core libraries extracted from [Foundry](https://github.com/foundry-rs/foundry), 
 [`foundry-compilers-artifacts-solc`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/compilers/crates/artifacts/solc
 [`foundry-compilers-artifacts-vyper`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/compilers/crates/artifacts/vyper
 [`foundry-compilers-core`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/compilers/crates/core
-[`foundry-block-explorers`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/explorers/block-explorers
+[`foundry-block-explorers`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/block-explorers
 [`foundry-fork-db`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/fork-db
 [`foundry-wallets`]: https://github.com/foundry-rs/foundry-core/tree/main/crates/wallets
 
