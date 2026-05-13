@@ -5,7 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.20.0](https://github.com/foundry-rs/foundry-core/releases/tag/0.20.0) - 2026-04-24
+## [0.21.0](https://github.com/foundry-rs/foundry-core/releases/tag/0.21.0) - 2026-05-13
+
+### Bug Fixes
+
+- [compilers/vyper] Support PEP 440 pragmas ([#59](https://github.com/foundry-rs/foundry-core/issues/59))
+
+### Dependencies
+
+- [deps] Update winnow requirement from 0.7.15 to 1.0.2 ([#44](https://github.com/foundry-rs/foundry-core/issues/44))
+- Pin dependencies to patch versions ([#53](https://github.com/foundry-rs/foundry-core/issues/53))
+
+### Documentation
+
+- Add missing feature flags to READMEs ([#47](https://github.com/foundry-rs/foundry-core/issues/47))
+
+### Features
+
+- Expose extended Vyper settings ([#64](https://github.com/foundry-rs/foundry-core/issues/64))
+- Add Amsterdam EVM version ([#63](https://github.com/foundry-rs/foundry-core/issues/63))
+
+## [0.20.0](https://github.com/foundry-rs/foundry-core/releases/tag/compilers-v0.20.0) - 2026-04-24
 
 ### Bug Fixes
 
@@ -24,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- Release
 - Remove `cfg-if` dependency ([#40](https://github.com/foundry-rs/foundry-core/issues/40))
 - Replace CI OIDC release with local release flow
 
