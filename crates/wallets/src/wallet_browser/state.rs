@@ -18,6 +18,7 @@ use crate::wallet_browser::{
 #[cfg(feature = "tempo")]
 use crate::wallet_browser::types::{BrowserKeychainAuthRequest, BrowserKeychainAuthResponse};
 
+
 /// Reason placed in synthesized error responses when in-flight requests are
 /// failed because the wallet was disconnected.
 pub(crate) const DISCONNECT_REASON: &str = "Wallet disconnected";
