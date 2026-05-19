@@ -19,7 +19,7 @@ use crate::wallet_browser::{
     state::BrowserWalletState,
     types::{
         BrowserSignRequest, BrowserSignTypedDataRequest, BrowserTransactionRequest, Connection,
-        SignRequest, SignType,
+        SessionInfo, SignRequest, SignType,
     },
 };
 
@@ -36,7 +36,7 @@ use {
 pub struct BrowserWalletServer<N: Network> {
     port: u16,
     state: Arc<BrowserWalletState<N>>,
-    shutdown_tx: Option<Arc<Mutex<Option<oneshot::Sender<()>>>>>,
+    shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     open_browser: bool,
     timeout: Duration,
 }
@@ -47,7 +47,7 @@ impl<N: Network> BrowserWalletServer<N> {
         Self {
             port,
             state: Arc::new(BrowserWalletState::new(Uuid::new_v4().to_string(), development)),
-            shutdown_tx: None,
+            shutdown_tx: Arc::new(Mutex::new(None)),
             open_browser,
             timeout,
         }
@@ -64,7 +64,7 @@ impl<N: Network> BrowserWalletServer<N> {
         self.port = listener.local_addr().unwrap().port();
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        self.shutdown_tx = Some(Arc::new(Mutex::new(Some(shutdown_tx))));
+        *self.shutdown_tx.lock().await = Some(shutdown_tx);
 
         tokio::spawn(async move {
             let server = axum::serve(listener, router);
@@ -84,11 +84,12 @@ impl<N: Network> BrowserWalletServer<N> {
         Ok(())
     }
 
-    /// Stop the server.
-    pub async fn stop(&mut self) -> Result<(), BrowserWalletError> {
-        if let Some(shutdown_arc) = self.shutdown_tx.take()
-            && let Some(tx) = shutdown_arc.lock().await.take()
-        {
+    /// Stop the server. Marks the session as shutting down (so the next
+    /// `/api/session` poll from the webapp surfaces `alive: false`) and
+    /// triggers the axum graceful-shutdown signal.
+    pub async fn stop(&self) -> Result<(), BrowserWalletError> {
+        self.state.set_shutting_down();
+        if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
         }
         Ok(())
@@ -122,6 +123,14 @@ impl<N: Network> BrowserWalletServer<N> {
     /// Get current wallet connection.
     pub async fn get_connection(&self) -> Option<Connection> {
         self.state.get_connection().await
+    }
+
+    /// Get the current session info (alive + connected).
+    pub async fn session_info(&self) -> SessionInfo {
+        SessionInfo {
+            alive: !self.state.is_shutting_down(),
+            connected: self.state.is_connected().await,
+        }
     }
 
     /// Request a transaction to be signed and sent via the browser wallet.

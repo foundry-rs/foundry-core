@@ -32,8 +32,35 @@ if [ ! -f "$group_root/cliff.toml" ]; then
     exit 1
 fi
 
-run_unless_dry_run git cliff \
-    --workdir "$root" \
-    --config "$group_root/cliff.toml" \
-    "${@}" \
-    --output "$group_root/CHANGELOG.md"
+# Incremental mode: if the CHANGELOG already has at least one release section,
+# only prepend the new --unreleased section. This keeps historical sections
+# frozen so we never re-process pre-migration commits (which can reference PRs
+# in upstream repos like foundry-rs/foundry, foundry-rs/compilers, etc.).
+#
+# Full-regen mode: if no prior release exists in the file, generate the entire
+# CHANGELOG. Run manually to bootstrap or rebuild from scratch.
+if [ -f "$group_root/CHANGELOG.md" ] && grep -q '^## \[[0-9]' "$group_root/CHANGELOG.md"; then
+    # Strip any stale `## [Unreleased]` section so it doesn't linger above the
+    # new release entry that --prepend is about to insert.
+    if grep -q '^## \[Unreleased\]' "$group_root/CHANGELOG.md"; then
+        run_unless_dry_run awk '
+            /^## \[Unreleased\]/ { skip = 1; next }
+            skip && /^## \[/ { skip = 0 }
+            !skip { print }
+        ' "$group_root/CHANGELOG.md" > "$group_root/CHANGELOG.md.tmp" \
+            && run_unless_dry_run mv "$group_root/CHANGELOG.md.tmp" "$group_root/CHANGELOG.md"
+    fi
+
+    run_unless_dry_run git cliff \
+        --workdir "$root" \
+        --config "$group_root/cliff.toml" \
+        --unreleased \
+        "${@}" \
+        --prepend "$group_root/CHANGELOG.md"
+else
+    run_unless_dry_run git cliff \
+        --workdir "$root" \
+        --config "$group_root/cliff.toml" \
+        "${@}" \
+        --output "$group_root/CHANGELOG.md"
+fi
