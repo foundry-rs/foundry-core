@@ -736,7 +736,7 @@ impl<P: SourceParser> Graph<P> {
         {
             // check if the version is even valid
             let f = utils::source_name(&failed_node.path, &self.root).display();
-            return Err(format!("Encountered invalid solc version in {f}: {version_err}"));
+            return Err(format!("Encountered invalid compiler version in {f}: {version_err}"));
         }
 
         // if the node requirement makes sense, it means that there is at least one node
@@ -1161,15 +1161,18 @@ impl<S: ParsedSource> fmt::Display for DisplayNode<'_, S> {
     }
 }
 
-/// Errors thrown when checking the solc version of a file
+/// Errors thrown when checking the compiler version of a file.
+///
+/// These messages intentionally use the generic word "compiler" rather than naming a specific
+/// language, because the resolver is reused for every [`Compiler`] (Solidity, Vyper, …).
 #[derive(Debug, thiserror::Error)]
 #[allow(dead_code)]
 enum SourceVersionError {
-    #[error("Failed to parse solidity version {0}: {1}")]
+    #[error("Failed to parse compiler version {0}: {1}")]
     InvalidVersion(String, SolcError),
-    #[error("No solc version exists that matches the version requirement: {0}")]
+    #[error("No compiler version exists that matches the version requirement: {0}")]
     NoMatchingVersion(VersionReq),
-    #[error("No solc version installed that matches the version requirement: {0}")]
+    #[error("No compiler version installed that matches the version requirement: {0}")]
     NoMatchingVersionOffline(VersionReq),
 }
 

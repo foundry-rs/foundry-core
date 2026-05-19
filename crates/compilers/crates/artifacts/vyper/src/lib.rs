@@ -4,7 +4,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod settings;
-pub use settings::{VyperOptimizationMode, VyperSettings};
+pub use settings::{
+    VyperOptimizationLevel, VyperOptimizationMode, VyperSettings, VyperVenomSettings,
+};
 
 mod error;
 pub use error::VyperCompilationError;

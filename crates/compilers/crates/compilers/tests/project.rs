@@ -2188,7 +2188,7 @@ fn can_detect_invalid_version() {
             assert_eq!(
                 err,
                 format!(
-                    "Encountered invalid solc version in src{MAIN_SEPARATOR}A.sol: No solc version exists that matches the version requirement: ^0.100.10"
+                    "Encountered invalid compiler version in src{MAIN_SEPARATOR}A.sol: No compiler version exists that matches the version requirement: ^0.100.10"
                 )
             );
         }

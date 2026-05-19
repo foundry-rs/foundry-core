@@ -1,5 +1,5 @@
-tag = false
-pre-release-commit-message = "chore: release compilers {{version}}"
+tag-prefix = "block-explorers-"
+pre-release-commit-message = "chore: release block-explorers {{version}}"
 allow-branch = ["main"]
 sign-commit = true
 sign-tag = true

@@ -23,6 +23,58 @@ pub enum VyperOptimizationMode {
     Gas,
     Codesize,
     None,
+    #[serde(rename = "O1", alias = "1", alias = "o1")]
+    O1,
+    #[serde(rename = "O2", alias = "2", alias = "o2")]
+    O2,
+    #[serde(rename = "O3", alias = "3", alias = "o3")]
+    O3,
+    #[serde(rename = "Os", alias = "s", alias = "os")]
+    Os,
+}
+
+/// Vyper parses `optimize` and `optLevel` through the same optimization level parser.
+pub type VyperOptimizationLevel = VyperOptimizationMode;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VyperVenomSettings {
+    #[serde(alias = "disable_inlining", skip_serializing_if = "Option::is_none")]
+    pub disable_inlining: Option<bool>,
+    #[serde(rename = "disableCSE", alias = "disable_cse", skip_serializing_if = "Option::is_none")]
+    pub disable_cse: Option<bool>,
+    #[serde(
+        rename = "disableSCCP",
+        alias = "disable_sccp",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disable_sccp: Option<bool>,
+    #[serde(alias = "disable_load_elimination", skip_serializing_if = "Option::is_none")]
+    pub disable_load_elimination: Option<bool>,
+    #[serde(alias = "disable_dead_store_elimination", skip_serializing_if = "Option::is_none")]
+    pub disable_dead_store_elimination: Option<bool>,
+    #[serde(alias = "disable_algebraic_optimization", skip_serializing_if = "Option::is_none")]
+    pub disable_algebraic_optimization: Option<bool>,
+    #[serde(alias = "disable_branch_optimization", skip_serializing_if = "Option::is_none")]
+    pub disable_branch_optimization: Option<bool>,
+    #[serde(alias = "disable_assert_elimination", skip_serializing_if = "Option::is_none")]
+    pub disable_assert_elimination: Option<bool>,
+    #[serde(
+        rename = "disableMem2Var",
+        alias = "disable_mem2var",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disable_mem2var: Option<bool>,
+    #[serde(
+        rename = "disableSimplifyCFG",
+        alias = "disable_simplify_cfg",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disable_simplify_cfg: Option<bool>,
+    #[serde(alias = "disable_remove_unused_variables", skip_serializing_if = "Option::is_none")]
+    pub disable_remove_unused_variables: Option<bool>,
+    #[serde(alias = "inline_threshold", skip_serializing_if = "Option::is_none")]
+    pub inline_threshold: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +89,9 @@ pub struct VyperSettings {
     /// Optimization mode
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optimize: Option<VyperOptimizationMode>,
+    /// Numeric optimization level
+    #[serde(rename = "optLevel", alias = "opt_level", skip_serializing_if = "Option::is_none")]
+    pub opt_level: Option<VyperOptimizationLevel>,
     /// Whether or not the bytecode should include Vyper's signature
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bytecode_metadata: Option<bool>,
@@ -45,6 +100,23 @@ pub struct VyperSettings {
     pub search_paths: Option<BTreeSet<PathBuf>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub experimental_codegen: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+    /// Vyper standard JSON intentionally keeps this key snake_case.
+    #[serde(
+        rename = "enable_decimals",
+        alias = "enableDecimals",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enable_decimals: Option<bool>,
+    #[serde(
+        rename = "venomExperimental",
+        alias = "venom_experimental",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub venom_experimental: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub venom: Option<VyperVenomSettings>,
 }
 
 impl VyperSettings {
@@ -141,5 +213,101 @@ impl VyperSettings {
                 *evm_version
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn serializes_extended_vyper_settings() {
+        let settings = VyperSettings {
+            opt_level: Some(VyperOptimizationLevel::Os),
+            debug: Some(true),
+            enable_decimals: Some(true),
+            venom_experimental: Some(true),
+            venom: Some(VyperVenomSettings {
+                disable_inlining: Some(true),
+                disable_cse: Some(true),
+                disable_sccp: Some(false),
+                disable_load_elimination: Some(true),
+                disable_dead_store_elimination: Some(false),
+                disable_algebraic_optimization: Some(true),
+                disable_branch_optimization: Some(false),
+                disable_assert_elimination: Some(true),
+                disable_mem2var: Some(false),
+                disable_simplify_cfg: Some(true),
+                disable_remove_unused_variables: Some(false),
+                inline_threshold: Some(15),
+            }),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(settings).unwrap();
+
+        assert_eq!(value["optLevel"], json!("Os"));
+        assert_eq!(value["debug"], json!(true));
+        assert_eq!(value["enable_decimals"], json!(true));
+        assert_eq!(value["venomExperimental"], json!(true));
+        assert_eq!(value["venom"]["disableInlining"], json!(true));
+        assert_eq!(value["venom"]["disableCSE"], json!(true));
+        assert_eq!(value["venom"]["disableSCCP"], json!(false));
+        assert_eq!(value["venom"]["disableMem2Var"], json!(false));
+        assert_eq!(value["venom"]["disableSimplifyCFG"], json!(true));
+        assert_eq!(value["venom"]["disableAssertElimination"], json!(true));
+        assert_eq!(value["venom"]["inlineThreshold"], json!(15));
+    }
+
+    #[test]
+    fn deserializes_optimization_level_aliases() {
+        assert_eq!(
+            serde_json::from_value::<VyperOptimizationMode>(json!("1")).unwrap(),
+            VyperOptimizationMode::O1
+        );
+        assert_eq!(
+            serde_json::from_value::<VyperOptimizationMode>(json!("O2")).unwrap(),
+            VyperOptimizationMode::O2
+        );
+        assert_eq!(
+            serde_json::from_value::<VyperOptimizationMode>(json!("o3")).unwrap(),
+            VyperOptimizationMode::O3
+        );
+        assert_eq!(serde_json::to_value(VyperOptimizationMode::O1).unwrap(), json!("O1"));
+        assert_eq!(
+            serde_json::from_value::<VyperOptimizationLevel>(json!("s")).unwrap(),
+            VyperOptimizationLevel::Os
+        );
+        assert_eq!(serde_json::to_value(VyperOptimizationLevel::O3).unwrap(), json!("O3"));
+    }
+
+    #[test]
+    fn deserializes_snake_case_config_aliases() {
+        let value = json!({
+            "outputSelection": {},
+            "opt_level": "3",
+            "enableDecimals": true,
+            "venom_experimental": true,
+            "venom": {
+                "disable_cse": true,
+                "disable_sccp": false,
+                "disable_mem2var": true,
+                "disable_simplify_cfg": false,
+                "inline_threshold": 15
+            }
+        });
+
+        let settings = serde_json::from_value::<VyperSettings>(value).unwrap();
+
+        assert_eq!(settings.opt_level, Some(VyperOptimizationLevel::O3));
+        assert_eq!(settings.enable_decimals, Some(true));
+        assert_eq!(settings.venom_experimental, Some(true));
+        let venom = settings.venom.unwrap();
+        assert_eq!(venom.disable_cse, Some(true));
+        assert_eq!(venom.disable_sccp, Some(false));
+        assert_eq!(venom.disable_mem2var, Some(true));
+        assert_eq!(venom.disable_simplify_cfg, Some(false));
+        assert_eq!(venom.inline_threshold, Some(15));
     }
 }
