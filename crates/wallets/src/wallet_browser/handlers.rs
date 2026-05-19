@@ -16,7 +16,7 @@ use crate::wallet_browser::{
     state::BrowserWalletState,
     types::{
         BrowserApiResponse, BrowserSignRequest, BrowserSignResponse, BrowserTransactionRequest,
-        BrowserTransactionResponse, Connection,
+        BrowserTransactionResponse, Connection, SessionInfo,
     },
 };
 
@@ -192,4 +192,15 @@ pub(crate) async fn post_connection_update<N: Network>(
     state.set_connection(body).await;
 
     Json(BrowserApiResponse::ok())
+}
+
+/// Get session info: whether the server is alive and whether a wallet is
+/// currently connected.
+/// Route: GET /api/session
+pub(crate) async fn get_session_info<N: Network>(
+    State(state): State<Arc<BrowserWalletState<N>>>,
+) -> Json<BrowserApiResponse<SessionInfo>> {
+    let info =
+        SessionInfo { alive: !state.is_shutting_down(), connected: state.is_connected().await };
+    Json(BrowserApiResponse::with_data(info))
 }

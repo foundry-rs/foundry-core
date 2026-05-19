@@ -64,6 +64,17 @@ impl<Req, Res> RequestQueue<Req, Res> {
     pub fn get_response(&mut self, id: &Uuid) -> Option<Res> {
         self.responses.remove(id)
     }
+
+    /// Drain all pending requests, returning their IDs in queue order.
+    /// Used to fail in-flight requests (e.g. when the wallet disconnects).
+    pub fn drain_request_ids(&mut self) -> Vec<Uuid>
+    where
+        Req: HasId,
+    {
+        let ids: Vec<Uuid> = self.requests.iter().map(|r| *r.id()).collect();
+        self.requests.clear();
+        ids
+    }
 }
 
 pub(crate) trait HasId {

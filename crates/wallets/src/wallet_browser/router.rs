@@ -22,6 +22,7 @@ pub async fn build_router<N: Network>(state: Arc<BrowserWalletState<N>>, port: u
         .route("/signing/response", post(handlers::post_signing_response))
         .route("/connection", get(handlers::get_connection_info))
         .route("/connection", post(handlers::post_connection_update))
+        .route("/session", get(handlers::get_session_info))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_session_token))
         .with_state(state.clone());
 

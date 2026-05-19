@@ -25,7 +25,7 @@ mod tests {
         server::BrowserWalletServer,
         types::{
             BrowserApiResponse, BrowserSignRequest, BrowserSignResponse, BrowserTransactionRequest,
-            BrowserTransactionResponse, Connection, SignRequest, SignType,
+            BrowserTransactionResponse, Connection, SessionInfo, SignRequest, SignType,
         },
     };
 
@@ -772,6 +772,176 @@ mod tests {
         check_sign_request_queue_empty(&client, &server).await;
 
         server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_consecutive_transactions_in_one_session() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        // First transaction.
+        let (tx_id1, tx1) = create_browser_transaction_request();
+        let handle1 = wait_for_transaction_signing(&server, tx1).await;
+
+        // Browser polls and finds the first request, then submits a hash.
+        check_transaction_request_content(&client, &server, tx_id1).await;
+        client
+            .post(format!("http://localhost:{}/api/transaction/response", server.port()))
+            .json(&BrowserTransactionResponse {
+                id: tx_id1,
+                hash: Some(TxHash::random()),
+                error: None,
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let res1 = handle1.await.expect("first signing flow panicked");
+        assert!(matches!(res1, Ok(h) if !h.is_zero()));
+
+        // After completion the queue must be empty so that the webapp's poller
+        // can re-arm without any reload or wallet reconnection.
+        check_transaction_request_queue_empty(&client, &server).await;
+
+        // The connection must persist across requests in the same session.
+        let conn = server.get_connection().await.expect("connection should still be live");
+        assert_eq!(conn.address, ALICE);
+
+        // Second transaction in the same session.
+        let (tx_id2, tx2) = create_different_browser_transaction_request();
+        let handle2 = wait_for_transaction_signing(&server, tx2).await;
+
+        let resp = client
+            .get(format!("http://localhost:{}/api/transaction/request", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Ok(pending_tx) =
+            resp.json::<BrowserApiResponse<BrowserTransactionRequest<Ethereum>>>().await.unwrap()
+        else {
+            panic!("expected a pending second transaction");
+        };
+        assert_eq!(pending_tx.id, tx_id2);
+
+        client
+            .post(format!("http://localhost:{}/api/transaction/response", server.port()))
+            .json(&BrowserTransactionResponse {
+                id: tx_id2,
+                hash: Some(TxHash::random()),
+                error: None,
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let res2 = handle2.await.expect("second signing flow panicked");
+        assert!(matches!(res2, Ok(h) if !h.is_zero()));
+
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_fails_pending_transaction_request() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let (tx_id, tx) = create_browser_transaction_request();
+        let handle = wait_for_transaction_signing(&server, tx).await;
+        check_transaction_request_content(&client, &server, tx_id).await;
+
+        // Wallet disconnects before signing.
+        disconnect_wallet(&client, &server).await;
+
+        // The in-flight request must fail-fast rather than waiting for the
+        // per-request timeout.
+        let res = handle.await.expect("task panicked");
+        match res {
+            Err(BrowserWalletError::Rejected { operation, reason }) => {
+                assert_eq!(operation, "Transaction");
+                assert_eq!(reason, "Wallet disconnected");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_fails_pending_signing_request() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let (sign_id, sign_req) = create_browser_sign_request();
+        let handle = wait_for_message_signing(&server, sign_req).await;
+        check_sign_request_content(&client, &server, sign_id).await;
+
+        // Wallet disconnects before signing.
+        disconnect_wallet(&client, &server).await;
+
+        let res = handle.await.expect("task panicked");
+        match res {
+            Err(BrowserWalletError::Rejected { operation, reason }) => {
+                assert_eq!(operation, "Signing");
+                assert_eq!(reason, "Wallet disconnected");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_session_endpoint_reports_state() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+
+        // Initially alive but not connected.
+        let resp = client
+            .get(format!("http://localhost:{}/api/session", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Ok(SessionInfo { alive, connected }) =
+            resp.json::<BrowserApiResponse<SessionInfo>>().await.unwrap()
+        else {
+            panic!("expected session info");
+        };
+        assert!(alive);
+        assert!(!connected);
+
+        // After connection: alive and connected.
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+        let resp = client
+            .get(format!("http://localhost:{}/api/session", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Ok(SessionInfo { alive, connected }) =
+            resp.json::<BrowserApiResponse<SessionInfo>>().await.unwrap()
+        else {
+            panic!("expected session info");
+        };
+        assert!(alive);
+        assert!(connected);
+
+        // After stop: the next time the webapp can reach the endpoint it
+        // should see `alive: false`. We assert this against a clone of the
+        // server before triggering stop, by directly reading session_info().
+        let server_clone = server.clone();
+        server.stop().await.unwrap();
+        let info = server_clone.session_info().await;
+        assert!(!info.alive, "session must be marked as shutting down after stop()");
     }
 
     /// Helper to create a default browser wallet server.

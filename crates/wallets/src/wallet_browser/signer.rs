@@ -7,7 +7,6 @@ use alloy_dyn_abi::TypedData;
 use alloy_network::{Network, TransactionBuilder};
 use alloy_primitives::{Address, B256, Bytes, ChainId, U256};
 use alloy_signer::Result;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::wallet_browser::{
@@ -17,7 +16,7 @@ use crate::wallet_browser::{
 
 #[derive(Clone, Debug)]
 pub struct BrowserSigner<N: Network> {
-    server: Arc<Mutex<BrowserWalletServer<N>>>,
+    server: Arc<BrowserWalletServer<N>>,
     address: Address,
     chain_id: ChainId,
 }
@@ -45,7 +44,7 @@ impl<N: Network> BrowserSigner<N> {
                 println!("Wallet connected: {address}");
                 println!("Chain ID: {chain_id}");
 
-                return Ok(Self { server: Arc::new(Mutex::new(server)), address, chain_id });
+                return Ok(Self { server: Arc::new(server), address, chain_id });
             }
 
             if start.elapsed() > timeout {
@@ -79,11 +78,8 @@ impl<N: Network> BrowserSigner<N> {
 
         let request = BrowserTransactionRequest { id: Uuid::new_v4(), request: tx_request };
 
-        let server = self.server.lock().await;
         let tx_hash =
-            server.request_transaction(request).await.map_err(alloy_signer::Error::other)?;
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
+            self.server.request_transaction(request).await.map_err(alloy_signer::Error::other)?;
 
         Ok(tx_hash)
     }
@@ -115,7 +111,6 @@ impl<N: Network> Drop for BrowserSigner<N> {
         let server = self.server.clone();
 
         tokio::spawn(async move {
-            let mut server = server.lock().await;
             let _ = server.stop().await;
         });
     }

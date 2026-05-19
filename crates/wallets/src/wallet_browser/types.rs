@@ -111,7 +111,11 @@ pub(crate) struct BrowserSignResponse {
 }
 
 /// Represents an active connection to a browser wallet.
+///
+/// The wire format uses camelCase (`chainId`) to match the rest of the
+/// browser-facing API (`BrowserSignRequest`, `SessionInfo`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Connection {
     /// The address of the connected wallet.
     pub address: Address,
@@ -124,4 +128,18 @@ impl Connection {
     pub const fn new(address: Address, chain_id: ChainId) -> Self {
         Self { address, chain_id }
     }
+}
+
+/// Information about the current browser wallet session, returned by
+/// `GET /api/session`. Allows the webapp to detect when the underlying
+/// `BrowserSigner` has been dropped (e.g. the script has finished) and
+/// stop polling cleanly.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    /// Whether the server is still accepting new requests.
+    /// Becomes `false` immediately before the server stops.
+    pub alive: bool,
+    /// Whether a wallet is currently connected to the server.
+    pub connected: bool,
 }

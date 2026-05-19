@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use alloy_network::Network;
 use tokio::sync::{Mutex, RwLock};
@@ -11,6 +14,10 @@ use crate::wallet_browser::{
         BrowserTransactionResponse, Connection,
     },
 };
+
+/// Reason placed in synthesized error responses when in-flight requests are
+/// failed because the wallet was disconnected.
+pub(crate) const DISCONNECT_REASON: &str = "Wallet disconnected";
 
 #[derive(Debug, Clone)]
 pub(crate) struct BrowserWalletState<N: Network> {
@@ -29,6 +36,9 @@ pub(crate) struct BrowserWalletState<N: Network> {
     ///
     /// **WARNING**: This should only be used in a development environment.
     development: bool,
+    /// Whether the server is shutting down. Once flipped, the `/api/session`
+    /// endpoint reports `alive: false` so the webapp can stop polling.
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl<N: Network> BrowserWalletState<N> {
@@ -40,6 +50,7 @@ impl<N: Network> BrowserWalletState<N> {
             signings: Arc::new(Mutex::new(RequestQueue::new())),
             session_token,
             development,
+            shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -56,6 +67,16 @@ impl<N: Network> BrowserWalletState<N> {
         self.development
     }
 
+    /// Mark the server as shutting down.
+    pub fn set_shutting_down(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the server is shutting down.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+    }
+
     /// Check if wallet is connected.
     pub async fn is_connected(&self) -> bool {
         self.connection.read().await.is_some()
@@ -66,9 +87,48 @@ impl<N: Network> BrowserWalletState<N> {
         *self.connection.read().await
     }
 
-    /// Set connection information.
+    /// Set connection information. When the new connection is `None`, all
+    /// pending transaction and signing requests are failed with a synthetic
+    /// `Wallet disconnected` error response so that in-flight callers
+    /// (`request_transaction`, `request_signing`) return immediately rather
+    /// than waiting for their per-request timeout.
     pub async fn set_connection(&self, connection: Option<Connection>) {
         *self.connection.write().await = connection;
+
+        if connection.is_none() {
+            self.fail_pending_with_disconnect().await;
+        }
+    }
+
+    /// Fail all in-flight transaction and signing requests with a synthetic
+    /// `Wallet disconnected` error response.
+    async fn fail_pending_with_disconnect(&self) {
+        {
+            let mut txs = self.transactions.lock().await;
+            for id in txs.drain_request_ids() {
+                txs.add_response(
+                    id,
+                    BrowserTransactionResponse {
+                        id,
+                        hash: None,
+                        error: Some(DISCONNECT_REASON.to_string()),
+                    },
+                );
+            }
+        }
+        {
+            let mut signs = self.signings.lock().await;
+            for id in signs.drain_request_ids() {
+                signs.add_response(
+                    id,
+                    BrowserSignResponse {
+                        id,
+                        signature: None,
+                        error: Some(DISCONNECT_REASON.to_string()),
+                    },
+                );
+            }
+        }
     }
 
     /// Add a transaction request.
