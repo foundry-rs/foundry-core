@@ -227,7 +227,7 @@ impl<N: Network> BrowserWalletServer<N> {
     pub async fn request_keychain_auth(
         &self,
         key_authorization: KeyAuthorization,
-        root_account: alloy_primitives::Address,
+        root_account: Address,
         preferred_signature_type: Option<SignatureType>,
     ) -> Result<SignedKeyAuthorization, BrowserWalletError> {
         if !self.is_connected().await {

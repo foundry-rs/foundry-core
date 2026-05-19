@@ -18,11 +18,6 @@ use crate::wallet_browser::{
 #[cfg(feature = "tempo")]
 use crate::wallet_browser::types::{BrowserKeychainAuthRequest, BrowserKeychainAuthResponse};
 
-
-/// Reason placed in synthesized error responses when in-flight requests are
-/// failed because the wallet was disconnected.
-pub(crate) const DISCONNECT_REASON: &str = "Wallet disconnected";
-
 #[derive(Debug, Clone)]
 pub(crate) struct BrowserWalletState<N: Network> {
     /// Current information about the wallet connection.
@@ -121,7 +116,7 @@ impl<N: Network> BrowserWalletState<N> {
                     BrowserTransactionResponse {
                         id,
                         hash: None,
-                        error: Some(DISCONNECT_REASON.to_string()),
+                        error: Some("Wallet disconnected".to_string()),
                     },
                 );
             }
@@ -134,7 +129,7 @@ impl<N: Network> BrowserWalletState<N> {
                     BrowserSignResponse {
                         id,
                         signature: None,
-                        error: Some(DISCONNECT_REASON.to_string()),
+                        error: Some("Wallet disconnected".to_string()),
                     },
                 );
             }

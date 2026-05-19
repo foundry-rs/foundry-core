@@ -239,7 +239,6 @@ pub(crate) async fn post_keychain_auth_response<N: Network>(
     Json(BrowserApiResponse::ok())
 }
 
-
 /// Get session info: whether the server is alive and whether a wallet is
 /// currently connected.
 /// Route: GET /api/session

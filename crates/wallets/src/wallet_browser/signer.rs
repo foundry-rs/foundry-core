@@ -6,6 +6,7 @@ use std::{
 use alloy_network::{Network, TransactionBuilder};
 use alloy_primitives::{Address, B256, ChainId};
 use alloy_signer::Result;
+use tempo_primitives::transaction::{KeyAuthorization, SignatureType, SignedKeyAuthorization};
 use uuid::Uuid;
 
 use crate::wallet_browser::{
@@ -99,9 +100,9 @@ impl<N: Network> BrowserSigner<N> {
     #[cfg(feature = "tempo")]
     pub async fn sign_key_authorization(
         &self,
-        key_authorization: tempo_primitives::transaction::KeyAuthorization,
-        preferred_signature_type: Option<tempo_primitives::transaction::SignatureType>,
-    ) -> Result<tempo_primitives::transaction::SignedKeyAuthorization> {
+        key_authorization: KeyAuthorization,
+        preferred_signature_type: Option<SignatureType>,
+    ) -> Result<SignedKeyAuthorization> {
         if key_authorization.chain_id != 0 && key_authorization.chain_id != self.chain_id {
             return Err(alloy_signer::Error::other(format!(
                 "KeyAuthorization chainId {} does not match connected wallet chain ID {}",
