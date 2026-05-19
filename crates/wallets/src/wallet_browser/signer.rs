@@ -94,8 +94,7 @@ impl<N: Network> BrowserSigner<N> {
             ));
         }
 
-        let server = self.server.lock().await;
-        server
+        self.server
             .request_typed_data_signing(self.address, typed_data)
             .await
             .map_err(alloy_signer::Error::other)
