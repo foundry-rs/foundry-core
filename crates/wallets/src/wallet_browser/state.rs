@@ -134,6 +134,20 @@ impl<N: Network> BrowserWalletState<N> {
                 );
             }
         }
+        #[cfg(feature = "tempo")]
+        {
+            let mut keychain_auths = self.keychain_auths.lock().await;
+            for id in keychain_auths.drain_request_ids() {
+                keychain_auths.add_response(
+                    id,
+                    BrowserKeychainAuthResponse {
+                        id,
+                        signed_hex: None,
+                        error: Some("Wallet disconnected".to_string()),
+                    },
+                );
+            }
+        }
     }
 
     /// Add a transaction request.
