@@ -23,6 +23,14 @@ use crate::wallet_browser::{
     },
 };
 
+#[cfg(feature = "tempo")]
+use {
+    crate::wallet_browser::types::BrowserKeychainAuthRequest,
+    alloy_primitives::hex,
+    alloy_rlp::Decodable,
+    tempo_primitives::transaction::{KeyAuthorization, SignatureType, SignedKeyAuthorization},
+};
+
 /// Browser wallet server.
 #[derive(Debug, Clone)]
 pub struct BrowserWalletServer<N: Network> {
@@ -197,6 +205,131 @@ impl<N: Network> BrowserWalletServer<N> {
             if start.elapsed() > self.timeout {
                 self.state.remove_signing_request(&tx_id).await;
                 return Err(BrowserWalletError::Timeout { operation: "Signing" });
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Request a Tempo `KeyAuthorization` to be signed via the browser
+    /// wallet. The wallet must drive the WebAuthn / P256 / Secp256k1
+    /// ceremony and POST back an RLP-encoded `SignedKeyAuthorization` hex
+    /// string.
+    ///
+    /// The returned [`SignedKeyAuthorization`] is verified server-side:
+    /// - `key_id`, `chain_id`, `key_type`, `expiry`, and `limits` must match the original request
+    ///   (the wallet must not mutate the payload).
+    /// - For `Secp256k1`, the recovered signer must equal `root_account`.
+    /// - For `P256` / `WebAuthn`, recovery isn't possible off-chain; we trust the wallet UI's
+    ///   confirmation and defer to the on-chain precompile to reject invalid signatures at
+    ///   submission time.
+    #[cfg(feature = "tempo")]
+    pub async fn request_keychain_auth(
+        &self,
+        key_authorization: KeyAuthorization,
+        root_account: Address,
+        preferred_signature_type: Option<SignatureType>,
+    ) -> Result<SignedKeyAuthorization, BrowserWalletError> {
+        if !self.is_connected().await {
+            return Err(BrowserWalletError::NotConnected);
+        }
+
+        let id = Uuid::new_v4();
+        let digest = key_authorization.signature_hash();
+        let request = BrowserKeychainAuthRequest {
+            id,
+            root_account,
+            key_authorization: key_authorization.clone(),
+            digest,
+            preferred_signature_type,
+        };
+
+        self.state.add_keychain_auth_request(request).await;
+
+        let start = Instant::now();
+
+        loop {
+            if let Some(response) = self.state.get_keychain_auth_response(&id).await {
+                if let Some(hex_str) = response.signed_hex {
+                    let bytes = hex::decode(hex_str.trim_start_matches("0x")).map_err(|e| {
+                        BrowserWalletError::ServerError(format!(
+                            "invalid hex in keychain authorization response: {e}"
+                        ))
+                    })?;
+                    let signed =
+                        SignedKeyAuthorization::decode(&mut bytes.as_slice()).map_err(|e| {
+                            BrowserWalletError::ServerError(format!(
+                                "invalid SignedKeyAuthorization RLP from wallet: {e}"
+                            ))
+                        })?;
+
+                    // Defensive: the wallet must authorize the same key on
+                    // the same chain with the same key type. We deliberately
+                    // do not require an exact byte-for-byte match on the rest
+                    // of the payload because the wallet may canonicalize
+                    // optional fields (e.g. drop empty `limits`/`allowedCalls`
+                    // arrays) before signing.
+                    if signed.authorization.key_id != key_authorization.key_id {
+                        return Err(BrowserWalletError::ServerError(format!(
+                            "wallet authorized key {} but {} was requested",
+                            signed.authorization.key_id, key_authorization.key_id,
+                        )));
+                    }
+                    // signed.authorization.chain_id == 0 means the wallet signed
+                    // chain-agnostically and is valid for any chain.
+                    if key_authorization.chain_id != 0
+                        && signed.authorization.chain_id != 0
+                        && signed.authorization.chain_id != key_authorization.chain_id
+                    {
+                        return Err(BrowserWalletError::ServerError(format!(
+                            "wallet authorized chainId {} but {} was requested",
+                            signed.authorization.chain_id, key_authorization.chain_id,
+                        )));
+                    }
+                    if signed.authorization.key_type != key_authorization.key_type {
+                        return Err(BrowserWalletError::ServerError(format!(
+                            "wallet authorized keyType {:?} but {:?} was requested",
+                            signed.authorization.key_type, key_authorization.key_type,
+                        )));
+                    }
+
+                    // For Secp256k1, verify the signature is recoverable and was
+                    // signed by the connected root account. P256/WebAuthn signatures
+                    // cannot be verified off-chain without a P256 verifier and are
+                    // validated by the on-chain precompile instead.
+                    if signed.authorization.key_type == SignatureType::Secp256k1 {
+                        match signed.recover_signer() {
+                            Ok(recovered) if recovered == root_account => {}
+                            Ok(recovered) => {
+                                return Err(BrowserWalletError::ServerError(format!(
+                                    "wallet returned a SignedKeyAuthorization signed by \
+                                     {recovered} but the connected root account is {root_account}"
+                                )));
+                            }
+                            Err(e) => {
+                                return Err(BrowserWalletError::ServerError(format!(
+                                    "wallet returned an unrecoverable SignedKeyAuthorization \
+                                     signature: {e}"
+                                )));
+                            }
+                        }
+                    }
+
+                    return Ok(signed);
+                } else if let Some(error) = response.error {
+                    return Err(BrowserWalletError::Rejected {
+                        operation: "KeychainAuth",
+                        reason: error,
+                    });
+                }
+                return Err(BrowserWalletError::ServerError(
+                    "Keychain authorization response missing both signed_hex and error".to_string(),
+                ));
+            }
+
+            if start.elapsed() > self.timeout {
+                self.state.remove_keychain_auth_request(&id).await;
+                return Err(BrowserWalletError::Timeout { operation: "KeychainAuth" });
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;

@@ -7,6 +7,7 @@ use alloy_dyn_abi::TypedData;
 use alloy_network::{Network, TransactionBuilder};
 use alloy_primitives::{Address, B256, Bytes, ChainId, U256};
 use alloy_signer::Result;
+use tempo_primitives::transaction::{KeyAuthorization, SignatureType, SignedKeyAuthorization};
 use uuid::Uuid;
 
 use crate::wallet_browser::{
@@ -102,6 +103,34 @@ impl<N: Network> BrowserSigner<N> {
 
     pub const fn address(&self) -> Address {
         self.address
+    }
+
+    pub const fn chain_id(&self) -> ChainId {
+        self.chain_id
+    }
+
+    /// Ask the connected browser wallet to sign a Tempo `KeyAuthorization`.
+    ///
+    /// Cross-checks that the connected wallet is the root account named by
+    /// `key_authorization.chain_id` (when non-zero) and that this signer's
+    /// address matches what we'll send as `root_account`.
+    #[cfg(feature = "tempo")]
+    pub async fn sign_key_authorization(
+        &self,
+        key_authorization: KeyAuthorization,
+        preferred_signature_type: Option<SignatureType>,
+    ) -> Result<SignedKeyAuthorization> {
+        if key_authorization.chain_id != 0 && key_authorization.chain_id != self.chain_id {
+            return Err(alloy_signer::Error::other(format!(
+                "KeyAuthorization chainId {} does not match connected wallet chain ID {}",
+                key_authorization.chain_id, self.chain_id,
+            )));
+        }
+
+        self.server
+            .request_keychain_auth(key_authorization, self.address, preferred_signature_type)
+            .await
+            .map_err(alloy_signer::Error::other)
     }
 }
 

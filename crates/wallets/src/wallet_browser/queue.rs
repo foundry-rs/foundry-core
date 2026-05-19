@@ -5,6 +5,9 @@ use uuid::Uuid;
 
 use crate::wallet_browser::types::{BrowserSignRequest, BrowserTransactionRequest};
 
+#[cfg(feature = "tempo")]
+use crate::wallet_browser::types::BrowserKeychainAuthRequest;
+
 #[derive(Debug)]
 pub(crate) struct RequestQueue<Req, Res> {
     /// Pending requests from CLI to browser
@@ -88,6 +91,13 @@ impl<N: Network> HasId for BrowserTransactionRequest<N> {
 }
 
 impl HasId for BrowserSignRequest {
+    fn id(&self) -> &Uuid {
+        &self.id
+    }
+}
+
+#[cfg(feature = "tempo")]
+impl HasId for BrowserKeychainAuthRequest {
     fn id(&self) -> &Uuid {
         &self.id
     }
