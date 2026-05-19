@@ -109,8 +109,7 @@ impl<N: Network> BrowserSigner<N> {
             )));
         }
 
-        let server = self.server.lock().await;
-        server
+        self.server
             .request_keychain_auth(key_authorization, self.address, preferred_signature_type)
             .await
             .map_err(alloy_signer::Error::other)
