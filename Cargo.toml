@@ -127,10 +127,7 @@ alloy-sol-types = "1.6.0"
 alloy-chains = "0.2.34"
 
 # tempo
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "020bc28785f40fb1625e4e38b43db807b2bebee6", default-features = false, features = [
-    "std",
-    "serde",
-] }
+tempo-primitives = { version = "1.8.0", default-features = false, features = ["std", "serde"] }
 
 # misc
 async-trait = "0.1.89"
