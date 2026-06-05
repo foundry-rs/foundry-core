@@ -34,15 +34,15 @@ impl<N: Network> BrowserSigner<N> {
 
         // TODO: use sh_* macros once extracted from foundry-common
         eprintln!("Warning: Browser wallet is still in early development. Use with caution!");
-        println!("Opening browser for wallet connection...");
-        println!("Waiting for wallet connection...");
+        eprintln!("Opening browser for wallet connection...");
+        eprintln!("Waiting for wallet connection...");
 
         let start = Instant::now();
 
         loop {
             if let Some(Connection { address, chain_id }) = server.get_connection().await {
-                println!("Wallet connected: {address}");
-                println!("Chain ID: {chain_id}");
+                eprintln!("Wallet connected: {address}");
+                eprintln!("Chain ID: {chain_id}");
 
                 return Ok(Self { server: Arc::new(server), address, chain_id });
             }
