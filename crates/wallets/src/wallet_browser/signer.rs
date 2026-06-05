@@ -7,13 +7,15 @@ use alloy_dyn_abi::TypedData;
 use alloy_network::{Network, TransactionBuilder};
 use alloy_primitives::{Address, B256, Bytes, ChainId, U256};
 use alloy_signer::Result;
-use tempo_primitives::transaction::{KeyAuthorization, SignatureType, SignedKeyAuthorization};
 use uuid::Uuid;
 
 use crate::wallet_browser::{
     server::BrowserWalletServer,
     types::{BrowserTransactionRequest, Connection},
 };
+
+#[cfg(feature = "tempo")]
+use tempo_primitives::transaction::{KeyAuthorization, SignatureType, SignedKeyAuthorization};
 
 #[derive(Clone, Debug)]
 pub struct BrowserSigner<N: Network> {
