@@ -46,6 +46,9 @@ pub struct VerifyContract {
     /// Use `--via-ir`.
     #[serde(rename = "viaIR", skip_serializing_if = "Option::is_none")]
     pub via_ir: Option<bool>,
+    /// The contract source code license type.
+    #[serde(rename = "licenseType", skip_serializing_if = "Option::is_none")]
+    pub license_type: Option<String>,
     #[serde(flatten)]
     pub other: HashMap<String, String>,
 }
@@ -69,6 +72,7 @@ impl VerifyContract {
             blockscout_constructor_arguments: None,
             evm_version: None,
             via_ir: None,
+            license_type: None,
             other: Default::default(),
         }
     }
@@ -104,6 +108,12 @@ impl VerifyContract {
 
     pub fn via_ir(mut self, via_ir: bool) -> Self {
         self.via_ir = Some(via_ir);
+        self
+    }
+
+    /// Sets the contract source code license type, serialized as Etherscan's `licenseType`.
+    pub fn license_type(mut self, license_type: impl Into<String>) -> Self {
+        self.license_type = Some(license_type.into());
         self
     }
 
