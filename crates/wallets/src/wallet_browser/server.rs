@@ -263,33 +263,12 @@ impl<N: Network> BrowserWalletServer<N> {
                             ))
                         })?;
 
-                    // Defensive: the wallet must authorize the same key on
-                    // the same chain with the same key type. We deliberately
-                    // do not require an exact byte-for-byte match on the rest
-                    // of the payload because the wallet may canonicalize
-                    // optional fields (e.g. drop empty `limits`/`allowedCalls`
-                    // arrays) before signing.
-                    if signed.authorization.key_id != key_authorization.key_id {
+                    if signed.authorization != key_authorization {
                         return Err(BrowserWalletError::ServerError(format!(
-                            "wallet authorized key {} but {} was requested",
-                            signed.authorization.key_id, key_authorization.key_id,
-                        )));
-                    }
-                    // signed.authorization.chain_id == 0 means the wallet signed
-                    // chain-agnostically and is valid for any chain.
-                    if key_authorization.chain_id != 0
-                        && signed.authorization.chain_id != 0
-                        && signed.authorization.chain_id != key_authorization.chain_id
-                    {
-                        return Err(BrowserWalletError::ServerError(format!(
-                            "wallet authorized chainId {} but {} was requested",
-                            signed.authorization.chain_id, key_authorization.chain_id,
-                        )));
-                    }
-                    if signed.authorization.key_type != key_authorization.key_type {
-                        return Err(BrowserWalletError::ServerError(format!(
-                            "wallet authorized keyType {:?} but {:?} was requested",
-                            signed.authorization.key_type, key_authorization.key_type,
+                            "wallet returned a mutated KeyAuthorization payload: signed digest {} \
+                             but requested {}",
+                            signed.authorization.signature_hash(),
+                            key_authorization.signature_hash(),
                         )));
                     }
 
