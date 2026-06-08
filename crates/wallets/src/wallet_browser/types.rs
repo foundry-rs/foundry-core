@@ -5,10 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(feature = "tempo")]
-use {
-    alloy_primitives::B256,
-    tempo_primitives::transaction::{KeyAuthorization, SignatureType},
-};
+use {alloy_primitives::B256, tempo_primitives::transaction::KeyAuthorization};
 
 /// Response format for API endpoints.
 /// - `Ok(T)` serializes as: {"status":"ok","data": ...}

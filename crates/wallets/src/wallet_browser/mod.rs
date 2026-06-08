@@ -1003,7 +1003,7 @@ mod tests {
             .error_for_status()
             .unwrap();
 
-        let res = handle.await.expect("keychain authorization flow panicked");
+        let res = handle.await.expect("key authorization flow panicked");
         match res {
             Err(BrowserWalletError::ServerError(message)) => {
                 assert!(

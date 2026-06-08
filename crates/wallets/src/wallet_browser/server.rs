@@ -28,7 +28,7 @@ use {
     crate::wallet_browser::types::BrowserKeychainAuthRequest,
     alloy_primitives::hex,
     alloy_rlp::Decodable,
-    tempo_primitives::transaction::{KeyAuthorization, SignatureType, SignedKeyAuthorization},
+    tempo_primitives::transaction::{KeyAuthorization, SignedKeyAuthorization},
 };
 
 /// Browser wallet server.
@@ -248,7 +248,7 @@ impl<N: Network> BrowserWalletServer<N> {
                 if let Some(hex_str) = response.signed_hex {
                     let bytes = hex::decode(hex_str.trim_start_matches("0x")).map_err(|e| {
                         BrowserWalletError::ServerError(format!(
-                            "invalid hex in keychain authorization response: {e}"
+                            "invalid hex in key authorization response: {e}"
                         ))
                     })?;
                     let signed =

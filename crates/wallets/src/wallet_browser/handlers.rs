@@ -207,7 +207,7 @@ pub(crate) async fn get_next_keychain_auth_request<N: Network>(
 ) -> Json<BrowserApiResponse<BrowserKeychainAuthRequest>> {
     match state.read_next_keychain_auth_request().await {
         Some(req) => Json(BrowserApiResponse::with_data(req)),
-        None => Json(BrowserApiResponse::error("No pending keychain authorization request")),
+        None => Json(BrowserApiResponse::error("No pending key authorization request")),
     }
 }
 
@@ -219,7 +219,7 @@ pub(crate) async fn post_keychain_auth_response<N: Network>(
     Json(body): Json<BrowserKeychainAuthResponse>,
 ) -> Json<BrowserApiResponse> {
     if !state.has_keychain_auth_request(&body.id).await {
-        return Json(BrowserApiResponse::error("Unknown keychain authorization id"));
+        return Json(BrowserApiResponse::error("Unknown key authorization id"));
     }
 
     match (&body.signed_hex, &body.error) {
