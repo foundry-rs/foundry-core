@@ -217,12 +217,9 @@ impl<N: Network> BrowserWalletServer<N> {
     /// string.
     ///
     /// The returned [`SignedKeyAuthorization`] is verified server-side:
-    /// - `key_id`, `chain_id`, `key_type`, `expiry`, and `limits` must match the original request
-    ///   (the wallet must not mutate the payload).
-    /// - For `Secp256k1`, the recovered signer must equal `root_account`.
-    /// - For `P256` / `WebAuthn`, recovery isn't possible off-chain; we trust the wallet UI's
-    ///   confirmation and defer to the on-chain precompile to reject invalid signatures at
-    ///   submission time.
+    /// - The signed authorization payload must match the original request (the wallet must not
+    ///   mutate security-relevant fields).
+    /// - The signature must recover to `root_account` for every supported signature scheme.
     #[cfg(feature = "tempo")]
     pub async fn request_keychain_auth(
         &self,
@@ -272,25 +269,19 @@ impl<N: Network> BrowserWalletServer<N> {
                         )));
                     }
 
-                    // For Secp256k1, verify the signature is recoverable and was
-                    // signed by the connected root account. P256/WebAuthn signatures
-                    // cannot be verified off-chain without a P256 verifier and are
-                    // validated by the on-chain precompile instead.
-                    if signed.authorization.key_type == SignatureType::Secp256k1 {
-                        match signed.recover_signer() {
-                            Ok(recovered) if recovered == root_account => {}
-                            Ok(recovered) => {
-                                return Err(BrowserWalletError::ServerError(format!(
-                                    "wallet returned a SignedKeyAuthorization signed by \
-                                     {recovered} but the connected root account is {root_account}"
-                                )));
-                            }
-                            Err(e) => {
-                                return Err(BrowserWalletError::ServerError(format!(
-                                    "wallet returned an unrecoverable SignedKeyAuthorization \
-                                     signature: {e}"
-                                )));
-                            }
+                    match signed.recover_signer() {
+                        Ok(recovered) if recovered == root_account => {}
+                        Ok(recovered) => {
+                            return Err(BrowserWalletError::ServerError(format!(
+                                "wallet returned a SignedKeyAuthorization signed by \
+                                 {recovered} but the connected root account is {root_account}"
+                            )));
+                        }
+                        Err(e) => {
+                            return Err(BrowserWalletError::ServerError(format!(
+                                "wallet returned an unrecoverable SignedKeyAuthorization \
+                                 signature: {e}"
+                            )));
                         }
                     }
 

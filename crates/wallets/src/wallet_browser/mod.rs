@@ -28,6 +28,16 @@ mod tests {
             BrowserTransactionResponse, Connection, SessionInfo, SignRequest, SignType,
         },
     };
+    #[cfg(feature = "tempo")]
+    use {
+        crate::wallet_browser::types::{BrowserKeychainAuthRequest, BrowserKeychainAuthResponse},
+        alloy_primitives::B256,
+        alloy_rlp::Encodable,
+        tempo_primitives::transaction::{
+            KeyAuthorization, PrimitiveSignature, SignatureType, SignedKeyAuthorization,
+            tt_signature::P256SignatureWithPreHash,
+        },
+    };
 
     const ALICE: Address = address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
     const BOB: Address = address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
@@ -944,6 +954,69 @@ mod tests {
         assert!(!info.alive, "session must be marked as shutting down after stop()");
     }
 
+    #[cfg(feature = "tempo")]
+    #[tokio::test]
+    async fn test_keychain_auth_rejects_invalid_p256_signature() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let authorization = KeyAuthorization::unrestricted(1, SignatureType::P256, BOB);
+        let handle = wait_for_keychain_auth(&server, authorization.clone(), ALICE).await;
+        let resp = client
+            .get(format!("http://localhost:{}/api/keychain-auth/request", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Ok(pending) =
+            resp.json::<BrowserApiResponse<BrowserKeychainAuthRequest>>().await.unwrap()
+        else {
+            panic!("expected BrowserApiResponse::Ok with a pending keychain auth request");
+        };
+        assert_eq!(pending.root_account, ALICE);
+        assert_eq!(pending.key_authorization, authorization);
+
+        let invalid_signed =
+            authorization.into_signed(PrimitiveSignature::P256(P256SignatureWithPreHash {
+                r: B256::ZERO,
+                s: B256::ZERO,
+                pub_key_x: B256::ZERO,
+                pub_key_y: B256::ZERO,
+                pre_hash: false,
+            }));
+
+        client
+            .post(format!("http://localhost:{}/api/keychain-auth/response", server.port()))
+            .json(&BrowserKeychainAuthResponse {
+                id: pending.id,
+                signed_hex: {
+                    let mut out = Vec::new();
+                    invalid_signed.encode(&mut out);
+                    Some(format!("0x{}", alloy_primitives::hex::encode(out)))
+                },
+                error: None,
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let res = handle.await.expect("keychain authorization flow panicked");
+        match res {
+            Err(BrowserWalletError::ServerError(message)) => {
+                assert!(
+                    message.contains("unrecoverable SignedKeyAuthorization signature"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("expected invalid P256 signature rejection, got {other:?}"),
+        }
+
+        server.stop().await.unwrap();
+    }
+
     /// Helper to create a default browser wallet server.
     fn create_server<N: Network>() -> BrowserWalletServer<N> {
         BrowserWalletServer::new(0, false, DEFAULT_TIMEOUT, DEFAULT_DEVELOPMENT)
@@ -1005,6 +1078,23 @@ mod tests {
         let browser_server = server.clone();
         let join_handle =
             tokio::spawn(async move { browser_server.request_signing(sign_request).await });
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        join_handle
+    }
+
+    #[cfg(feature = "tempo")]
+    async fn wait_for_keychain_auth<N: Network>(
+        server: &BrowserWalletServer<N>,
+        key_authorization: KeyAuthorization,
+        root_account: Address,
+    ) -> JoinHandle<Result<SignedKeyAuthorization, BrowserWalletError>> {
+        let browser_server = server.clone();
+        let join_handle = tokio::spawn(async move {
+            browser_server.request_keychain_auth(key_authorization, root_account, None).await
+        });
+        // Let the spawned flow enqueue its pending request before the test polls the API.
         tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
