@@ -225,7 +225,6 @@ impl<N: Network> BrowserWalletServer<N> {
         &self,
         key_authorization: KeyAuthorization,
         root_account: Address,
-        preferred_signature_type: Option<SignatureType>,
     ) -> Result<SignedKeyAuthorization, BrowserWalletError> {
         if !self.is_connected().await {
             return Err(BrowserWalletError::NotConnected);
@@ -238,7 +237,6 @@ impl<N: Network> BrowserWalletServer<N> {
             root_account,
             key_authorization: key_authorization.clone(),
             digest,
-            preferred_signature_type,
         };
 
         self.state.add_keychain_auth_request(request).await;

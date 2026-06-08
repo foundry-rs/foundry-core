@@ -140,10 +140,6 @@ pub struct BrowserKeychainAuthRequest {
     /// `key_authorization.signature_hash()`. Foundry pre-computes it so the
     /// frontend doesn't need to import RLP.
     pub digest: B256,
-    /// Optional UX hint for which signature type the caller wants. The wallet
-    /// may ignore this if the connected root only supports a single key type.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preferred_signature_type: Option<SignatureType>,
 }
 
 /// Tempo `KeyAuthorization` signing response sent back from the browser

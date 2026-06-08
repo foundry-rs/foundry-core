@@ -120,7 +120,6 @@ impl<N: Network> BrowserSigner<N> {
     pub async fn sign_key_authorization(
         &self,
         key_authorization: KeyAuthorization,
-        preferred_signature_type: Option<SignatureType>,
     ) -> Result<SignedKeyAuthorization> {
         if key_authorization.chain_id != 0 && key_authorization.chain_id != self.chain_id {
             return Err(alloy_signer::Error::other(format!(
@@ -130,7 +129,7 @@ impl<N: Network> BrowserSigner<N> {
         }
 
         self.server
-            .request_keychain_auth(key_authorization, self.address, preferred_signature_type)
+            .request_keychain_auth(key_authorization, self.address)
             .await
             .map_err(alloy_signer::Error::other)
     }

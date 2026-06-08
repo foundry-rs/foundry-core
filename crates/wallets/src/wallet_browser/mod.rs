@@ -1092,7 +1092,7 @@ mod tests {
     ) -> JoinHandle<Result<SignedKeyAuthorization, BrowserWalletError>> {
         let browser_server = server.clone();
         let join_handle = tokio::spawn(async move {
-            browser_server.request_keychain_auth(key_authorization, root_account, None).await
+            browser_server.request_keychain_auth(key_authorization, root_account).await
         });
         // Let the spawned flow enqueue its pending request before the test polls the API.
         tokio::task::yield_now().await;
