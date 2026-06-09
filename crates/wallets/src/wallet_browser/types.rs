@@ -116,8 +116,9 @@ pub(crate) struct BrowserSignResponse {
 /// Tempo `KeyAuthorization` signing request sent to the browser wallet.
 ///
 /// The browser UI should display the human-readable contents of
-/// [`Self::key_authorization`] (key id, expiry, limits, allowed calls), drive
-/// the WebAuthn / P256 / Secp256k1 ceremony for the precomputed
+/// [`Self::key_authorization`] (key id, expiry, limits, allowed calls, witness,
+/// account binding, admin flag, ...), drive the WebAuthn / P256 / Secp256k1
+/// ceremony for the precomputed
 /// [`Self::digest`], and POST back the resulting RLP-encoded
 /// `SignedKeyAuthorization` as a `0x`-prefixed hex string.
 #[cfg(feature = "tempo")]
@@ -129,8 +130,7 @@ pub struct BrowserKeychainAuthRequest {
     /// Root account that must sign the authorization. The wallet UI must
     /// cross-check this against the connected wallet address before signing.
     pub root_account: Address,
-    /// The full unsigned `KeyAuthorization` payload (key_id, expiry, limits,
-    /// allowed_calls, ...). Sent so the UI can render a human-readable
+    /// The full unsigned `KeyAuthorization` payload. Sent so the UI can render a human-readable
     /// approval card.
     pub key_authorization: KeyAuthorization,
     /// keccak256 of `RLP(key_authorization)` — equal to
