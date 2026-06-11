@@ -43,7 +43,7 @@ itertools = ">=0.13, <=0.14"
 # project-util
 tempfile = { workspace = true, optional = true }
 fs_extra = { workspace = true, optional = true }
-rand = { version = "0.9.4", optional = true }
+rand = { version = "0.10.1", optional = true }
 
 # svm
 svm = { workspace = true, optional = true }
