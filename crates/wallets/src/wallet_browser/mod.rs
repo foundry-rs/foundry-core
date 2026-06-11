@@ -1087,6 +1087,44 @@ mod tests {
         server.stop().await.unwrap();
     }
 
+    #[cfg(feature = "tempo")]
+    #[tokio::test]
+    async fn test_key_authorization_rejects_t5_fields_before_enqueueing() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let authorization = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, BOB)
+            .with_witness(B256::repeat_byte(0x53));
+        let res = server.request_key_authorization(authorization, ALICE).await;
+        match res {
+            Err(BrowserWalletError::ServerError(message)) => {
+                assert!(
+                    message.contains(
+                        "browser key authorization signing does not support T5 fields yet: witness"
+                    ),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("expected unsupported T5 field rejection, got {other:?}"),
+        }
+
+        let resp = client
+            .get(format!("http://localhost:{}/api/key-authorization/request", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Error { message } =
+            resp.json::<BrowserApiResponse<BrowserKeyAuthorizationRequest>>().await.unwrap()
+        else {
+            panic!("expected no pending key authorization request after T5 rejection");
+        };
+        assert_eq!(message, "No pending key authorization request");
+
+        server.stop().await.unwrap();
+    }
+
     /// Helper to create a default browser wallet server.
     fn create_server<N: Network>() -> BrowserWalletServer<N> {
         BrowserWalletServer::new(0, false, DEFAULT_TIMEOUT, DEFAULT_DEVELOPMENT)

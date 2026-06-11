@@ -116,11 +116,12 @@ pub(crate) struct BrowserSignResponse {
 /// Tempo `KeyAuthorization` signing request sent to the browser wallet.
 ///
 /// The browser UI should display the human-readable contents of
-/// [`Self::key_authorization`] (key id, expiry, limits, allowed calls, witness,
-/// account binding, admin flag, ...), drive the WebAuthn / P256 / Secp256k1
-/// ceremony for the precomputed
+/// [`Self::key_authorization`] (key id, expiry, limits, and allowed calls),
+/// drive the WebAuthn / P256 / Secp256k1 ceremony for the precomputed
 /// [`Self::digest`], and POST back the resulting RLP-encoded
-/// `SignedKeyAuthorization` as a `0x`-prefixed hex string.
+/// `SignedKeyAuthorization` as a `0x`-prefixed hex string. T5
+/// `KeyAuthorization` fields are rejected server-side until the bundled
+/// browser wallet can display and forward them.
 #[cfg(feature = "tempo")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]

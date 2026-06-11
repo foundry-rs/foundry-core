@@ -229,6 +229,7 @@ impl<N: Network> BrowserWalletServer<N> {
         if !self.is_connected().await {
             return Err(BrowserWalletError::NotConnected);
         }
+        reject_unsupported_key_authorization_fields(&key_authorization)?;
 
         let id = Uuid::new_v4();
         let digest = key_authorization.signature_hash();
@@ -325,4 +326,29 @@ impl<N: Network> BrowserWalletServer<N> {
 
         self.request_signing(sign_request).await
     }
+}
+
+#[cfg(feature = "tempo")]
+fn reject_unsupported_key_authorization_fields(
+    key_authorization: &KeyAuthorization,
+) -> Result<(), BrowserWalletError> {
+    let mut unsupported_fields = Vec::new();
+    if key_authorization.witness.is_some() {
+        unsupported_fields.push("witness");
+    }
+    if key_authorization.account.is_some() {
+        unsupported_fields.push("account");
+    }
+    if key_authorization.is_admin {
+        unsupported_fields.push("is_admin");
+    }
+
+    if !unsupported_fields.is_empty() {
+        return Err(BrowserWalletError::ServerError(format!(
+            "browser key authorization signing does not support T5 fields yet: {}",
+            unsupported_fields.join(", ")
+        )));
+    }
+
+    Ok(())
 }
