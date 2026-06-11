@@ -33,6 +33,8 @@ mod tests {
         crate::wallet_browser::types::{BrowserKeychainAuthRequest, BrowserKeychainAuthResponse},
         alloy_primitives::B256,
         alloy_rlp::Encodable,
+        alloy_signer::Signer,
+        alloy_signer_local::PrivateKeySigner,
         tempo_primitives::transaction::{
             KeyAuthorization, PrimitiveSignature, SignatureType, SignedKeyAuthorization,
             tt_signature::P256SignatureWithPreHash,
@@ -1012,6 +1014,72 @@ mod tests {
                 );
             }
             other => panic!("expected invalid P256 signature rejection, got {other:?}"),
+        }
+
+        server.stop().await.unwrap();
+    }
+
+    #[cfg(feature = "tempo")]
+    #[tokio::test]
+    async fn test_keychain_auth_rejects_mutated_signed_authorization() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let authorization =
+            KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, BOB).with_expiry(123);
+        let handle = wait_for_keychain_auth(&server, authorization.clone(), ALICE).await;
+        let resp = client
+            .get(format!("http://localhost:{}/api/keychain-auth/request", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Ok(pending) =
+            resp.json::<BrowserApiResponse<BrowserKeychainAuthRequest>>().await.unwrap()
+        else {
+            panic!("expected BrowserApiResponse::Ok with a pending keychain auth request");
+        };
+        assert_eq!(pending.root_account, ALICE);
+        assert_eq!(pending.key_authorization, authorization);
+
+        let mutated_authorization =
+            KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, BOB).with_expiry(456);
+        let root_signer: PrivateKeySigner =
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse().unwrap();
+        assert_eq!(root_signer.address(), ALICE);
+
+        let signature =
+            root_signer.sign_hash(&mutated_authorization.signature_hash()).await.unwrap();
+        let mutated_signed =
+            mutated_authorization.into_signed(PrimitiveSignature::Secp256k1(signature));
+
+        client
+            .post(format!("http://localhost:{}/api/keychain-auth/response", server.port()))
+            .json(&BrowserKeychainAuthResponse {
+                id: pending.id,
+                signed_hex: {
+                    let mut out = Vec::new();
+                    mutated_signed.encode(&mut out);
+                    Some(format!("0x{}", alloy_primitives::hex::encode(out)))
+                },
+                error: None,
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let res = handle.await.expect("key authorization flow panicked");
+        match res {
+            Err(BrowserWalletError::ServerError(message)) => {
+                assert!(
+                    message.contains("wallet returned a mutated KeyAuthorization payload"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("expected mutated key authorization rejection, got {other:?}"),
         }
 
         server.stop().await.unwrap();
