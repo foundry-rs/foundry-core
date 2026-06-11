@@ -24,7 +24,7 @@ Core libraries extracted from [Foundry](https://github.com/foundry-rs/foundry), 
 
 ## Supported Rust Versions (MSRV)
 
-The current MSRV (minimum supported rust version) is **1.93**.
+The current MSRV (minimum supported rust version) is **1.95**.
 
 Note that the MSRV is not increased automatically, and only as part of a minor release.
 
