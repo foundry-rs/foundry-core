@@ -124,7 +124,7 @@ pub(crate) struct BrowserSignResponse {
 #[cfg(feature = "tempo")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct BrowserKeychainAuthRequest {
+pub struct BrowserKeyAuthorizationRequest {
     /// Unique id correlating request and response.
     pub id: Uuid,
     /// Root account that must sign the authorization. The wallet UI must
@@ -144,7 +144,7 @@ pub struct BrowserKeychainAuthRequest {
 #[cfg(feature = "tempo")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct BrowserKeychainAuthResponse {
+pub struct BrowserKeyAuthorizationResponse {
     /// Must match the request id.
     pub id: Uuid,
     /// `0x`-prefixed RLP-encoded `SignedKeyAuthorization` produced by the

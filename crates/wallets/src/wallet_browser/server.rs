@@ -25,7 +25,7 @@ use crate::wallet_browser::{
 
 #[cfg(feature = "tempo")]
 use {
-    crate::wallet_browser::types::BrowserKeychainAuthRequest,
+    crate::wallet_browser::types::BrowserKeyAuthorizationRequest,
     alloy_primitives::hex,
     alloy_rlp::Decodable,
     tempo_primitives::transaction::{KeyAuthorization, SignedKeyAuthorization},
@@ -221,7 +221,7 @@ impl<N: Network> BrowserWalletServer<N> {
     ///   mutate security-relevant fields).
     /// - The signature must recover to `root_account` for every supported signature scheme.
     #[cfg(feature = "tempo")]
-    pub async fn request_keychain_auth(
+    pub async fn request_key_authorization(
         &self,
         key_authorization: KeyAuthorization,
         root_account: Address,
@@ -232,19 +232,19 @@ impl<N: Network> BrowserWalletServer<N> {
 
         let id = Uuid::new_v4();
         let digest = key_authorization.signature_hash();
-        let request = BrowserKeychainAuthRequest {
+        let request = BrowserKeyAuthorizationRequest {
             id,
             root_account,
             key_authorization: key_authorization.clone(),
             digest,
         };
 
-        self.state.add_keychain_auth_request(request).await;
+        self.state.add_key_authorization_request(request).await;
 
         let start = Instant::now();
 
         loop {
-            if let Some(response) = self.state.get_keychain_auth_response(&id).await {
+            if let Some(response) = self.state.get_key_authorization_response(&id).await {
                 if let Some(hex_str) = response.signed_hex {
                     let bytes = hex::decode(hex_str.trim_start_matches("0x")).map_err(|e| {
                         BrowserWalletError::ServerError(format!(
@@ -286,18 +286,18 @@ impl<N: Network> BrowserWalletServer<N> {
                     return Ok(signed);
                 } else if let Some(error) = response.error {
                     return Err(BrowserWalletError::Rejected {
-                        operation: "KeychainAuth",
+                        operation: "KeyAuthorization",
                         reason: error,
                     });
                 }
                 return Err(BrowserWalletError::ServerError(
-                    "Keychain authorization response missing both signed_hex and error".to_string(),
+                    "Key authorization response missing both signed_hex and error".to_string(),
                 ));
             }
 
             if start.elapsed() > self.timeout {
-                self.state.remove_keychain_auth_request(&id).await;
-                return Err(BrowserWalletError::Timeout { operation: "KeychainAuth" });
+                self.state.remove_key_authorization_request(&id).await;
+                return Err(BrowserWalletError::Timeout { operation: "KeyAuthorization" });
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;

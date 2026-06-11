@@ -129,7 +129,7 @@ impl<N: Network> BrowserSigner<N> {
         }
 
         self.server
-            .request_keychain_auth(key_authorization, self.address)
+            .request_key_authorization(key_authorization, self.address)
             .await
             .map_err(alloy_signer::Error::other)
     }

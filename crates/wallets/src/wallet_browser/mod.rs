@@ -30,7 +30,9 @@ mod tests {
     };
     #[cfg(feature = "tempo")]
     use {
-        crate::wallet_browser::types::{BrowserKeychainAuthRequest, BrowserKeychainAuthResponse},
+        crate::wallet_browser::types::{
+            BrowserKeyAuthorizationRequest, BrowserKeyAuthorizationResponse,
+        },
         alloy_primitives::B256,
         alloy_rlp::Encodable,
         alloy_signer::Signer,
@@ -958,23 +960,23 @@ mod tests {
 
     #[cfg(feature = "tempo")]
     #[tokio::test]
-    async fn test_keychain_auth_rejects_invalid_p256_signature() {
+    async fn test_key_authorization_rejects_invalid_p256_signature() {
         let mut server = create_server::<Ethereum>();
         let client = client_with_token(&server);
         server.start().await.unwrap();
         connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
 
         let authorization = KeyAuthorization::unrestricted(1, SignatureType::P256, BOB);
-        let handle = wait_for_keychain_auth(&server, authorization.clone(), ALICE).await;
+        let handle = wait_for_key_authorization(&server, authorization.clone(), ALICE).await;
         let resp = client
-            .get(format!("http://localhost:{}/api/keychain-auth/request", server.port()))
+            .get(format!("http://localhost:{}/api/key-authorization/request", server.port()))
             .send()
             .await
             .unwrap();
         let BrowserApiResponse::Ok(pending) =
-            resp.json::<BrowserApiResponse<BrowserKeychainAuthRequest>>().await.unwrap()
+            resp.json::<BrowserApiResponse<BrowserKeyAuthorizationRequest>>().await.unwrap()
         else {
-            panic!("expected BrowserApiResponse::Ok with a pending keychain auth request");
+            panic!("expected BrowserApiResponse::Ok with a pending key authorization request");
         };
         assert_eq!(pending.root_account, ALICE);
         assert_eq!(pending.key_authorization, authorization);
@@ -989,8 +991,8 @@ mod tests {
             }));
 
         client
-            .post(format!("http://localhost:{}/api/keychain-auth/response", server.port()))
-            .json(&BrowserKeychainAuthResponse {
+            .post(format!("http://localhost:{}/api/key-authorization/response", server.port()))
+            .json(&BrowserKeyAuthorizationResponse {
                 id: pending.id,
                 signed_hex: {
                     let mut out = Vec::new();
@@ -1021,7 +1023,7 @@ mod tests {
 
     #[cfg(feature = "tempo")]
     #[tokio::test]
-    async fn test_keychain_auth_rejects_mutated_signed_authorization() {
+    async fn test_key_authorization_rejects_mutated_signed_authorization() {
         let mut server = create_server::<Ethereum>();
         let client = client_with_token(&server);
         server.start().await.unwrap();
@@ -1029,16 +1031,16 @@ mod tests {
 
         let authorization =
             KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, BOB).with_expiry(123);
-        let handle = wait_for_keychain_auth(&server, authorization.clone(), ALICE).await;
+        let handle = wait_for_key_authorization(&server, authorization.clone(), ALICE).await;
         let resp = client
-            .get(format!("http://localhost:{}/api/keychain-auth/request", server.port()))
+            .get(format!("http://localhost:{}/api/key-authorization/request", server.port()))
             .send()
             .await
             .unwrap();
         let BrowserApiResponse::Ok(pending) =
-            resp.json::<BrowserApiResponse<BrowserKeychainAuthRequest>>().await.unwrap()
+            resp.json::<BrowserApiResponse<BrowserKeyAuthorizationRequest>>().await.unwrap()
         else {
-            panic!("expected BrowserApiResponse::Ok with a pending keychain auth request");
+            panic!("expected BrowserApiResponse::Ok with a pending key authorization request");
         };
         assert_eq!(pending.root_account, ALICE);
         assert_eq!(pending.key_authorization, authorization);
@@ -1055,8 +1057,8 @@ mod tests {
             mutated_authorization.into_signed(PrimitiveSignature::Secp256k1(signature));
 
         client
-            .post(format!("http://localhost:{}/api/keychain-auth/response", server.port()))
-            .json(&BrowserKeychainAuthResponse {
+            .post(format!("http://localhost:{}/api/key-authorization/response", server.port()))
+            .json(&BrowserKeyAuthorizationResponse {
                 id: pending.id,
                 signed_hex: {
                     let mut out = Vec::new();
@@ -1153,14 +1155,14 @@ mod tests {
     }
 
     #[cfg(feature = "tempo")]
-    async fn wait_for_keychain_auth<N: Network>(
+    async fn wait_for_key_authorization<N: Network>(
         server: &BrowserWalletServer<N>,
         key_authorization: KeyAuthorization,
         root_account: Address,
     ) -> JoinHandle<Result<SignedKeyAuthorization, BrowserWalletError>> {
         let browser_server = server.clone();
         let join_handle = tokio::spawn(async move {
-            browser_server.request_keychain_auth(key_authorization, root_account).await
+            browser_server.request_key_authorization(key_authorization, root_account).await
         });
         // Let the spawned flow enqueue its pending request before the test polls the API.
         tokio::task::yield_now().await;

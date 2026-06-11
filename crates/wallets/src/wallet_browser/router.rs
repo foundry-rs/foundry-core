@@ -26,8 +26,8 @@ pub async fn build_router<N: Network>(state: Arc<BrowserWalletState<N>>, port: u
 
     #[cfg(feature = "tempo")]
     let api = api
-        .route("/keychain-auth/request", get(handlers::get_next_keychain_auth_request))
-        .route("/keychain-auth/response", post(handlers::post_keychain_auth_response));
+        .route("/key-authorization/request", get(handlers::get_next_key_authorization_request))
+        .route("/key-authorization/response", post(handlers::post_key_authorization_response));
 
     let api = api
         .route_layer(middleware::from_fn_with_state(state.clone(), require_session_token))

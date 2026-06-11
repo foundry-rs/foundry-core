@@ -21,7 +21,9 @@ use crate::wallet_browser::{
 };
 
 #[cfg(feature = "tempo")]
-use crate::wallet_browser::types::{BrowserKeychainAuthRequest, BrowserKeychainAuthResponse};
+use crate::wallet_browser::types::{
+    BrowserKeyAuthorizationRequest, BrowserKeyAuthorizationResponse,
+};
 
 /// Serve index.html
 pub(crate) async fn serve_index() -> impl axum::response::IntoResponse {
@@ -200,25 +202,25 @@ pub(crate) async fn post_connection_update<N: Network>(
 // -- Tempo `KeyAuthorization` signing ---------------------------------------
 
 /// Get the next pending Tempo `KeyAuthorization` signing request.
-/// Route: GET /api/keychain-auth/request
+/// Route: GET /api/key-authorization/request
 #[cfg(feature = "tempo")]
-pub(crate) async fn get_next_keychain_auth_request<N: Network>(
+pub(crate) async fn get_next_key_authorization_request<N: Network>(
     State(state): State<Arc<BrowserWalletState<N>>>,
-) -> Json<BrowserApiResponse<BrowserKeychainAuthRequest>> {
-    match state.read_next_keychain_auth_request().await {
+) -> Json<BrowserApiResponse<BrowserKeyAuthorizationRequest>> {
+    match state.read_next_key_authorization_request().await {
         Some(req) => Json(BrowserApiResponse::with_data(req)),
         None => Json(BrowserApiResponse::error("No pending key authorization request")),
     }
 }
 
 /// Post a Tempo `KeyAuthorization` signing response (signed hex or error).
-/// Route: POST /api/keychain-auth/response
+/// Route: POST /api/key-authorization/response
 #[cfg(feature = "tempo")]
-pub(crate) async fn post_keychain_auth_response<N: Network>(
+pub(crate) async fn post_key_authorization_response<N: Network>(
     State(state): State<Arc<BrowserWalletState<N>>>,
-    Json(body): Json<BrowserKeychainAuthResponse>,
+    Json(body): Json<BrowserKeyAuthorizationResponse>,
 ) -> Json<BrowserApiResponse> {
-    if !state.has_keychain_auth_request(&body.id).await {
+    if !state.has_key_authorization_request(&body.id).await {
         return Json(BrowserApiResponse::error("Unknown key authorization id"));
     }
 
@@ -234,7 +236,7 @@ pub(crate) async fn post_keychain_auth_response<N: Network>(
         _ => {}
     }
 
-    state.add_keychain_auth_response(body).await;
+    state.add_key_authorization_response(body).await;
 
     Json(BrowserApiResponse::ok())
 }
