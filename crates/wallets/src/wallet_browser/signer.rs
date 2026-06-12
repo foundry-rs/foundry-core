@@ -3,9 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alloy_dyn_abi::TypedData;
 use alloy_network::{Network, TransactionBuilder};
-use alloy_primitives::{Address, B256, Bytes, ChainId, U256};
+use alloy_primitives::{Address, B256, ChainId};
 use alloy_signer::Result;
 use uuid::Uuid;
 
@@ -85,22 +84,6 @@ impl<N: Network> BrowserSigner<N> {
             self.server.request_transaction(request).await.map_err(alloy_signer::Error::other)?;
 
         Ok(tx_hash)
-    }
-
-    /// Sign EIP-712 typed data through the browser wallet.
-    pub async fn sign_typed_data_v4(&self, typed_data: TypedData) -> Result<Bytes> {
-        if let Some(chain_id) = typed_data.domain.chain_id
-            && chain_id != U256::from(self.chain_id)
-        {
-            return Err(alloy_signer::Error::other(
-                "Typed data domain `chainId` does not match connected wallet chain ID",
-            ));
-        }
-
-        self.server
-            .request_typed_data_signing(self.address, typed_data)
-            .await
-            .map_err(alloy_signer::Error::other)
     }
 
     pub const fn address(&self) -> Address {
