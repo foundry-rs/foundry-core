@@ -293,7 +293,13 @@ impl ClientBuilder {
     ///
     /// Fails if the `etherscan_url` is not a valid `Url`
     pub fn with_url(mut self, etherscan_url: impl IntoUrl) -> Result<Self> {
-        self.etherscan_url = Some(into_url(etherscan_url)?);
+        let mut url = into_url(etherscan_url)?;
+        // Ensure a trailing slash so `Url::join` appends path segments instead of replacing the
+        // last one, which would drop a base path like `/explorer` from the generated URLs.
+        if !url.path().ends_with('/') {
+            url.set_path(&format!("{}/", url.path()));
+        }
+        self.etherscan_url = Some(url);
         Ok(self)
     }
 
@@ -607,6 +613,19 @@ mod tests {
     fn builder_no_proxy_builds() {
         let client = Client::builder().chain(Chain::mainnet()).unwrap().no_proxy().build().unwrap();
         assert_eq!(client.etherscan_url.as_str(), "https://etherscan.io/");
+    }
+
+    #[test]
+    fn explorer_url_preserves_base_path() {
+        // A custom explorer hosted under a sub-path without a trailing slash.
+        let client = Client::builder()
+            .with_api_url("https://example.com/api")
+            .unwrap()
+            .with_url("https://example.com/explorer")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(client.block_url(1), "https://example.com/explorer/block/1");
     }
 
     #[test]
