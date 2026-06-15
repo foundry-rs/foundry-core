@@ -260,6 +260,11 @@ pub struct Settings {
     /// false by default.
     #[serde(rename = "viaIR", default, skip_serializing_if = "Option::is_none")]
     pub via_ir: Option<bool>,
+    /// Enables experimental Solidity compiler features.
+    ///
+    /// Since 0.8.35.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experimental: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<DebuggingSettings>,
     /// Addresses of the libraries. If not all libraries are given here,
@@ -354,6 +359,11 @@ impl Settings {
                 model_checker.show_proved_safe = None;
                 model_checker.show_unsupported = None;
             }
+        }
+
+        if *version < Version::new(0, 8, 35) {
+            // introduced in 0.8.35 <https://github.com/ethereum/solidity/releases/tag/v0.8.35>
+            self.experimental = None;
         }
 
         if let Some(evm_version) = self.evm_version {
@@ -455,6 +465,19 @@ impl Settings {
         self.set_via_ir(true)
     }
 
+    /// Sets the `experimental` value.
+    #[must_use]
+    pub const fn set_experimental(mut self, experimental: bool) -> Self {
+        self.experimental = Some(experimental);
+        self
+    }
+
+    /// Enables experimental Solidity compiler features.
+    #[must_use]
+    pub const fn with_experimental(self) -> Self {
+        self.set_experimental(true)
+    }
+
     /// Enable `viaIR` and use the minimum optimization settings.
     ///
     /// This is useful in the following scenarios:
@@ -552,6 +575,7 @@ impl Default for Settings {
             output_selection: OutputSelection::default_output_selection(),
             evm_version: Some(EvmVersion::default()),
             via_ir: None,
+            experimental: None,
             debug: None,
             libraries: Default::default(),
             remappings: Default::default(),
@@ -2061,6 +2085,33 @@ mod tests {
 
         let i = input.sanitized(&Version::new(0, 8, 0));
         assert!(i.settings.metadata.unwrap().cbor_metadata.is_none());
+    }
+
+    #[test]
+    fn can_serialize_experimental() {
+        let settings = Settings::default().with_experimental();
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["experimental"], true);
+
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "experimental": true
+        }))
+        .unwrap();
+        assert_eq!(settings.experimental, Some(true));
+    }
+
+    #[test]
+    fn can_sanitize_experimental() {
+        let settings = Settings::default().with_experimental();
+
+        let input =
+            SolcInput { language: SolcLanguage::Solidity, sources: Default::default(), settings };
+
+        let i = input.clone().sanitized(&Version::new(0, 8, 35));
+        assert_eq!(i.settings.experimental, Some(true));
+
+        let i = input.sanitized(&Version::new(0, 8, 34));
+        assert!(i.settings.experimental.is_none());
     }
 
     #[test]

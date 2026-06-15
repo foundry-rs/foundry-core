@@ -304,6 +304,7 @@ impl CompilerSettings for SolcSettings {
                     output_selection,
                     evm_version,
                     via_ir,
+                    experimental,
                     debug,
                     libraries,
                 },
@@ -317,6 +318,7 @@ impl CompilerSettings for SolcSettings {
             && *metadata == other.settings.metadata
             && *evm_version == other.settings.evm_version
             && *via_ir == other.settings.via_ir
+            && *experimental == other.settings.experimental
             && *debug == other.settings.debug
             && *libraries == other.settings.libraries
             && output_selection.is_subset_of(&other.settings.output_selection)
