@@ -18,7 +18,10 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use url::Url;
 #[cfg(feature = "zstd")]
@@ -362,12 +365,21 @@ pub struct JsonBlockCacheDB<B> {
     cache_path: Option<PathBuf>,
     /// Object that's stored in a json file
     data: JsonBlockCacheData<B>,
+    /// Number of database requests that were served from the cache.
+    cache_hits: AtomicU64,
+    /// Number of cache lookups that scheduled a provider request.
+    cache_misses: AtomicU64,
 }
 
 impl<B> JsonBlockCacheDB<B> {
     /// Creates a new instance.
     fn new(meta: Arc<RwLock<BlockchainDbMeta<B>>>, cache_path: Option<PathBuf>) -> Self {
-        Self { cache_path, data: JsonBlockCacheData { meta, data: Arc::new(Default::default()) } }
+        Self {
+            cache_path,
+            data: JsonBlockCacheData { meta, data: Arc::new(Default::default()) },
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+        }
     }
 
     /// Returns the [MemDb] it holds access to
@@ -388,6 +400,22 @@ impl<B> JsonBlockCacheDB<B> {
     /// Returns the cache path.
     pub fn cache_path(&self) -> Option<&Path> {
         self.cache_path.as_deref()
+    }
+
+    pub(crate) fn record_cache_hit(&self) {
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_cache_miss(&self) {
+        self.cache_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn cache_hits(&self) -> u64 {
+        self.cache_hits.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn cache_misses(&self) -> u64 {
+        self.cache_misses.load(Ordering::Relaxed)
     }
 }
 
@@ -417,7 +445,12 @@ impl<B: ForkBlockEnv> JsonBlockCacheDB<B> {
             warn!(target: "cache", ?err, ?path, "Failed to deserialize cache data");
         })?;
         trace!(target: "cache", ?path, "read json cache");
-        Ok(Self { cache_path: Some(path), data })
+        Ok(Self {
+            cache_path: Some(path),
+            data,
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+        })
     }
 }
 

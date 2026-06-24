@@ -230,6 +230,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 trace!(target: "backendhandler", "received request basic address={:?}", addr);
                 let acc = self.db.accounts().read().get(&addr).cloned();
                 if let Some(basic) = acc {
+                    self.db.cache().record_cache_hit();
                     let _ = sender.send(Ok(basic));
                 } else {
                     self.request_account(addr, sender);
@@ -238,6 +239,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             BackendRequest::BlockHash(number, sender) => {
                 let hash = self.db.block_hashes().read().get(&U256::from(number)).copied();
                 if let Some(hash) = hash {
+                    self.db.cache().record_cache_hit();
                     let _ = sender.send(Ok(hash));
                 } else {
                     self.request_hash(number, sender);
@@ -254,6 +256,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 let value =
                     self.db.storage().read().get(&addr).and_then(|acc| acc.get(&idx).copied());
                 if let Some(value) = value {
+                    self.db.cache().record_cache_hit();
                     let _ = sender.send(Ok(value));
                 } else {
                     // account present but not storage -> fetch storage
@@ -292,6 +295,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             }
             Entry::Vacant(entry) => {
                 trace!(target: "backendhandler", %address, %idx, "preparing storage request");
+                self.db.cache().record_cache_miss();
                 entry.insert(vec![listener]);
                 let provider = self.provider.clone();
                 let block_id = self.block_id.unwrap_or_default();
@@ -414,6 +418,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 entry.get_mut().push(listener);
             }
             Entry::Vacant(entry) => {
+                self.db.cache().record_cache_miss();
                 entry.insert(vec![listener]);
                 self.pending_requests.push(self.get_account_req(address));
             }
@@ -460,6 +465,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             }
             Entry::Vacant(entry) => {
                 trace!(target: "backendhandler", number, "preparing block hash request");
+                self.db.cache().record_cache_miss();
                 entry.insert(vec![listener]);
                 let provider = self.provider.clone();
                 let fut = Box::pin(async move {
@@ -957,6 +963,16 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
     pub fn block_hashes_len(&self) -> usize {
         self.cache.0.db().block_hashes.read().len()
     }
+
+    /// Returns the number of database requests that were served from cache.
+    pub fn cache_hits(&self) -> u64 {
+        self.cache.0.cache_hits()
+    }
+
+    /// Returns the number of cache lookups that scheduled a provider request.
+    pub fn cache_misses(&self) -> u64 {
+        self.cache.0.cache_misses()
+    }
 }
 
 impl<N: Network, B: ForkBlockEnv> DatabaseRef for SharedBackend<N, B> {
@@ -1075,6 +1091,101 @@ mod tests {
         let cache_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/storage.json");
         let json = JsonBlockCacheDB::<BlockEnv>::load(cache_path).unwrap();
         assert!(!json.db().accounts.read().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_metrics_record_hits_for_cached_database_reads() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
+
+        let db = BlockchainDb::new(meta, None);
+        let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
+
+        let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
+        let account = AccountInfo {
+            nonce: 1,
+            balance: U256::from(2),
+            code: None,
+            code_hash: KECCAK_EMPTY,
+            account_id: None,
+        };
+        let mut account_data = AddressData::default();
+        account_data.insert(address, account.clone());
+        backend.insert_or_update_address(account_data);
+
+        let slot = U256::from(3);
+        let value = U256::from(4);
+        let mut storage = StorageInfo::default();
+        storage.insert(slot, value);
+        let mut storage_data = StorageData::default();
+        storage_data.insert(address, storage);
+        backend.insert_or_update_storage(storage_data);
+
+        let block_number = 5;
+        let block_hash = B256::from(U256::from(6));
+        let mut block_hash_data = BlockHashData::default();
+        block_hash_data.insert(U256::from(block_number), block_hash);
+        backend.insert_or_update_block_hashes(block_hash_data);
+
+        assert_eq!(backend.cache_hits(), 0);
+        assert_eq!(backend.cache_misses(), 0);
+        assert_eq!(backend.basic_ref(address).unwrap(), Some(account));
+        assert_eq!(backend.storage_ref(address, slot).unwrap(), value);
+        assert_eq!(backend.block_hash_ref(block_number).unwrap(), block_hash);
+        assert_eq!(backend.cache_hits(), 3);
+        assert_eq!(backend.cache_misses(), 0);
+
+        let clone = backend.with_blocking_mode(BlockingMode::Block);
+        assert_eq!(clone.cache_hits(), 3);
+        assert_eq!(clone.cache_misses(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_metrics_record_storage_miss_then_hit() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
+
+        let server_handle = std::thread::spawn(move || {
+            #[derive(Debug, Deserialize)]
+            struct Request {
+                id: serde_json::Value,
+                method: String,
+            }
+
+            let mut request = server.recv().unwrap();
+            let rpc_request: Request =
+                serde_json::from_reader(request.as_reader()).expect("failed parsing request");
+            assert_eq!(rpc_request.method, "eth_getStorageAt");
+
+            request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": rpc_request.id,
+                        "result": "0x2a",
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        });
+
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
+        let db = BlockchainDb::new(meta, None);
+        let backend = SharedBackend::spawn_backend(Arc::new(provider), db, None).await;
+        let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
+        let slot = U256::from(1);
+
+        assert_eq!(backend.storage_ref(address, slot).unwrap(), U256::from(42));
+        assert_eq!(backend.cache_hits(), 0);
+        assert_eq!(backend.cache_misses(), 1);
+        assert_eq!(backend.storage_ref(address, slot).unwrap(), U256::from(42));
+        assert_eq!(backend.cache_hits(), 1);
+        assert_eq!(backend.cache_misses(), 1);
+
+        server_handle.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
