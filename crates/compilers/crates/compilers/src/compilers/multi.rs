@@ -473,6 +473,10 @@ impl SourceParser for MultiCompilerParser {
 
         Ok(())
     }
+
+    fn solar_compiler(&self) -> Option<&solar::sema::Compiler> {
+        self.solc.solar_compiler()
+    }
 }
 
 impl ParsedSource for MultiCompilerParsedSource {

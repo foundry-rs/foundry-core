@@ -26,7 +26,7 @@ use std::{
 };
 
 mod iface;
-use iface::interface_repr_hash;
+use iface::{interface_repr_hash, interface_repr_hash_compiler};
 
 /// ethers-rs format version
 ///
@@ -722,13 +722,35 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
     /// Gets or calculates the interface representation hash for the given source file.
     fn interface_repr_hash(&mut self, source: &Source, file: &Path) -> &str {
-        self.interface_repr_hashes.entry(file.to_path_buf()).or_insert_with(|| {
-            // TODO: use `interface_representation_ast` directly with `edges.parser()`.
-            if let Some(r) = interface_repr_hash(&source.content, file) {
-                return r;
+        let Self { edges, content_hashes, interface_repr_hashes, .. } = self;
+        Self::interface_repr_hash_with_parser(
+            source,
+            file,
+            edges.parser(),
+            content_hashes,
+            interface_repr_hashes,
+        )
+    }
+
+    fn interface_repr_hash_with_parser<'a, P: SourceParser>(
+        source: &Source,
+        file: &Path,
+        parser: &P,
+        content_hashes: &mut HashMap<PathBuf, String>,
+        interface_repr_hashes: &'a mut HashMap<PathBuf, String>,
+    ) -> &'a str {
+        interface_repr_hashes.entry(file.to_path_buf()).or_insert_with(|| {
+            if let Some(compiler) = parser.solar_compiler()
+                && let Some(hash) = interface_repr_hash_compiler(compiler, file)
+            {
+                return hash;
             }
-            // Equivalent to: self.content_hash(source, file).into()
-            self.content_hashes
+
+            if let Some(hash) = interface_repr_hash(&source.content, file) {
+                return hash;
+            }
+
+            content_hashes
                 .entry(file.to_path_buf())
                 .or_insert_with(|| source.content_hash())
                 .clone()
@@ -869,7 +891,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             let (sources, edges) = graph.into_sources();
 
             // Calculate content hashes for later comparison.
-            self.fill_hashes(&sources);
+            self.fill_hashes(&sources, edges.parser());
 
             // Pre-add all sources that are guaranteed to be dirty
             for file in sources.keys() {
@@ -999,13 +1021,19 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     }
 
     /// Adds the file's hashes to the set if not set yet
-    fn fill_hashes(&mut self, sources: &Sources) {
+    fn fill_hashes(&mut self, sources: &Sources, parser: &C::Parser) {
         for (file, source) in sources {
             let _ = self.content_hash(source, file);
 
             // Fill interface representation hashes for source files
             if self.cache.preprocessed && self.project.paths.is_source_file(file) {
-                let _ = self.interface_repr_hash(source, file);
+                let _ = Self::interface_repr_hash_with_parser(
+                    source,
+                    file,
+                    parser,
+                    &mut self.content_hashes,
+                    &mut self.interface_repr_hashes,
+                );
             }
         }
     }

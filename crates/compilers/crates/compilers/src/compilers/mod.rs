@@ -174,6 +174,11 @@ pub trait SourceParser: Clone + Debug + Send + Sync {
     ) -> Result<()> {
         Ok(())
     }
+
+    /// Returns the Solar compiler that owns already parsed Solidity sources, if available.
+    fn solar_compiler(&self) -> Option<&solar::sema::Compiler> {
+        None
+    }
 }
 
 /// Parser of the source files which is used to identify imports and version requirements of the

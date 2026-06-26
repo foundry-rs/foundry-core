@@ -10,8 +10,29 @@ pub(crate) fn interface_repr_hash(content: &str, path: &Path) -> Option<String> 
     Some(foundry_compilers_artifacts::Source::content_hash_of(&src))
 }
 
+pub(crate) fn interface_repr_hash_compiler(
+    compiler: &solar::sema::Compiler,
+    path: &Path,
+) -> Option<String> {
+    compiler.enter(|compiler| {
+        let sf = compiler.sess().source_map().get_file(path)?;
+        let (_, source) = compiler.gcx().sources.get_file(&sf)?;
+        let ast = source.ast.as_ref()?;
+        Some(interface_repr_hash_ast(source.file.src.as_str(), compiler.gcx().sess, ast))
+    })
+}
+
 pub(crate) fn interface_repr(content: &str, path: &Path) -> Result<String, EmittedDiagnostics> {
     parse_one_source(content, path, |sess, ast| interface_representation_ast(content, sess, ast))
+}
+
+pub(crate) fn interface_repr_hash_ast(
+    content: &str,
+    sess: &solar::sema::interface::Session,
+    ast: &solar::parse::ast::SourceUnit<'_>,
+) -> String {
+    let src = interface_representation_ast(content, sess, ast);
+    foundry_compilers_artifacts::Source::content_hash_of(&src)
 }
 
 /// Helper function to remove parts of the contract which do not alter its interface:

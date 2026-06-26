@@ -464,6 +464,10 @@ impl SourceParser for SolParser {
 
         Ok(())
     }
+
+    fn solar_compiler(&self) -> Option<&solar::sema::Compiler> {
+        Some(&self.compiler)
+    }
 }
 
 impl ParsedSource for SolData {
