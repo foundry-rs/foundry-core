@@ -103,6 +103,81 @@ redundant_lifetimes = "warn"
 [workspace.lints.rustdoc]
 all = "warn"
 
+# Speed up tests and dev builds for CPU-heavy dependencies.
+[profile.dev.package]
+# Solc and artifacts.
+foundry-compilers-artifacts-solc.opt-level = 3
+foundry-compilers-core.opt-level = 3
+foundry-compilers.opt-level = 3
+serde_json.opt-level = 3
+serde.opt-level = 3
+
+solar-compiler.opt-level = 3
+solar-ast.opt-level = 3
+solar-data-structures.opt-level = 3
+solar-interface.opt-level = 3
+solar-parse.opt-level = 3
+solar-sema.opt-level = 3
+
+# CLI.
+clap.opt-level = 3
+clap_builder.opt-level = 3
+clap_lex.opt-level = 3
+
+# EVM.
+alloy-dyn-abi.opt-level = 3
+alloy-json-abi.opt-level = 3
+alloy-primitives.opt-level = 3
+alloy-sol-type-parser.opt-level = 3
+alloy-sol-types.opt-level = 3
+
+bitvec.opt-level = 3
+revm.opt-level = 3
+revm-bytecode.opt-level = 3
+revm-context.opt-level = 3
+revm-context-interface.opt-level = 3
+revm-database.opt-level = 3
+revm-database-interface.opt-level = 3
+revm-handler.opt-level = 3
+revm-inspector.opt-level = 3
+revm-interpreter.opt-level = 3
+revm-precompile.opt-level = 3
+revm-primitives.opt-level = 3
+revm-state.opt-level = 3
+
+ruint.opt-level = 3
+
+sha2.opt-level = 3
+sha3.opt-level = 3
+keccak.opt-level = 3
+
+# Fuzzing.
+proptest.opt-level = 3
+rand.opt-level = 3
+rand_chacha.opt-level = 3
+ppv-lite86.opt-level = 3
+
+# Backtraces.
+addr2line.opt-level = 3
+backtrace.opt-level = 3
+gimli.opt-level = 3
+
+# Forking.
+axum.opt-level = 3
+
+# Keystores.
+scrypt.opt-level = 3
+
+# Misc.
+hashbrown.opt-level = 3
+foldhash.opt-level = 3
+rayon.opt-level = 3
+rayon-core.opt-level = 3
+regex.opt-level = 3
+regex-syntax.opt-level = 3
+regex-automata.opt-level = 3
+walkdir.opt-level = 3
+
 [workspace.dependencies]
 # alloy
 alloy-consensus = "2.0.5"
