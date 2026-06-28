@@ -101,7 +101,7 @@ pub fn maybe_get_keystore_path(
 }
 
 /// Extracts the address from a keystore JSON file without decrypting it.
-pub fn extract_keystore_address(path: &Path) -> Result<Address> {
+fn extract_keystore_address(path: &Path) -> Result<Address> {
     let content = fs::read_to_string(path)
         .wrap_err_with(|| format!("Failed to read keystore file at {path:?}"))?;
     let json: serde_json::Value = serde_json::from_str(&content)
