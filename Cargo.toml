@@ -142,7 +142,7 @@ path-slash = "0.2.1"
 rayon = "1.11.0"
 regex = "1.11.3"
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls"] }
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }
@@ -154,7 +154,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.47.1", features = ["rt-multi-thread"] }
 toml = "1.1.2"
 tower = "0.5.3"
-tower-http = "0.6.8"
+tower-http = "0.7.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt"] }
 uuid = { version = "1.23.1", features = ["v4", "serde"] }
