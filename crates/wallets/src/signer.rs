@@ -318,14 +318,14 @@ impl TxSigner<Signature> for WalletSigner {
 /// Signers that require user action to be obtained.
 #[derive(Debug, Clone)]
 pub enum PendingSigner {
-    Keystore(PathBuf),
+    Keystore(PathBuf, Option<Address>),
     Interactive,
 }
 
 impl PendingSigner {
     pub fn unlock(self) -> Result<WalletSigner> {
         match self {
-            Self::Keystore(path) => {
+            Self::Keystore(path, _) => {
                 let password = rpassword::prompt_password("Enter keystore password:")?;
                 match PrivateKeySigner::decrypt_keystore(path, password) {
                     Ok(signer) => Ok(WalletSigner::Local(signer)),

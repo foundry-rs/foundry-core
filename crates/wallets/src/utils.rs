@@ -1,5 +1,5 @@
 use crate::{PendingSigner, WalletSigner, error::PrivateKeyError};
-use alloy_primitives::{B256, hex::FromHex};
+use alloy_primitives::{Address, B256, hex::FromHex};
 use alloy_signer_ledger::HDPath as LedgerHDPath;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_signer_trezor::HDPath as TrezorHDPath;
@@ -100,6 +100,22 @@ pub fn maybe_get_keystore_path(
         .or_else(|| maybe_name.map(|name| default_keystore_dir.join(name))))
 }
 
+/// Extracts the address from a keystore JSON file without decrypting it.
+fn extract_keystore_address(path: &Path) -> Result<Address> {
+    let content = fs::read_to_string(path)
+        .wrap_err_with(|| format!("Failed to read keystore file at {path:?}"))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .wrap_err_with(|| format!("Failed to parse keystore JSON at {path:?}"))?;
+    let address = json
+        .get("address")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| eyre::eyre!("Keystore JSON does not contain an `address` field"))?;
+
+    address
+        .parse()
+        .wrap_err_with(|| format!("Failed to parse address `{address}` from keystore JSON"))
+}
+
 /// Creates keystore signer from given parameters.
 ///
 /// If correct password or password file is provided, the keystore is decrypted and a [WalletSigner]
@@ -147,7 +163,8 @@ pub fn create_keystore_signer(
             .wrap_err_with(|| format!("Failed to decrypt keystore {path:?}"))?;
         Ok((Some(WalletSigner::Local(wallet)), None))
     } else {
-        Ok((None, Some(PendingSigner::Keystore(path.clone()))))
+        let address = extract_keystore_address(path).ok();
+        Ok((None, Some(PendingSigner::Keystore(path.clone(), address))))
     }
 }
 
@@ -162,5 +179,19 @@ mod tests {
         assert!(create_private_key_signer(&pk_str).is_ok());
         // skip 0x
         assert!(create_private_key_signer(&pk_str[2..]).is_ok());
+    }
+
+    #[test]
+    fn extracts_keystore_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keystore.json");
+        let address = Address::random();
+        fs::write(
+            &path,
+            format!(r#"{{"address":"{}","version":3}}"#, alloy_primitives::hex::encode(address)),
+        )
+        .unwrap();
+
+        assert_eq!(extract_keystore_address(&path).unwrap(), address);
     }
 }
