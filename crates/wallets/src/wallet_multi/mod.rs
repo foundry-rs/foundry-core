@@ -6,7 +6,7 @@ use crate::{
 };
 #[cfg(feature = "browser")]
 use alloy_network::Network;
-use alloy_primitives::map::AddressHashMap;
+use alloy_primitives::{Address, map::AddressHashMap};
 use alloy_signer::Signer;
 use clap::Parser;
 use derive_builder::Builder;
@@ -50,6 +50,17 @@ impl MultiWallet {
 
     pub fn add_signer(&mut self, signer: WalletSigner) {
         self.signers.insert(signer.address(), signer);
+    }
+
+    /// Returns addresses for unlocked signers and pending keystores whose address can be read
+    /// without unlocking.
+    pub fn available_addresses(&self) -> Vec<Address> {
+        let mut addresses: Vec<_> = self.signers.keys().copied().collect();
+        addresses.extend(self.pending_signers.iter().filter_map(|pending| match pending {
+            PendingSigner::Keystore(_, Some(address)) => Some(*address),
+            _ => None,
+        }));
+        addresses
     }
 }
 
@@ -621,5 +632,19 @@ mod tests {
                 test_case.2
             )
         }
+    }
+
+    #[test]
+    fn available_addresses_includes_pending_keystores() {
+        let address = Address::random();
+        let wallet = MultiWallet::new(
+            vec![
+                PendingSigner::Keystore(PathBuf::from("keystore"), Some(address)),
+                PendingSigner::Interactive,
+            ],
+            vec![],
+        );
+
+        assert_eq!(wallet.available_addresses(), vec![address]);
     }
 }
