@@ -2,7 +2,7 @@
 
 use foundry_compilers_artifacts::Remapping;
 use foundry_compilers_core::error::{Result, SolcError};
-use rand::{Rng, seq::SliceRandom};
+use rand::{Rng, RngExt, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
