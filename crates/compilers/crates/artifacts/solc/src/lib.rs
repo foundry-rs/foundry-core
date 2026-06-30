@@ -260,6 +260,12 @@ pub struct Settings {
     /// false by default.
     #[serde(rename = "viaIR", default, skip_serializing_if = "Option::is_none")]
     pub via_ir: Option<bool>,
+    /// Change code generation to go through the experimental SSA control-flow-graph based
+    /// backend. Requires `viaIR` and `experimental` to be enabled.
+    ///
+    /// Since 0.8.35.
+    #[serde(rename = "viaSSACFG", default, skip_serializing_if = "Option::is_none")]
+    pub via_ssa_cfg: Option<bool>,
     /// Enables experimental Solidity compiler features.
     ///
     /// Since 0.8.35.
@@ -364,6 +370,7 @@ impl Settings {
         if *version < Version::new(0, 8, 35) {
             // introduced in 0.8.35 <https://github.com/ethereum/solidity/releases/tag/v0.8.35>
             self.experimental = None;
+            self.via_ssa_cfg = None;
         }
 
         if let Some(evm_version) = self.evm_version {
@@ -478,6 +485,19 @@ impl Settings {
         self.set_experimental(true)
     }
 
+    /// Sets the `viaSSACFG` value.
+    #[must_use]
+    pub const fn set_via_ssa_cfg(mut self, via_ssa_cfg: bool) -> Self {
+        self.via_ssa_cfg = Some(via_ssa_cfg);
+        self
+    }
+
+    /// Enables the experimental SSA control-flow-graph based backend.
+    #[must_use]
+    pub const fn with_via_ssa_cfg(self) -> Self {
+        self.set_via_ssa_cfg(true)
+    }
+
     /// Enable `viaIR` and use the minimum optimization settings.
     ///
     /// This is useful in the following scenarios:
@@ -575,6 +595,7 @@ impl Default for Settings {
             output_selection: OutputSelection::default_output_selection(),
             evm_version: Some(EvmVersion::default()),
             via_ir: None,
+            via_ssa_cfg: None,
             experimental: None,
             debug: None,
             libraries: Default::default(),
@@ -2112,6 +2133,33 @@ mod tests {
 
         let i = input.sanitized(&Version::new(0, 8, 34));
         assert!(i.settings.experimental.is_none());
+    }
+
+    #[test]
+    fn can_serialize_via_ssa_cfg() {
+        let settings = Settings::default().with_via_ssa_cfg();
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["viaSSACFG"], true);
+
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "viaSSACFG": true
+        }))
+        .unwrap();
+        assert_eq!(settings.via_ssa_cfg, Some(true));
+    }
+
+    #[test]
+    fn can_sanitize_via_ssa_cfg() {
+        let settings = Settings::default().with_via_ssa_cfg();
+
+        let input =
+            SolcInput { language: SolcLanguage::Solidity, sources: Default::default(), settings };
+
+        let i = input.clone().sanitized(&Version::new(0, 8, 35));
+        assert_eq!(i.settings.via_ssa_cfg, Some(true));
+
+        let i = input.sanitized(&Version::new(0, 8, 34));
+        assert!(i.settings.via_ssa_cfg.is_none());
     }
 
     #[test]
