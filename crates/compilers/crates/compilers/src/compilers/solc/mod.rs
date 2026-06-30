@@ -304,6 +304,7 @@ impl CompilerSettings for SolcSettings {
                     output_selection,
                     evm_version,
                     via_ir,
+                    via_ssa_cfg,
                     experimental,
                     debug,
                     libraries,
@@ -318,6 +319,7 @@ impl CompilerSettings for SolcSettings {
             && *metadata == other.settings.metadata
             && *evm_version == other.settings.evm_version
             && *via_ir == other.settings.via_ir
+            && *via_ssa_cfg == other.settings.via_ssa_cfg
             && *experimental == other.settings.experimental
             && *debug == other.settings.debug
             && *libraries == other.settings.libraries
