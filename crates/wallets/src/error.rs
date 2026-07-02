@@ -40,8 +40,18 @@ pub enum WalletSignerError {
     IncorrectKeystorePassword,
     #[error(transparent)]
     Ledger(#[from] LedgerError),
+    #[error(
+        "failed to initialize the HID API for the Ledger device; \
+         this can happen in headless or containerized environments without USB/HID access"
+    )]
+    LedgerHidInit,
     #[error(transparent)]
     Trezor(#[from] TrezorError),
+    #[error(
+        "failed to initialize libusb for the Trezor device; \
+         this can happen in headless or containerized environments without USB access"
+    )]
+    TrezorUsbInit,
     #[error(transparent)]
     #[cfg(feature = "aws-kms")]
     Aws(#[from] Box<AwsSignerError>),
