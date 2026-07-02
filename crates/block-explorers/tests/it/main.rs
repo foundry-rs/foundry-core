@@ -1,6 +1,6 @@
 //! Etherscan integration tests
 
-#![cfg(not(target_arch = "wasm32"))]
+#![cfg(not(target_family = "wasm"))]
 
 use alloy_chains::{Chain, ChainKind, NamedChain};
 use foundry_block_explorers::{Client, errors::EtherscanError};

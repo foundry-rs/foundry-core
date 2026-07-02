@@ -53,7 +53,7 @@ pub enum WalletSigner {
 /// `HidApi::new().expect(..)`, which would abort the process under `panic = "abort"`
 /// (foundry-rs/foundry#14491). Cached because `hidapi-rusb` allows only one live `HidApi`; a later
 /// probe would see the lock held and fail.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 fn hid_api_available() -> bool {
     static HID_API_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *HID_API_AVAILABLE.get_or_init(|| hidapi_rusb::HidApi::new().is_ok())
@@ -63,7 +63,7 @@ fn hid_api_available() -> bool {
 /// `Once`) when `libusb_init` fails and would abort the process under `panic = "abort"`. `trezor-
 /// client` uses that global context, so we probe a throwaway `rusb::Context` (which returns a
 /// `Result`) first. Cached so we probe at most once per process.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 fn usb_available() -> bool {
     static USB_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *USB_AVAILABLE.get_or_init(|| rusb::Context::new().is_ok())
@@ -71,7 +71,7 @@ fn usb_available() -> bool {
 
 impl WalletSigner {
     pub async fn from_ledger_path(path: LedgerHDPath) -> Result<Self> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         if !hid_api_available() {
             return Err(WalletSignerError::LedgerHidInit);
         }
@@ -81,7 +81,7 @@ impl WalletSigner {
     }
 
     pub async fn from_trezor_path(path: TrezorHDPath) -> Result<Self> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(target_family = "wasm"))]
         if !usb_available() {
             return Err(WalletSignerError::TrezorUsbInit);
         }
