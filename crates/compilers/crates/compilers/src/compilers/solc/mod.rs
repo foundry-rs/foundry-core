@@ -374,7 +374,7 @@ impl SourceParser for SolParser {
     fn new(config: &crate::ProjectPathsConfig) -> Self {
         Self {
             compiler: solar::sema::Compiler::new(Self::session_with_opts(
-                solar::sema::interface::config::Opts {
+                solar::sema::interface::config::CompileOpts {
                     include_paths: config.include_paths.iter().cloned().collect(),
                     base_path: Some(config.root.clone()),
                     import_remappings: config

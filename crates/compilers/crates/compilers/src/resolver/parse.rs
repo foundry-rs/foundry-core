@@ -52,7 +52,7 @@ impl SolParser {
     }
 
     pub(crate) fn session_with_opts(
-        opts: solar::sema::interface::config::Opts,
+        opts: solar::sema::interface::config::CompileOpts,
     ) -> solar::sema::interface::Session {
         let sess = solar::sema::interface::Session::builder()
             .with_buffer_emitter(Default::default())
