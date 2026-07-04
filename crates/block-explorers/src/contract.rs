@@ -59,12 +59,28 @@ pub enum SourceCodeMetadata {
     SourceCode(String),
 }
 
+/// Sorts a contract's sources by path so output is stable across runs (explorers return them in a
+/// `HashMap`), prefixing each with a `// File: <path>` header when there are multiple. A single
+/// source is emitted verbatim.
+fn format_sources(sources: &HashMap<String, SourceCodeEntry>) -> String {
+    let mut sources = sources.iter().collect::<Vec<_>>();
+    sources.sort_unstable_by_key(|(path, _)| *path);
+
+    if let [(_, entry)] = sources.as_slice() {
+        return entry.content.clone();
+    }
+
+    sources
+        .into_iter()
+        .map(|(path, entry)| format!("// File: {path}\n{}", entry.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl SourceCodeMetadata {
     pub fn source_code(&self) -> String {
         match self {
-            Self::Metadata { sources, .. } | Self::Sources(sources) => {
-                sources.values().map(|s| s.content.clone()).collect::<Vec<_>>().join("\n")
-            }
+            Self::Metadata { sources, .. } | Self::Sources(sources) => format_sources(sources),
             Self::SourceCode(s) => s.clone(),
         }
     }
@@ -225,7 +241,8 @@ impl Metadata {
     /// Maps this contract's sources to a [SourceTreeEntry] vector.
     pub fn source_entries(&self) -> Vec<SourceTreeEntry> {
         let root = Path::new(&self.contract_name);
-        self.sources()
+        let mut entries = self
+            .sources()
             .into_iter()
             .map(|(path, entry)| {
                 // This is relevant because the etherscan [Metadata](crate::contract::Metadata) can
@@ -236,7 +253,10 @@ impl Metadata {
                 let path = root.join(sanitized_path);
                 SourceTreeEntry { path, contents: entry.content }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // Sort by path so the tree order is stable across runs (sources come from a `HashMap`).
+        entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        entries
     }
 
     /// Returns the source tree of this contract's sources.
@@ -514,7 +534,29 @@ fn is_address_only_source_code_response(response: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_address_only_source_code_response;
+    use super::{SourceCodeMetadata, is_address_only_source_code_response};
+    use std::collections::HashMap;
+
+    #[test]
+    fn source_code_single_file_verbatim() {
+        let meta = SourceCodeMetadata::Sources(HashMap::from([(
+            "Contract".to_string(),
+            "contract A {}".into(),
+        )]));
+        assert_eq!(meta.source_code(), "contract A {}");
+    }
+
+    #[test]
+    fn source_code_multi_file_sorted_with_headers() {
+        let meta = SourceCodeMetadata::Sources(HashMap::from([
+            ("src/B.sol".to_string(), "contract B {}".into()),
+            ("src/A.sol".to_string(), "contract A {}".into()),
+        ]));
+        assert_eq!(
+            meta.source_code(),
+            "// File: src/A.sol\ncontract A {}\n// File: src/B.sol\ncontract B {}"
+        );
+    }
 
     #[test]
     fn detects_address_only_result_shape() {
