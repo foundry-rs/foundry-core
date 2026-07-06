@@ -113,6 +113,28 @@ pub(crate) struct BrowserSignResponse {
     pub error: Option<String>,
 }
 
+/// Represents a chain-switch request sent to the browser wallet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BrowserChainSwitchRequest {
+    /// The unique identifier for the chain-switch request.
+    pub id: Uuid,
+    /// The chain ID the connected wallet should switch to.
+    pub chain_id: ChainId,
+}
+
+/// Represents a chain-switch response sent from the browser wallet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct BrowserChainSwitchResponse {
+    /// The unique identifier for the chain-switch request, must match the request ID sent earlier.
+    pub id: Uuid,
+    /// The wallet's chain ID after the switch if the request succeeded.
+    pub chain_id: Option<ChainId>,
+    /// The error message if the switch failed.
+    pub error: Option<String>,
+}
+
 /// Tempo `KeyAuthorization` signing request sent to the browser wallet.
 ///
 /// The browser UI should display the human-readable contents of

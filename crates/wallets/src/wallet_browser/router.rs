@@ -20,6 +20,8 @@ pub async fn build_router<N: Network>(state: Arc<BrowserWalletState<N>>, port: u
         .route("/transaction/response", post(handlers::post_transaction_response))
         .route("/signing/request", get(handlers::get_next_signing_request))
         .route("/signing/response", post(handlers::post_signing_response))
+        .route("/chain/request", get(handlers::get_next_chain_switch_request))
+        .route("/chain/response", post(handlers::post_chain_switch_response))
         .route("/connection", get(handlers::get_connection_info))
         .route("/connection", post(handlers::post_connection_update))
         .route("/session", get(handlers::get_session_info));

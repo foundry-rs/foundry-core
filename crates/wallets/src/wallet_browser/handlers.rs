@@ -15,7 +15,8 @@ use crate::wallet_browser::{
     app::contents,
     state::BrowserWalletState,
     types::{
-        BrowserApiResponse, BrowserSignRequest, BrowserSignResponse, BrowserTransactionRequest,
+        BrowserApiResponse, BrowserChainSwitchRequest, BrowserChainSwitchResponse,
+        BrowserSignRequest, BrowserSignResponse, BrowserTransactionRequest,
         BrowserTransactionResponse, Connection, SessionInfo,
     },
 };
@@ -174,6 +175,53 @@ pub(crate) async fn post_signing_response<N: Network>(
     }
 
     state.add_signing_response(body).await;
+
+    Json(BrowserApiResponse::ok())
+}
+
+/// Get the next pending chain-switch request.
+/// Route: GET /api/chain/request
+pub(crate) async fn get_next_chain_switch_request<N: Network>(
+    State(state): State<Arc<BrowserWalletState<N>>>,
+) -> Json<BrowserApiResponse<BrowserChainSwitchRequest>> {
+    match state.read_next_chain_switch_request().await {
+        Some(req) => Json(BrowserApiResponse::with_data(req)),
+        None => Json(BrowserApiResponse::error("No pending chain switch request")),
+    }
+}
+
+/// Post a chain-switch response.
+/// Route: POST /api/chain/response
+pub(crate) async fn post_chain_switch_response<N: Network>(
+    State(state): State<Arc<BrowserWalletState<N>>>,
+    Json(body): Json<BrowserChainSwitchResponse>,
+) -> Json<BrowserApiResponse> {
+    if !state.has_chain_switch_request(&body.id).await {
+        return Json(BrowserApiResponse::error("Unknown chain switch id"));
+    }
+
+    match (&body.chain_id, &body.error) {
+        (None, None) => {
+            return Json(BrowserApiResponse::error("Either chainId or error must be provided"));
+        }
+        (Some(_), Some(_)) => {
+            return Json(BrowserApiResponse::error("Only one of chainId or error can be provided"));
+        }
+        _ => {}
+    }
+
+    if let Some(chain_id) = body.chain_id {
+        let Some(expected_chain_id) = state.chain_switch_request_chain_id(&body.id).await else {
+            return Json(BrowserApiResponse::error("Unknown chain switch id"));
+        };
+        if chain_id != expected_chain_id {
+            return Json(BrowserApiResponse::error(format!(
+                "Wallet switched to chain ID {chain_id}, expected {expected_chain_id}",
+            )));
+        }
+    }
+
+    state.add_chain_switch_response(body).await;
 
     Json(BrowserApiResponse::ok())
 }

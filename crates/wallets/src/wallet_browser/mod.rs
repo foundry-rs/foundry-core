@@ -24,7 +24,8 @@ mod tests {
         error::BrowserWalletError,
         server::BrowserWalletServer,
         types::{
-            BrowserApiResponse, BrowserSignRequest, BrowserSignResponse, BrowserTransactionRequest,
+            BrowserApiResponse, BrowserChainSwitchRequest, BrowserChainSwitchResponse,
+            BrowserSignRequest, BrowserSignResponse, BrowserTransactionRequest,
             BrowserTransactionResponse, Connection, SessionInfo, SignRequest, SignType,
         },
     };
@@ -480,6 +481,190 @@ mod tests {
         }
 
         check_transaction_request_queue_empty(&client, &server).await;
+
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_chain_switch_success_updates_connection() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let handle = wait_for_chain_switch(&server, 10).await;
+
+        let resp = client
+            .get(format!("http://localhost:{}/api/chain/request", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Ok(request) =
+            resp.json::<BrowserApiResponse<BrowserChainSwitchRequest>>().await.unwrap()
+        else {
+            panic!("expected BrowserApiResponse::Ok with a pending chain switch");
+        };
+        assert_eq!(request.chain_id, 10);
+
+        let resp = client
+            .post(format!("http://localhost:{}/api/chain/response", server.port()))
+            .json(&BrowserChainSwitchResponse { id: request.id, chain_id: Some(10), error: None })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        assert_eq!(handle.await.expect("chain switch flow panicked").unwrap(), 10);
+        let conn = server.get_connection().await.expect("connection should still be live");
+        assert_eq!(conn.address, ALICE);
+        assert_eq!(conn.chain_id, 10);
+
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_chain_switch_client_reject() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let handle = wait_for_chain_switch(&server, 10).await;
+
+        let resp = client
+            .get(format!("http://localhost:{}/api/chain/request", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Ok(request) =
+            resp.json::<BrowserApiResponse<BrowserChainSwitchRequest>>().await.unwrap()
+        else {
+            panic!("expected BrowserApiResponse::Ok with a pending chain switch");
+        };
+
+        let resp = client
+            .post(format!("http://localhost:{}/api/chain/response", server.port()))
+            .json(&BrowserChainSwitchResponse {
+                id: request.id,
+                chain_id: None,
+                error: Some("User rejected the chain switch".into()),
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let res = handle.await.expect("chain switch flow panicked");
+        match res {
+            Err(BrowserWalletError::Rejected { operation, reason }) => {
+                assert_eq!(operation, "ChainSwitch");
+                assert_eq!(reason, "User rejected the chain switch");
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_chain_switch_response_both_chain_id_and_error_rejected() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let _handle = wait_for_chain_switch(&server, 10).await;
+
+        let resp = client
+            .get(format!("http://localhost:{}/api/chain/request", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Ok(request) =
+            resp.json::<BrowserApiResponse<BrowserChainSwitchRequest>>().await.unwrap()
+        else {
+            panic!("expected BrowserApiResponse::Ok with a pending chain switch");
+        };
+
+        let resp = client
+            .post(format!("http://localhost:{}/api/chain/response", server.port()))
+            .json(&BrowserChainSwitchResponse {
+                id: request.id,
+                chain_id: Some(10),
+                error: Some("Should not have both".into()),
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let api: BrowserApiResponse<()> = resp.json().await.unwrap();
+        match api {
+            BrowserApiResponse::Error { message } => {
+                assert_eq!(message, "Only one of chainId or error can be provided");
+            }
+            _ => panic!("expected error response"),
+        }
+
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_chain_switch_response_wrong_chain_rejected() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let handle = wait_for_chain_switch(&server, 10).await;
+
+        let resp = client
+            .get(format!("http://localhost:{}/api/chain/request", server.port()))
+            .send()
+            .await
+            .unwrap();
+        let BrowserApiResponse::Ok(request) =
+            resp.json::<BrowserApiResponse<BrowserChainSwitchRequest>>().await.unwrap()
+        else {
+            panic!("expected BrowserApiResponse::Ok with a pending chain switch");
+        };
+
+        let resp = client
+            .post(format!("http://localhost:{}/api/chain/response", server.port()))
+            .json(&BrowserChainSwitchResponse { id: request.id, chain_id: Some(11), error: None })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let api: BrowserApiResponse<()> = resp.json().await.unwrap();
+        match api {
+            BrowserApiResponse::Error { message } => {
+                assert_eq!(message, "Wallet switched to chain ID 11, expected 10");
+            }
+            _ => panic!("expected error response"),
+        }
+        let conn = server.get_connection().await.expect("connection should still be live");
+        assert_eq!(conn.address, ALICE);
+        assert_eq!(conn.chain_id, 1);
+
+        let resp = client
+            .post(format!("http://localhost:{}/api/chain/response", server.port()))
+            .json(&BrowserChainSwitchResponse { id: request.id, chain_id: Some(10), error: None })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        assert_eq!(handle.await.expect("chain switch flow panicked").unwrap(), 10);
 
         server.stop().await.unwrap();
     }
@@ -1186,6 +1371,20 @@ mod tests {
         let browser_server = server.clone();
         let join_handle =
             tokio::spawn(async move { browser_server.request_signing(sign_request).await });
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        join_handle
+    }
+
+    /// Spawn the chain-switch flow in the background and return the join handle.
+    async fn wait_for_chain_switch<N: Network>(
+        server: &BrowserWalletServer<N>,
+        chain_id: u64,
+    ) -> JoinHandle<Result<u64, BrowserWalletError>> {
+        let browser_server = server.clone();
+        let join_handle =
+            tokio::spawn(async move { browser_server.request_chain_switch(chain_id).await });
         tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
