@@ -3,7 +3,9 @@ use std::collections::{HashMap, VecDeque};
 use alloy_network::Network;
 use uuid::Uuid;
 
-use crate::wallet_browser::types::{BrowserSignRequest, BrowserTransactionRequest};
+use crate::wallet_browser::types::{
+    BrowserChainSwitchRequest, BrowserSignRequest, BrowserTransactionRequest,
+};
 
 #[cfg(feature = "tempo")]
 use crate::wallet_browser::types::BrowserKeyAuthorizationRequest;
@@ -39,6 +41,14 @@ impl<Req, Res> RequestQueue<Req, Res> {
         Req: HasId,
     {
         self.requests.iter().any(|r| r.id() == id)
+    }
+
+    /// Get a pending request by its ID.
+    pub fn get_request(&self, id: &Uuid) -> Option<&Req>
+    where
+        Req: HasId,
+    {
+        self.requests.iter().find(|r| r.id() == id)
     }
 
     /// Read the next request from the queue without removing it.
@@ -91,6 +101,12 @@ impl<N: Network> HasId for BrowserTransactionRequest<N> {
 }
 
 impl HasId for BrowserSignRequest {
+    fn id(&self) -> &Uuid {
+        &self.id
+    }
+}
+
+impl HasId for BrowserChainSwitchRequest {
     fn id(&self) -> &Uuid {
         &self.id
     }

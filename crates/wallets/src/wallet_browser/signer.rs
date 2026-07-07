@@ -1,5 +1,5 @@
 use std::{
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
@@ -20,7 +20,7 @@ use tempo_primitives::transaction::{KeyAuthorization, SignedKeyAuthorization};
 pub struct BrowserSigner<N: Network> {
     server: Arc<BrowserWalletServer<N>>,
     address: Address,
-    chain_id: ChainId,
+    chain_id: Arc<RwLock<ChainId>>,
 }
 
 impl<N: Network> BrowserSigner<N> {
@@ -46,7 +46,11 @@ impl<N: Network> BrowserSigner<N> {
                 eprintln!("Wallet connected: {address}");
                 eprintln!("Chain ID: {chain_id}");
 
-                return Ok(Self { server: Arc::new(server), address, chain_id });
+                return Ok(Self {
+                    server: Arc::new(server),
+                    address,
+                    chain_id: Arc::new(RwLock::new(chain_id)),
+                });
             }
 
             if start.elapsed() > timeout {
@@ -71,7 +75,7 @@ impl<N: Network> BrowserSigner<N> {
         }
 
         if let Some(chain_id) = tx_request.chain_id()
-            && chain_id != self.chain_id
+            && chain_id != self.chain_id()
         {
             return Err(alloy_signer::Error::other(
                 "Transaction `chainId` does not match connected wallet chain ID",
@@ -90,8 +94,27 @@ impl<N: Network> BrowserSigner<N> {
         self.address
     }
 
-    pub const fn chain_id(&self) -> ChainId {
-        self.chain_id
+    pub fn chain_id(&self) -> ChainId {
+        *self.chain_id.read().expect("chain ID lock poisoned")
+    }
+
+    /// Ask the connected browser wallet to switch chains.
+    pub async fn switch_chain(&self, chain_id: ChainId) -> Result<()> {
+        if chain_id == self.chain_id() {
+            return Ok(());
+        }
+
+        let switched_chain_id =
+            self.server.request_chain_switch(chain_id).await.map_err(alloy_signer::Error::other)?;
+        if switched_chain_id != chain_id {
+            return Err(alloy_signer::Error::other(format!(
+                "Wallet switched to chain ID {switched_chain_id}, expected {chain_id}",
+            )));
+        }
+
+        *self.chain_id.write().expect("chain ID lock poisoned") = switched_chain_id;
+
+        Ok(())
     }
 
     /// Ask the connected browser wallet to sign a Tempo `KeyAuthorization`.
@@ -104,10 +127,11 @@ impl<N: Network> BrowserSigner<N> {
         &self,
         key_authorization: KeyAuthorization,
     ) -> Result<SignedKeyAuthorization> {
-        if key_authorization.chain_id != 0 && key_authorization.chain_id != self.chain_id {
+        let chain_id = self.chain_id();
+        if key_authorization.chain_id != 0 && key_authorization.chain_id != chain_id {
             return Err(alloy_signer::Error::other(format!(
                 "KeyAuthorization chainId {} does not match connected wallet chain ID {}",
-                key_authorization.chain_id, self.chain_id,
+                key_authorization.chain_id, chain_id,
             )));
         }
 

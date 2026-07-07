@@ -6,7 +6,7 @@ use std::{
 
 use alloy_dyn_abi::TypedData;
 use alloy_network::Network;
-use alloy_primitives::{Address, Bytes, TxHash};
+use alloy_primitives::{Address, Bytes, ChainId, TxHash};
 use tokio::{
     net::TcpListener,
     sync::{Mutex, oneshot},
@@ -18,8 +18,8 @@ use crate::wallet_browser::{
     router::build_router,
     state::BrowserWalletState,
     types::{
-        BrowserSignRequest, BrowserSignTypedDataRequest, BrowserTransactionRequest, Connection,
-        SessionInfo, SignRequest, SignType,
+        BrowserChainSwitchRequest, BrowserSignRequest, BrowserSignTypedDataRequest,
+        BrowserTransactionRequest, Connection, SessionInfo, SignRequest, SignType,
     },
 };
 
@@ -205,6 +205,46 @@ impl<N: Network> BrowserWalletServer<N> {
             if start.elapsed() > self.timeout {
                 self.state.remove_signing_request(&tx_id).await;
                 return Err(BrowserWalletError::Timeout { operation: "Signing" });
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Request the connected browser wallet to switch chains.
+    pub async fn request_chain_switch(
+        &self,
+        chain_id: ChainId,
+    ) -> Result<ChainId, BrowserWalletError> {
+        if !self.is_connected().await {
+            return Err(BrowserWalletError::NotConnected);
+        }
+
+        let id = Uuid::new_v4();
+        let request = BrowserChainSwitchRequest { id, chain_id };
+
+        self.state.add_chain_switch_request(request).await;
+
+        let start = Instant::now();
+
+        loop {
+            if let Some(response) = self.state.get_chain_switch_response(&id).await {
+                if let Some(chain_id) = response.chain_id {
+                    return Ok(chain_id);
+                } else if let Some(error) = response.error {
+                    return Err(BrowserWalletError::Rejected {
+                        operation: "ChainSwitch",
+                        reason: error,
+                    });
+                }
+                return Err(BrowserWalletError::ServerError(
+                    "Chain switch response missing both chain_id and error".to_string(),
+                ));
+            }
+
+            if start.elapsed() > self.timeout {
+                self.state.remove_chain_switch_request(&id).await;
+                return Err(BrowserWalletError::Timeout { operation: "ChainSwitch" });
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;

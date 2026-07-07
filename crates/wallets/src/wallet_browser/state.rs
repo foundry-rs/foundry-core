@@ -4,14 +4,15 @@ use std::sync::{
 };
 
 use alloy_network::Network;
+use alloy_primitives::ChainId;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::wallet_browser::{
     queue::RequestQueue,
     types::{
-        BrowserSignRequest, BrowserSignResponse, BrowserTransactionRequest,
-        BrowserTransactionResponse, Connection,
+        BrowserChainSwitchRequest, BrowserChainSwitchResponse, BrowserSignRequest,
+        BrowserSignResponse, BrowserTransactionRequest, BrowserTransactionResponse, Connection,
     },
 };
 
@@ -29,6 +30,8 @@ pub(crate) struct BrowserWalletState<N: Network> {
         Arc<Mutex<RequestQueue<BrowserTransactionRequest<N>, BrowserTransactionResponse>>>,
     /// Request/response queue for signings.
     signings: Arc<Mutex<RequestQueue<BrowserSignRequest, BrowserSignResponse>>>,
+    /// Request/response queue for chain switches.
+    chain_switches: Arc<Mutex<RequestQueue<BrowserChainSwitchRequest, BrowserChainSwitchResponse>>>,
     /// Request/response queue for Tempo `KeyAuthorization` signings.
     #[cfg(feature = "tempo")]
     key_authorizations:
@@ -53,6 +56,7 @@ impl<N: Network> BrowserWalletState<N> {
             connection: Arc::new(RwLock::new(None)),
             transactions: Arc::new(Mutex::new(RequestQueue::new())),
             signings: Arc::new(Mutex::new(RequestQueue::new())),
+            chain_switches: Arc::new(Mutex::new(RequestQueue::new())),
             #[cfg(feature = "tempo")]
             key_authorizations: Arc::new(Mutex::new(RequestQueue::new())),
             session_token,
@@ -95,10 +99,9 @@ impl<N: Network> BrowserWalletState<N> {
     }
 
     /// Set connection information. When the new connection is `None`, all
-    /// pending transaction and signing requests are failed with a synthetic
-    /// `Wallet disconnected` error response so that in-flight callers
-    /// (`request_transaction`, `request_signing`) return immediately rather
-    /// than waiting for their per-request timeout.
+    /// pending wallet requests are failed with a synthetic `Wallet disconnected`
+    /// error response so that in-flight callers return immediately rather than
+    /// waiting for their per-request timeout.
     pub async fn set_connection(&self, connection: Option<Connection>) {
         *self.connection.write().await = connection;
 
@@ -107,8 +110,8 @@ impl<N: Network> BrowserWalletState<N> {
         }
     }
 
-    /// Fail all in-flight transaction and signing requests with a synthetic
-    /// `Wallet disconnected` error response.
+    /// Fail all in-flight wallet requests with a synthetic `Wallet disconnected`
+    /// error response.
     async fn fail_pending_with_disconnect(&self) {
         {
             let mut txs = self.transactions.lock().await;
@@ -131,6 +134,19 @@ impl<N: Network> BrowserWalletState<N> {
                     BrowserSignResponse {
                         id,
                         signature: None,
+                        error: Some("Wallet disconnected".to_string()),
+                    },
+                );
+            }
+        }
+        {
+            let mut chain_switches = self.chain_switches.lock().await;
+            for id in chain_switches.drain_request_ids() {
+                chain_switches.add_response(
+                    id,
+                    BrowserChainSwitchResponse {
+                        id,
+                        chain_id: None,
                         error: Some("Wallet disconnected".to_string()),
                     },
                 );
@@ -216,6 +232,51 @@ impl<N: Network> BrowserWalletState<N> {
     /// Get signing response, removing it from the queue.
     pub async fn get_signing_response(&self, id: &Uuid) -> Option<BrowserSignResponse> {
         self.signings.lock().await.get_response(id)
+    }
+
+    /// Add a chain-switch request.
+    pub async fn add_chain_switch_request(&self, request: BrowserChainSwitchRequest) {
+        self.chain_switches.lock().await.add_request(request);
+    }
+
+    /// Check if a chain-switch request exists.
+    pub async fn has_chain_switch_request(&self, id: &Uuid) -> bool {
+        self.chain_switches.lock().await.has_request(id)
+    }
+
+    /// Get the target chain ID for a pending chain-switch request.
+    pub async fn chain_switch_request_chain_id(&self, id: &Uuid) -> Option<ChainId> {
+        self.chain_switches.lock().await.get_request(id).map(|request| request.chain_id)
+    }
+
+    /// Read the next chain-switch request.
+    pub async fn read_next_chain_switch_request(&self) -> Option<BrowserChainSwitchRequest> {
+        self.chain_switches.lock().await.read_request().cloned()
+    }
+
+    /// Remove a chain-switch request.
+    pub async fn remove_chain_switch_request(&self, id: &Uuid) {
+        self.chain_switches.lock().await.remove_request(id);
+    }
+
+    /// Add chain-switch response.
+    pub async fn add_chain_switch_response(&self, response: BrowserChainSwitchResponse) {
+        let id = response.id;
+        if let Some(chain_id) = response.chain_id {
+            let mut connection = self.connection.write().await;
+            if let Some(current) = *connection {
+                *connection = Some(Connection { chain_id, ..current });
+            }
+        }
+
+        let mut chain_switches = self.chain_switches.lock().await;
+        chain_switches.add_response(id, response);
+        chain_switches.remove_request(&id);
+    }
+
+    /// Get chain-switch response, removing it from the queue.
+    pub async fn get_chain_switch_response(&self, id: &Uuid) -> Option<BrowserChainSwitchResponse> {
+        self.chain_switches.lock().await.get_response(id)
     }
 
     // -- Tempo `KeyAuthorization` signings -----------------------------------
