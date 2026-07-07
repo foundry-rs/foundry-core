@@ -222,7 +222,7 @@ semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }
 snapbox = "1.2.1"
-solar = { package = "solar-compiler", git = "https://github.com/paradigmxyz/solar", rev = "e284edd80eb43988989313e9b9a286fedc3e7c9e", default-features = false }
+solar = { package = "solar-compiler", version = "0.2.0", default-features = false }
 svm = { package = "svm-rs", version = "0.5.25", default-features = false }
 tempfile = "3.20.0"
 thiserror = "2.0.18"
