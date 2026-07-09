@@ -833,7 +833,7 @@ impl YulDetails {
 
 /// EVM versions.
 ///
-/// Default is `Osaka`, since 0.8.31
+/// Default is `Prague`.
 ///
 /// Kept in sync with: <https://github.com/ethereum/solidity/blob/develop/liblangutil/EVMVersion.h>
 // When adding new EVM versions (see a previous attempt at https://github.com/foundry-rs/compilers/pull/51):
@@ -857,8 +857,8 @@ pub enum EvmVersion {
     Paris,
     Shanghai,
     Cancun,
-    Prague,
     #[default]
+    Prague,
     Osaka,
     Amsterdam,
 }
@@ -867,7 +867,8 @@ impl EvmVersion {
     /// Find the default EVM version for the given compiler version.
     pub fn default_version_solc(version: &Version) -> Option<Self> {
         // In most cases, Solc compilers use the highest EVM version available at the time.
-        let default = Self::default().normalize_version_solc(version)?;
+        let default = if *version >= Version::new(0, 8, 31) { Self::Osaka } else { Self::Prague }
+            .normalize_version_solc(version)?;
 
         // However, there are some exceptions where the default is lower than the highest available.
         match default {
@@ -884,17 +885,11 @@ impl EvmVersion {
                 // <https://soliditylang.org/blog/2024/01/26/solidity-0.8.24-release-announcement/>
                 Some(Self::Shanghai)
             }
-            Self::Prague if *version == Version::new(0, 8, 27) => {
-                // Prague was not set as default EVM version in 0.8.27.
+            Self::Prague
+                if *version >= Version::new(0, 8, 27) && *version < Version::new(0, 8, 30) =>
+            {
+                // Prague and Osaka support existed in this range, but the default remained Cancun.
                 Some(Self::Cancun)
-            }
-            Self::Osaka if *version == Version::new(0, 8, 29) => {
-                // Osaka was introduced in 0.8.29, but the default remained Cancun.
-                Some(Self::Cancun)
-            }
-            Self::Osaka if *version == Version::new(0, 8, 30) => {
-                // Osaka was not set as default EVM version in 0.8.30.
-                Some(Self::Prague)
             }
             _ => Some(default),
         }
@@ -2018,7 +2013,7 @@ mod tests {
             ("0.8.25", Some(EvmVersion::Cancun)),
             // Prague
             ("0.8.27", Some(EvmVersion::Cancun)),
-            ("0.8.28", Some(EvmVersion::Prague)),
+            ("0.8.28", Some(EvmVersion::Cancun)),
             // Osaka
             ("0.8.29", Some(EvmVersion::Cancun)),
             ("0.8.30", Some(EvmVersion::Prague)),
