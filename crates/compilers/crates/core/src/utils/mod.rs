@@ -69,6 +69,10 @@ pub const PRAGUE_SOLC: Version = Version::new(0, 8, 27);
 /// <https://soliditylang.org/blog/2025/03/12/solidity-0.8.29-release-announcement>
 pub const OSAKA_SOLC: Version = Version::new(0, 8, 29);
 
+/// Amsterdam support
+/// <https://github.com/ethereum/solidity/releases/tag/v0.8.36>
+pub const AMSTERDAM_SOLC: Version = Version::new(0, 8, 36);
+
 // `--base-path` was introduced in 0.6.9 <https://github.com/ethereum/solidity/releases/tag/v0.6.9>
 pub static SUPPORTS_BASE_PATH: Lazy<VersionReq> =
     Lazy::new(|| VersionReq::parse(">=0.6.9").unwrap());
