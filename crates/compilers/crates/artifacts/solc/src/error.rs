@@ -4,6 +4,7 @@ use std::{fmt, ops::Range, str::FromStr};
 use yansi::{Color, Style};
 
 const ARROW: &str = "-->";
+const ANSI_ESCAPE: &str = "\x1b[";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceLocation {
@@ -129,6 +130,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut short_msg = self.message.trim();
         let fmtd_msg = self.formatted_message.as_deref().unwrap_or("");
+
+        if fmtd_msg.contains(ANSI_ESCAPE) {
+            return f.write_str(fmtd_msg);
+        }
 
         if short_msg.is_empty() {
             // if the message is empty, try to extract the first line from the formatted message
@@ -381,6 +386,27 @@ mod tests {
         let s = e.to_string();
         eprintln!("{s}");
         assert!(s.contains(msg), "\n{s}");
+    }
+
+    #[test]
+    fn preserves_ansi_formatted_message() {
+        let formatted = "\x1b[31merror: mismatched types\x1b[0m\n   ╭▸ test/Counter.t.sol:1:1\n";
+        let error = Error {
+            source_location: Some(SourceLocation {
+                file: "test/Counter.t.sol".into(),
+                start: 0,
+                end: 1,
+            }),
+            secondary_source_locations: vec![],
+            r#type: "Exception".into(),
+            component: "general".into(),
+            severity: Severity::Error,
+            error_code: None,
+            message: "mismatched types".into(),
+            formatted_message: Some(formatted.into()),
+        };
+
+        assert_eq!(error.to_string(), formatted);
     }
 
     #[test]
