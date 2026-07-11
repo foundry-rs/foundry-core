@@ -4,6 +4,7 @@ use std::{fmt, ops::Range, str::FromStr};
 use yansi::{Color, Style};
 
 const ARROW: &str = "-->";
+const UNICODE_ARROW: &str = "▸";
 const ANSI_ESCAPE: &str = "\x1b[";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -131,7 +132,7 @@ impl fmt::Display for Error {
         let mut short_msg = self.message.trim();
         let fmtd_msg = self.formatted_message.as_deref().unwrap_or("");
 
-        if fmtd_msg.contains(ANSI_ESCAPE) {
+        if fmtd_msg.contains(ANSI_ESCAPE) || fmtd_msg.contains(UNICODE_ARROW) {
             return f.write_str(fmtd_msg);
         }
 
