@@ -71,7 +71,7 @@ pub trait CompilerSettings:
     Default + Serialize + DeserializeOwned + Clone + Debug + Send + Sync + 'static
 {
     /// We allow configuring settings restrictions which might optionally contain specific
-    /// requiremets for compiler configuration. e.g. min/max evm_version, optimizer runs
+    /// requirements for compiler configuration. e.g. min/max evm_version, optimizer runs
     type Restrictions: CompilerSettingsRestrictions;
 
     /// Executes given fn with mutable reference to configured [OutputSelection].
