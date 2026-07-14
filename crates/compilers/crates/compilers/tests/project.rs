@@ -553,6 +553,25 @@ fn can_compile_dapp_sample_with_cache() {
     assert!(compiled.find_first("Dapp").is_none());
 }
 
+#[test]
+fn partial_compile_ignores_out_of_scope_artifacts() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let a = project.add_basic_source("A", "^0.8.10").unwrap();
+    let b = project.add_basic_source("B", "^0.8.10").unwrap();
+
+    project.compile().unwrap().assert_success();
+
+    let cache = CompilerCache::<MultiCompilerSettings>::read_joined(project.paths()).unwrap();
+    let b_artifact = cache.entry(&b).unwrap().find_artifact_path("B").unwrap();
+    fs::write(b_artifact, "invalid artifact").unwrap();
+
+    let compiled = project.project().compile_file(&a).unwrap();
+    compiled.assert_success();
+    assert!(compiled.is_unchanged());
+    assert!(compiled.find(&a, "A").is_some());
+    assert!(compiled.find(&b, "B").is_none());
+}
+
 fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {

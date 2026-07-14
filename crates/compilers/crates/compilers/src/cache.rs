@@ -330,11 +330,20 @@ impl<S: CompilerSettings> CompilerCache<S> {
     pub fn read_artifacts<Artifact: DeserializeOwned + Send + Sync>(
         &self,
     ) -> Result<Artifacts<Artifact>> {
+        self.read_artifacts_filtered(|_| true)
+    }
+
+    fn read_artifacts_filtered<Artifact, F>(&self, filter: F) -> Result<Artifacts<Artifact>>
+    where
+        Artifact: DeserializeOwned + Send + Sync,
+        F: Fn(&Path) -> bool + Send + Sync,
+    {
         use rayon::prelude::*;
 
         let artifacts = self
             .files
             .par_iter()
+            .filter(|(file, _)| filter(file))
             .map(|(file, entry)| entry.read_artifact_files().map(|files| (file.clone(), files)))
             .collect::<Result<ArtifactsMap<_>>>()?;
         Ok(Artifacts(artifacts))
@@ -1119,7 +1128,17 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             let mut cached_artifacts = if project.paths.artifacts.exists() {
                 trace!("reading artifacts from cache...");
                 // if we failed to read the whole set of artifacts we use an empty set
-                let artifacts = cache.read_artifacts::<T::Artifact>().unwrap_or_default();
+                // Only artifacts in the current source graph can be returned by this compilation.
+                // Avoid deserializing cached artifacts from unrelated partial compilations.
+                let in_scope = cache
+                    .files
+                    .keys()
+                    .filter(|file| edges.get_parsed_source(file).is_some())
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                let artifacts = cache
+                    .read_artifacts_filtered::<T::Artifact, _>(|file| in_scope.contains(file))
+                    .unwrap_or_default();
                 trace!("read {} artifacts from cache", artifacts.artifact_files().count());
                 artifacts
             } else {
