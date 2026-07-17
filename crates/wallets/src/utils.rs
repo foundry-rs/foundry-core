@@ -20,13 +20,13 @@ fn ensure_pk_not_env(pk: &str) -> Result<()> {
 pub fn create_private_key_signer(private_key_str: &str) -> Result<WalletSigner> {
     let Ok(private_key) = B256::from_hex(private_key_str) else {
         ensure_pk_not_env(private_key_str)?;
-        eyre::bail!("Failed to decode private key")
+        eyre::bail!("Failed to decode private key");
     };
     match PrivateKeySigner::from_bytes(&private_key) {
         Ok(pk) => Ok(WalletSigner::Local(pk)),
         Err(err) => {
             ensure_pk_not_env(private_key_str)?;
-            eyre::bail!("Failed to create wallet from private key: {err}")
+            eyre::bail!("Failed to create wallet from private key: {err}");
         }
     }
 }
@@ -129,13 +129,13 @@ pub fn create_keystore_signer(
     maybe_password_file: Option<&str>,
 ) -> Result<(Option<WalletSigner>, Option<PendingSigner>)> {
     if !path.exists() {
-        eyre::bail!("Keystore file `{path:?}` does not exist")
+        eyre::bail!("Keystore file `{path:?}` does not exist");
     }
 
     if path.is_dir() {
         eyre::bail!(
             "Keystore path `{path:?}` is a directory. Please specify the keystore file directly."
-        )
+        );
     }
 
     let password = match (maybe_password, maybe_password_file) {
