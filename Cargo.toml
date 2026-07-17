@@ -180,10 +180,10 @@ walkdir.opt-level = 3
 
 [workspace.dependencies]
 # alloy
-alloy-consensus = "2.0.5"
+alloy-consensus = "2.2.0"
 alloy-dyn-abi = "1.6.0"
 alloy-json-abi = { version = "1.3.1", features = ["serde_json"] }
-alloy-network = "2.0.5"
+alloy-network = "2.2.0"
 alloy-primitives = { version = "1.6.0", features = [
     "getrandom",
     "rand",
@@ -191,13 +191,13 @@ alloy-primitives = { version = "1.6.0", features = [
     "map-foldhash",
 ] }
 alloy-rlp = "0.3.15"
-alloy-signer = "2.0.5"
-alloy-signer-aws = "2.0.5"
-alloy-signer-gcp = "2.0.5"
-alloy-signer-ledger = "2.0.5"
-alloy-signer-local = "2.0.5"
-alloy-signer-trezor = "2.0.5"
-alloy-signer-turnkey = "2.0.5"
+alloy-signer = "2.2.0"
+alloy-signer-aws = "2.2.0"
+alloy-signer-gcp = "2.2.0"
+alloy-signer-ledger = "2.2.0"
+alloy-signer-local = "2.2.0"
+alloy-signer-trezor = "2.2.0"
+alloy-signer-turnkey = "2.2.0"
 alloy-sol-types = "1.6.0"
 alloy-chains = "0.2.34"
 
