@@ -3,8 +3,6 @@
   "enabledManagers": ["npm"],
   "includePaths": ["crates/wallets/src/wallet_browser/app/src/**"],
   "ignoreDeps": ["pnpm"],
-  "timezone": "UTC",
-  "schedule": ["* 9-12 * * 1"],
   "minimumReleaseAge": "7 days",
   "prCreation": "not-pending",
   "internalChecksFilter": "strict",
