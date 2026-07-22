@@ -599,6 +599,188 @@ fn test_flatteners(project: &TempProject, target: &Path, additional_checks: fn(&
     additional_checks(&result);
 }
 
+// <https://github.com/foundry-rs/foundry/issues/7239>
+#[test]
+fn can_flatten_named_import_through_intermediary() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+
+    project
+        .add_source(
+            "Test",
+            r#"pragma solidity ^0.8.10;
+contract Test {}
+contract Sibling {}
+"#,
+        )
+        .unwrap();
+    project
+        .add_source(
+            "Test2",
+            r#"pragma solidity ^0.8.10;
+contract Test2 {}
+"#,
+        )
+        .unwrap();
+    project
+        .add_source(
+            "Intermediary",
+            r#"pragma solidity ^0.8.10;
+import {Test} from "./Test.sol";
+import {Test2} from "./Test2.sol";
+"#,
+        )
+        .unwrap();
+    let target = project
+        .add_source(
+            "A",
+            r#"pragma solidity ^0.8.10;
+import {Test as Base} from "./Intermediary.sol";
+contract A is Base {}
+"#,
+        )
+        .unwrap();
+
+    let target = canonicalize(target).unwrap();
+    let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    assert_eq!(
+        result,
+        r#"pragma solidity ^0.8.10;
+
+// src/Test.sol
+
+contract Test {}
+contract Sibling {}
+
+// src/A.sol
+
+contract A is Test {}
+"#
+    );
+
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[test]
+fn can_flatten_plain_import_through_intermediary() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+
+    project.add_source("Test", "contract Test {}\n").unwrap();
+    project.add_source("Test2", "contract Test2 {}\n").unwrap();
+    project
+        .add_source(
+            "Intermediary",
+            r#"import {Test} from "./Test.sol";
+import {Test2} from "./Test2.sol";
+"#,
+        )
+        .unwrap();
+    let target = project
+        .add_source(
+            "A",
+            r#"import "./Intermediary.sol";
+contract A is Test {}
+"#,
+        )
+        .unwrap();
+
+    let result = Flattener::new(project.project().clone(), &canonicalize(target).unwrap())
+        .unwrap()
+        .flatten();
+    assert!(result.contains("contract Test {}"));
+    assert!(result.contains("contract Test2 {}"));
+    assert!(result.contains("// src/Intermediary.sol"));
+
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[test]
+fn can_flatten_overloads_through_intermediary() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+
+    project
+        .add_source(
+            "Uint",
+            "function convert(uint256 value) pure returns (uint256) { return value; }",
+        )
+        .unwrap();
+    project
+        .add_source(
+            "Address",
+            "function convert(address value) pure returns (address) { return value; }",
+        )
+        .unwrap();
+    project.add_source("Unused", "contract Unused {}\n").unwrap();
+    project
+        .add_source(
+            "Intermediary",
+            r#"import "./Uint.sol";
+import "./Address.sol";
+import "./Unused.sol";
+"#,
+        )
+        .unwrap();
+    let target = project
+        .add_source(
+            "A",
+            r#"import {convert} from "./Intermediary.sol";
+contract A {
+    function values(uint256 number, address account) external pure {
+        convert(number);
+        convert(account);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+    let result = Flattener::new(project.project().clone(), &canonicalize(target).unwrap())
+        .unwrap()
+        .flatten();
+    assert!(result.contains("function convert_1(uint256 value)"));
+    assert!(result.contains("function convert_0(address value)"));
+    assert!(!result.contains("contract Unused"), "{result}");
+    assert!(!result.contains("// src/Intermediary.sol"));
+
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[test]
+fn can_flatten_namespace_import_through_intermediary() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+
+    project.add_source("Test", "contract Test {}\n").unwrap();
+    project.add_source("Test2", "contract Test2 {}\n").unwrap();
+    project
+        .add_source(
+            "Intermediary",
+            r#"import {Test} from "./Test.sol";
+import {Test2} from "./Test2.sol";
+"#,
+        )
+        .unwrap();
+    let target = project
+        .add_source(
+            "A",
+            r#"import * as Types from "./Intermediary.sol";
+contract A is Types.Test {}
+"#,
+        )
+        .unwrap();
+
+    let result = Flattener::new(project.project().clone(), &canonicalize(target).unwrap())
+        .unwrap()
+        .flatten();
+    assert!(result.contains("contract Test {}"));
+    assert!(result.contains("contract Test2 {}"));
+    assert!(result.contains("// src/Intermediary.sol"));
+
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
+
 #[test]
 fn can_flatten_file_with_external_lib() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/hardhat-sample");
