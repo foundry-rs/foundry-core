@@ -1,6 +1,6 @@
 use crate::{
     ArtifactOutput, CompilerSettings, Graph, Project, ProjectPathsConfig, SourceParser, Updates,
-    VersionedSourceFiles, apply_updates,
+    VersionedSourceFile, VersionedSourceFiles, apply_updates,
     compilers::{Compiler, ParsedSource},
     filter::MaybeSolData,
     resolver::parse::SolData,
@@ -207,15 +207,6 @@ impl Flattener {
 
         let output = output.compiler_output;
 
-        // AST IDs are only unique within a single compiler invocation. Select the build that
-        // contains the target so IDs from different builds are never mixed.
-        let target_build_id = output
-            .sources
-            .0
-            .get(target)
-            .and_then(|files| files.iter().find(|file| file.source_file.ast.is_some()))
-            .map(|file| file.build_id.clone());
-
         let sources = Source::read_all([target.to_path_buf()])?;
         let graph = Graph::<C::Parser>::resolve_sources(&project.paths, sources)?;
 
@@ -232,17 +223,21 @@ impl Flattener {
         };
 
         let mut sources = Source::read_all(&ordered_sources)?;
-        let coherent_target_build = target_build_id.as_ref().is_some_and(|build_id| {
-            has_complete_ast_build(&output.sources, &ordered_sources, build_id)
-        });
+
+        // AST IDs are only unique within a single compiler invocation. Select a target build only
+        // if it produced an AST for every source, then use that build exclusively.
+        let Some(target_build_id) =
+            complete_ast_build_id(&output.sources, &ordered_sources, target)
+        else {
+            return Err(FlattenerError::Compilation(SolcError::msg(
+                "no compiler build produced ASTs for every source",
+            )));
+        };
 
         // Convert all ASTs from artifacts to strongly typed ASTs
         let mut asts: Vec<(PathBuf, SourceUnit)> = Vec::new();
         for (path, ast) in output.sources.0.iter().filter_map(|(path, files)| {
-            let source = target_build_id
-                .as_ref()
-                .and_then(|build_id| files.iter().find(|source| source.build_id == *build_id))
-                .or_else(|| files.first());
+            let source = source_with_ast(files, &target_build_id);
             if let Some(ast) = source.and_then(|source| source.source_file.ast.as_ref())
                 && sources.contains_key(path)
             {
@@ -253,13 +248,10 @@ impl Flattener {
             asts.push((PathBuf::from(path), serde_json::from_str(&serde_json::to_string(ast)?)?));
         }
 
-        // Prune intermediary-only sources only when every physical dependency has an AST from one
-        // coherent build. Otherwise retain the complete dependency closure.
+        // Prune intermediary-only sources. If semantic resolution fails, retain the complete
+        // dependency closure.
         let mut ordered_sources = ordered_sources;
-        if coherent_target_build
-            && asts.len() == ordered_sources.len()
-            && let Some(retained) = collect_semantic_sources(target, &asts)
-        {
+        if let Some(retained) = collect_semantic_sources(target, &asts) {
             ordered_sources.retain(|path| retained.contains(path));
             sources.retain(|path, _| retained.contains(path));
             asts.retain(|(path, _)| retained.contains(path));
@@ -812,19 +804,28 @@ impl Flattener {
     }
 }
 
-/// Returns whether every source has an AST produced by the selected compiler build.
-fn has_complete_ast_build(
+/// Returns the ID of a target build that produced an AST for every source.
+fn complete_ast_build_id(
     sources: &VersionedSourceFiles,
     paths: &[PathBuf],
-    build_id: &str,
-) -> bool {
-    paths.iter().all(|path| {
-        sources.0.get(path).is_some_and(|files| {
-            files
-                .iter()
-                .any(|source| source.build_id == build_id && source.source_file.ast.is_some())
-        })
+    target: &Path,
+) -> Option<String> {
+    sources.0.get(target)?.iter().find_map(|target_source| {
+        let build_id = &target_source.build_id;
+        (target_source.source_file.ast.is_some()
+            && paths.iter().all(|path| {
+                sources.0.get(path).is_some_and(|files| source_with_ast(files, build_id).is_some())
+            }))
+        .then(|| build_id.clone())
     })
+}
+
+/// Returns the source produced by the selected build only if it contains an AST.
+fn source_with_ast<'a>(
+    files: &'a [VersionedSourceFile],
+    build_id: &str,
+) -> Option<&'a VersionedSourceFile> {
+    files.iter().find(|source| source.build_id == build_id && source.source_file.ast.is_some())
 }
 
 /// Collects source units selected by imports, resolving named imports to their declaration owners.
@@ -1015,17 +1016,16 @@ pub fn combine_version_pragmas(pragmas: &[impl AsRef<str>]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::VersionedSourceFile;
     use foundry_compilers_artifacts::SourceFile;
     use semver::Version;
     use serde_json::json;
     use std::collections::BTreeMap;
 
-    fn versioned_source(build_id: &str) -> VersionedSourceFile {
+    fn versioned_source(build_id: &str, has_ast: bool) -> VersionedSourceFile {
         VersionedSourceFile {
             source_file: SourceFile {
                 id: 0,
-                ast: Some(
+                ast: has_ast.then(|| {
                     serde_json::from_value(json!({
                         "absolutePath": "source.sol",
                         "exportedSymbols": {},
@@ -1034,8 +1034,8 @@ mod tests {
                         "nodes": [],
                         "src": "0:0:0"
                     }))
-                    .unwrap(),
-                ),
+                    .unwrap()
+                }),
             },
             version: Version::new(0, 8, 30),
             build_id: build_id.to_string(),
@@ -1044,13 +1044,29 @@ mod tests {
     }
 
     #[test]
-    fn complete_ast_build_rejects_mixed_builds() {
+    fn complete_ast_build_ignores_incomplete_target_build() {
         let paths = vec![PathBuf::from("A.sol"), PathBuf::from("B.sol")];
-        let sources = VersionedSourceFiles(BTreeMap::from([
-            (paths[0].clone(), vec![versioned_source("target")]),
-            (paths[1].clone(), vec![versioned_source("other")]),
+        let mut sources = VersionedSourceFiles(BTreeMap::from([
+            (
+                paths[0].clone(),
+                vec![versioned_source("incomplete", false), versioned_source("complete", true)],
+            ),
+            (
+                paths[1].clone(),
+                vec![
+                    versioned_source("incomplete", true),
+                    versioned_source("complete", false),
+                    versioned_source("complete", true),
+                ],
+            ),
         ]));
 
-        assert!(!has_complete_ast_build(&sources, &paths, "target"));
+        assert_eq!(
+            complete_ast_build_id(&sources, &paths, &paths[0]),
+            Some("complete".to_string())
+        );
+
+        sources.0.get_mut(&paths[1]).unwrap().retain(|source| source.build_id == "incomplete");
+        assert_eq!(complete_ast_build_id(&sources, &paths, &paths[0]), None);
     }
 }
