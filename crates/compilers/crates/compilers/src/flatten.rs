@@ -1,6 +1,6 @@
 use crate::{
-    ArtifactOutput, CompilerSettings, Graph, Project, ProjectPathsConfig, SourceParser, Updates,
-    VersionedSourceFile, VersionedSourceFiles, apply_updates,
+    ArtifactOutput, Graph, Project, ProjectPathsConfig, SourceParser, Updates, VersionedSourceFile,
+    VersionedSourceFiles, apply_updates,
     compilers::{Compiler, ParsedSource},
     filter::MaybeSolData,
     resolver::parse::SolData,
@@ -192,10 +192,10 @@ impl Flattener {
     where
         C::Parser: SourceParser<ParsedSource: MaybeSolData>,
     {
-        // Configure project to compile the target file and only request AST for target file.
+        // Configure every settings profile to request only AST output when compiling the target.
         project.cached = false;
         project.no_artifacts = true;
-        project.settings.update_output_selection(|selection| {
+        project.update_output_selection(|selection| {
             *selection = OutputSelection::ast_output_selection();
         });
 

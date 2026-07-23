@@ -662,6 +662,56 @@ contract A is Test {}
 }
 
 #[test]
+fn can_flatten_with_additional_settings_profile() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+
+    project.add_source("Base", "contract Base {}\n").unwrap();
+    let target = project
+        .add_source(
+            "A",
+            r#"import {Base} from "./Base.sol";
+contract A is Base {}
+"#,
+        )
+        .unwrap();
+
+    let mut optimized_settings = project.project().settings.clone();
+    optimized_settings.solc.optimizer.enabled = Some(true);
+    optimized_settings.solc.optimizer.runs = Some(10_000);
+    optimized_settings.solc.output_selection = OutputSelection::default_output_selection();
+    project.project_mut().additional_settings.insert("optimized".to_string(), optimized_settings);
+    project.project_mut().restrictions.insert(
+        target.clone(),
+        RestrictionsWithVersion {
+            restrictions: MultiCompilerRestrictions {
+                solc: SolcRestrictions {
+                    optimizer_runs: Restriction { min: Some(10_000), ..Default::default() },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            version: None,
+        },
+    );
+
+    let target = canonicalize(target).unwrap();
+    let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    assert_eq!(
+        result,
+        r#"// src/Base.sol
+contract Base {}
+
+// src/A.sol
+
+contract A is Base {}
+"#
+    );
+
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[test]
 fn can_flatten_plain_import_through_intermediary() {
     let project = TempProject::<MultiCompiler>::dapptools().unwrap();
 
