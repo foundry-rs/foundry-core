@@ -662,6 +662,46 @@ contract A is Test {}
 }
 
 #[test]
+fn can_flatten_multi_hop_renamed_import() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+
+    project.add_source("Original", "contract Original {}\n").unwrap();
+    project.add_source("Unused", "contract Unused {}\n").unwrap();
+    project
+        .add_source(
+            "Intermediary",
+            r#"import {Original as Renamed} from "./Original.sol";
+import {Unused} from "./Unused.sol";
+"#,
+        )
+        .unwrap();
+    let target = project
+        .add_source(
+            "A",
+            r#"import {Renamed} from "./Intermediary.sol";
+contract A is Renamed {}
+"#,
+        )
+        .unwrap();
+
+    let target = canonicalize(target).unwrap();
+    let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    assert_eq!(
+        result,
+        r#"// src/Original.sol
+contract Original {}
+
+// src/A.sol
+
+contract A is Original {}
+"#
+    );
+
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[test]
 fn can_flatten_plain_import_through_intermediary() {
     let project = TempProject::<MultiCompiler>::dapptools().unwrap();
 
