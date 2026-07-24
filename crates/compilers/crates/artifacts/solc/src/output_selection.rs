@@ -83,7 +83,7 @@ impl OutputSelection {
     /// let selection = OutputSelection::empty()
     ///     .insert("Counter.sol", "*", ["abi".to_string(), "storageLayout".to_string()]);
     /// ```
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self(BTreeMap::new())
     }
 
