@@ -70,6 +70,35 @@ impl OutputSelection {
         .into()
     }
 
+    /// Returns a completely empty output selection: `{}`.
+    /// 
+    /// Used for fine-grained control over which outputs are requested.
+    /// Combine with [`Self::insert`] to build the selection of outputs incrementally.
+    /// 
+    /// # Example
+    /// ```no_run
+    /// use foundry_compilers_artifacts_solc::output_selection::OutputSelection;
+    /// 
+    /// // Request only `abi` and `storageLayout`, for every contract in Counter.sol.
+    /// let selection = OutputSelection::empty()
+    ///     .insert("Counter.sol", "*", ["abi".to_string(), "storageLayout".to_string()]);
+    /// ```
+    pub fn empty() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    /// Inserts the set of requested outputs for a given `file` and `contract`
+    /// selector, returning `self` for chaining.
+    pub fn insert(mut self, file: impl Into<String>, contract: impl Into<String>, outputs: impl IntoIterator<Item = String>) -> Self {
+        self.0
+            .entry(file.into())
+            .or_default()
+            .entry(contract.into())
+            .or_default()
+            .extend(outputs);
+        self
+    }
+
     /// Default output selection.
     pub fn default_output_selection() -> Self {
         BTreeMap::from([("*".to_string(), Self::default_file_output_selection())]).into()
@@ -590,6 +619,32 @@ mod tests {
             serde_json::from_str(&json).unwrap();
 
         assert_eq!(json, serde_json::to_string(&deserde_selection).unwrap());
+    }
+
+    #[test]
+    fn outputselection_builder_works() {
+        let output = OutputSelection::empty()
+            .insert("*", "*", [
+                "abi".to_string(),
+                "evm.assembly".to_string(),
+            ])
+            .insert("Counter.sol", "*", [
+                "evm.bytecode.object".to_string(),
+            ])
+            .insert("Counter.sol", "Counter", [
+                "storageLayout".to_string(),
+            ]);
+        let s = serde_json::to_string(&output).unwrap();
+        assert_eq!(s, r#"{"*":{"*":["abi","evm.assembly"]},"Counter.sol":{"*":["evm.bytecode.object"],"Counter":["storageLayout"]}}"#);
+    }
+
+    #[test]
+    fn outputselection_builder_merges_same_key() {
+        let output = OutputSelection::empty()
+            .insert("*", "*", ["abi".to_string()])
+            .insert("*", "*", ["evm.bytecode.object".to_string()]);
+        let s = serde_json::to_string(&output).unwrap();
+        assert_eq!(s, r#"{"*":{"*":["abi","evm.bytecode.object"]}}"#);
     }
 
     #[test]
