@@ -73,7 +73,7 @@ impl OutputSelection {
     /// Returns a completely empty output selection: `{}`.
     /// 
     /// Used for fine-grained control over which outputs are requested.
-    /// Combine with [`Self::insert`] to build the selection of outputs incrementally.
+    /// Combine with [`Self::with_output`] to build the selection of outputs incrementally.
     /// 
     /// # Example
     /// ```no_run
@@ -81,15 +81,14 @@ impl OutputSelection {
     /// 
     /// // Request only `abi` and `storageLayout`, for every contract in Counter.sol.
     /// let selection = OutputSelection::empty()
-    ///     .insert("Counter.sol", "*", ["abi".to_string(), "storageLayout".to_string()]);
+    ///     .with_output("Counter.sol", "*", ["abi".to_string(), "storageLayout".to_string()]);
     /// ```
     pub const fn empty() -> Self {
         Self(BTreeMap::new())
     }
 
-    /// Inserts the set of requested outputs for a given `file` and `contract`
-    /// selector, returning `self` for chaining.
-    pub fn insert(mut self, file: impl Into<String>, contract: impl Into<String>, outputs: impl IntoIterator<Item = String>) -> Self {
+    /// Adds the given outputs for a `(file, contract)` selector, returning `self` for chaining.
+    pub fn with_output(mut self, file: impl Into<String>, contract: impl Into<String>, outputs: impl IntoIterator<Item = String>) -> Self {
         self.0
             .entry(file.into())
             .or_default()
@@ -624,14 +623,14 @@ mod tests {
     #[test]
     fn outputselection_builder_works() {
         let output = OutputSelection::empty()
-            .insert("*", "*", [
+            .with_output("*", "*", [
                 "abi".to_string(),
                 "evm.assembly".to_string(),
             ])
-            .insert("Counter.sol", "*", [
+            .with_output("Counter.sol", "*", [
                 "evm.bytecode.object".to_string(),
             ])
-            .insert("Counter.sol", "Counter", [
+            .with_output("Counter.sol", "Counter", [
                 "storageLayout".to_string(),
             ]);
         let s = serde_json::to_string(&output).unwrap();
@@ -641,8 +640,8 @@ mod tests {
     #[test]
     fn outputselection_builder_merges_same_key() {
         let output = OutputSelection::empty()
-            .insert("*", "*", ["abi".to_string()])
-            .insert("*", "*", ["evm.bytecode.object".to_string()]);
+            .with_output("*", "*", ["abi".to_string()])
+            .with_output("*", "*", ["evm.bytecode.object".to_string()]);
         let s = serde_json::to_string(&output).unwrap();
         assert_eq!(s, r#"{"*":{"*":["abi","evm.bytecode.object"]}}"#);
     }
