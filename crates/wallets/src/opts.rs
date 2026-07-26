@@ -167,6 +167,8 @@ impl WalletOpts {
         chain_id: Option<u64>,
     ) -> Result<(Option<WalletSigner>, Option<MaybeTempoWallet>)> {
         trace!("start finding signer");
+        #[cfg(not(feature = "tempo"))]
+        let _ = chain_id;
 
         // If a Tempo access key is provided on the CLI, use it directly.
         #[cfg(feature = "tempo")]

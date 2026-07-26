@@ -38,7 +38,7 @@ mod tests {
         alloy_rlp::Encodable,
         alloy_signer::Signer,
         alloy_signer_local::PrivateKeySigner,
-        tempo_primitives::transaction::{
+        tempo_alloy::primitives::transaction::{
             KeyAuthorization, PrimitiveSignature, SignatureType, SignedKeyAuthorization,
             tt_signature::P256SignatureWithPreHash,
         },

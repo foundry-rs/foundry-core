@@ -28,7 +28,7 @@ use {
     crate::wallet_browser::types::BrowserKeyAuthorizationRequest,
     alloy_primitives::hex,
     alloy_rlp::Decodable,
-    tempo_primitives::transaction::{KeyAuthorization, SignedKeyAuthorization},
+    tempo_alloy::primitives::transaction::{KeyAuthorization, SignedKeyAuthorization},
 };
 
 /// Browser wallet server.

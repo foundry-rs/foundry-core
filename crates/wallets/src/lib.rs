@@ -8,8 +8,11 @@
 #[macro_use]
 extern crate tracing;
 
+// The RLP traits are consumed by the browser module only when both features
+// are enabled; retain the dependency for Tempo-only builds as well.
 #[cfg(feature = "tempo")]
-pub mod channel_db;
+use alloy_rlp as _;
+
 pub mod error;
 pub mod opts;
 pub mod signer;
@@ -19,8 +22,6 @@ pub mod wallet_browser;
 pub mod wallet_multi;
 pub mod wallet_raw;
 
-#[cfg(feature = "tempo")]
-pub use channel_db::{Channel, ChannelDb};
 pub use error::StoreError;
 pub use opts::{MaybeTempoWallet, WalletOpts};
 pub use signer::{PendingSigner, WalletSigner};
