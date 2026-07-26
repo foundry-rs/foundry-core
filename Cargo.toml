@@ -202,8 +202,8 @@ alloy-sol-types = "1.6.0"
 alloy-chains = "0.2.34"
 
 # tempo
-tempo-alloy = { version = "1.10.1", git = "https://github.com/tempoxyz/tempo", rev = "0d852125034c2d86cba804bf047fbcdf9dd464df", default-features = false }
-tempo-primitives = { version = "1.10.1", git = "https://github.com/tempoxyz/tempo", rev = "0d852125034c2d86cba804bf047fbcdf9dd464df", default-features = false, features = ["std", "serde"] }
+tempo-alloy = { version = "1.10.1", git = "https://github.com/tempoxyz/tempo", rev = "0fca444eba245c355f6706faa9025bb03acfa592", default-features = false }
+tempo-primitives = { version = "1.10.1", git = "https://github.com/tempoxyz/tempo", rev = "0fca444eba245c355f6706faa9025bb03acfa592", default-features = false, features = ["std", "serde"] }
 
 # misc
 async-trait = "0.1.89"
