@@ -13,8 +13,6 @@ pub mod channel_db;
 pub mod error;
 pub mod opts;
 pub mod signer;
-#[cfg(feature = "tempo")]
-pub mod tempo;
 pub mod utils;
 #[cfg(feature = "browser")]
 pub mod wallet_browser;
@@ -27,7 +25,7 @@ pub use error::StoreError;
 pub use opts::{MaybeTempoWallet, WalletOpts};
 pub use signer::{PendingSigner, WalletSigner};
 #[cfg(feature = "tempo")]
-pub use tempo::{TempoAccessKeyWallet, tempo_access_key_wallet};
+pub use tempo_alloy::accounts::TempoAccountsWallet;
 #[cfg(feature = "browser")]
 pub use wallet_browser::opts::BrowserWalletOpts;
 pub use wallet_multi::MultiWalletOpts;
