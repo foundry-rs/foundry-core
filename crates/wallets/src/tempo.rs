@@ -123,9 +123,23 @@ pub fn lookup_signer(from: Address) -> Result<TempoLookup> {
 
     let contents = std::fs::read_to_string(&path)?;
     let file: KeysFile = toml::from_str(&contents)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
+    lookup_signer_in(&file, from, now)
+}
+
+fn lookup_signer_in(file: &KeysFile, from: Address, now: u64) -> Result<TempoLookup> {
     for entry in &file.keys {
         if entry.wallet_address != from {
+            continue;
+        }
+        if !matches!(entry.wallet_type, WalletType::Local)
+            || !matches!(entry.key_type, KeyType::Secp256k1)
+            || entry.expiry.is_some_and(|expiry| expiry <= now)
+        {
             continue;
         }
 
@@ -133,20 +147,15 @@ pub fn lookup_signer(from: Address) -> Result<TempoLookup> {
             continue;
         };
 
-        // An EOA signs for itself when wallet_address == key_address (or key_address is absent).
-        let is_direct =
-            entry.key_address.is_none() || entry.key_address == Some(entry.wallet_address);
-
         let signer = utils::create_local_signer(key)?;
-        if let Some(key_address) = entry.key_address {
-            eyre::ensure!(
-                signer.address() == key_address,
-                "Tempo key material resolves to {}, expected {key_address}",
-                signer.address()
-            );
-        }
+        let key_address = entry.key_address.unwrap_or(entry.wallet_address);
+        eyre::ensure!(
+            signer.address() == key_address,
+            "Tempo key material resolves to {}, expected {key_address}",
+            signer.address()
+        );
 
-        if is_direct {
+        if key_address == entry.wallet_address {
             return Ok(TempoLookup::Direct(WalletSigner::Local(signer)));
         }
 
@@ -162,4 +171,92 @@ pub fn lookup_signer(from: Address) -> Result<TempoLookup> {
     }
 
     Ok(TempoLookup::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_signer::Signer;
+
+    const PRIVATE_KEY: &str = "0x59c6995e998f97a5a004497e5da3b5d2b2b66a87f064d39c44da0b6d6e4f8ff0";
+
+    fn entry(
+        wallet_address: Address,
+        wallet_type: WalletType,
+        key_type: KeyType,
+        key_address: Option<Address>,
+        key: Option<&str>,
+        expiry: Option<u64>,
+    ) -> KeyEntry {
+        KeyEntry {
+            wallet_type,
+            wallet_address,
+            chain_id: 4217,
+            key_type,
+            key_address,
+            key: key.map(ToOwned::to_owned),
+            key_authorization: None,
+            expiry,
+            limits: vec![],
+        }
+    }
+
+    #[test]
+    fn lookup_skips_unsupported_and_expired_keys() {
+        let signer = utils::create_local_signer(PRIVATE_KEY).unwrap();
+        let account = signer.address();
+        let file = KeysFile {
+            keys: vec![
+                entry(
+                    account,
+                    WalletType::Passkey,
+                    KeyType::P256,
+                    None,
+                    Some("not-a-secp256k1-key"),
+                    None,
+                ),
+                entry(
+                    account,
+                    WalletType::Local,
+                    KeyType::Secp256k1,
+                    None,
+                    Some("expired-invalid-key"),
+                    Some(99),
+                ),
+                entry(
+                    account,
+                    WalletType::Local,
+                    KeyType::Secp256k1,
+                    None,
+                    Some(PRIVATE_KEY),
+                    None,
+                ),
+            ],
+        };
+
+        let TempoLookup::Direct(found) = lookup_signer_in(&file, account, 100).unwrap() else {
+            panic!("expected a direct signer");
+        };
+        assert_eq!(found.address(), account);
+    }
+
+    #[test]
+    fn lookup_validates_implicit_direct_key_address() {
+        let account = Address::repeat_byte(0x11);
+        let file = KeysFile {
+            keys: vec![entry(
+                account,
+                WalletType::Local,
+                KeyType::Secp256k1,
+                None,
+                Some(PRIVATE_KEY),
+                None,
+            )],
+        };
+
+        let Err(error) = lookup_signer_in(&file, account, 0) else {
+            panic!("expected mismatched key material to fail");
+        };
+        assert!(error.to_string().contains("Tempo key material resolves to"));
+    }
 }
