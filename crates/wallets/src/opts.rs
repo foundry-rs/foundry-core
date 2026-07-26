@@ -148,6 +148,25 @@ impl WalletOpts {
     /// Returns `Ok((None, None))` if no wallet option was configured and no Tempo fallback
     /// matched.
     pub async fn maybe_signer(&self) -> Result<(Option<WalletSigner>, Option<MaybeTempoWallet>)> {
+        self.maybe_signer_inner(None).await
+    }
+
+    /// Attempts to resolve a signer for a concrete chain.
+    ///
+    /// This is identical to [`Self::maybe_signer`], except the implicit Tempo
+    /// `keys.toml` fallback requires either an exact chain match or a legacy
+    /// `chain_id = 0` entry.
+    pub async fn maybe_signer_for_chain(
+        &self,
+        chain_id: u64,
+    ) -> Result<(Option<WalletSigner>, Option<MaybeTempoWallet>)> {
+        self.maybe_signer_inner(Some(chain_id)).await
+    }
+
+    async fn maybe_signer_inner(
+        &self,
+        _chain_id: Option<u64>,
+    ) -> Result<(Option<WalletSigner>, Option<MaybeTempoWallet>)> {
         trace!("start finding signer");
 
         // If a Tempo access key is provided on the CLI, use it directly.
@@ -214,7 +233,11 @@ impl WalletOpts {
             // if `--from` is set.
             #[cfg(feature = "tempo")]
             if let Some(from) = self.from {
-                match crate::tempo::lookup_signer(from)? {
+                let lookup = match _chain_id {
+                    Some(chain_id) => crate::tempo::lookup_signer_for_chain(from, chain_id)?,
+                    None => crate::tempo::lookup_signer(from)?,
+                };
+                match lookup {
                     crate::tempo::TempoLookup::Direct(signer) => {
                         return Ok((Some(signer), None));
                     }

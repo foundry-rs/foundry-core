@@ -116,6 +116,18 @@ fn decode_key_authorization(hex_str: &str) -> Result<SignedKeyAuthorization> {
 /// [`TempoLookup::Keychain`] if an account access key is found,
 /// or [`TempoLookup::NotFound`] if no entry matches.
 pub fn lookup_signer(from: Address) -> Result<TempoLookup> {
+    lookup_signer_at(from, None)
+}
+
+/// Looks up a signer for the given address and chain in Tempo's `keys.toml`.
+///
+/// An exact chain match takes precedence over a legacy `chain_id = 0` entry.
+/// Entries for other chains are ignored.
+pub fn lookup_signer_for_chain(from: Address, chain_id: u64) -> Result<TempoLookup> {
+    lookup_signer_at(from, Some(chain_id))
+}
+
+fn lookup_signer_at(from: Address, chain_id: Option<u64>) -> Result<TempoLookup> {
     let path = match keys_path() {
         Some(p) if p.is_file() => p,
         _ => return Ok(TempoLookup::NotFound),
@@ -128,10 +140,53 @@ pub fn lookup_signer(from: Address) -> Result<TempoLookup> {
         .unwrap_or_default()
         .as_secs();
 
-    lookup_signer_in(&file, from, now)
+    lookup_signer_in(&file, from, chain_id, now)
 }
 
-fn lookup_signer_in(file: &KeysFile, from: Address, now: u64) -> Result<TempoLookup> {
+fn build_lookup(entry: &KeyEntry, fallback_chain: Option<u64>) -> Result<TempoLookup> {
+    let Some(key) = &entry.key else {
+        return Ok(TempoLookup::NotFound);
+    };
+
+    let signer = utils::create_local_signer(key)?;
+    let key_address = entry.key_address.unwrap_or(entry.wallet_address);
+    eyre::ensure!(
+        signer.address() == key_address,
+        "Tempo key material resolves to {}, expected {key_address}",
+        signer.address()
+    );
+
+    if key_address == entry.wallet_address {
+        return Ok(TempoLookup::Direct(WalletSigner::Local(signer)));
+    }
+
+    let key_authorization = if let Some(chain_id) = fallback_chain {
+        if entry.key_authorization.is_some() {
+            warn!(
+                wallet = %entry.wallet_address,
+                chain_id,
+                "ignoring chain-specific authorization from legacy chain_id = 0 Tempo key entry"
+            );
+        }
+        None
+    } else {
+        entry.key_authorization.as_deref().map(decode_key_authorization).transpose()?
+    };
+
+    Ok(TempoLookup::Keychain(tempo_access_key_wallet(
+        entry.wallet_address,
+        signer,
+        key_authorization,
+    )))
+}
+
+fn lookup_signer_in(
+    file: &KeysFile,
+    from: Address,
+    chain_id: Option<u64>,
+    now: u64,
+) -> Result<TempoLookup> {
+    let mut fallback = None;
     for entry in &file.keys {
         if entry.wallet_address != from {
             continue;
@@ -142,35 +197,25 @@ fn lookup_signer_in(file: &KeysFile, from: Address, now: u64) -> Result<TempoLoo
         {
             continue;
         }
-
-        let Some(key) = &entry.key else {
+        if entry.key.is_none() {
             continue;
-        };
-
-        let signer = utils::create_local_signer(key)?;
-        let key_address = entry.key_address.unwrap_or(entry.wallet_address);
-        eyre::ensure!(
-            signer.address() == key_address,
-            "Tempo key material resolves to {}, expected {key_address}",
-            signer.address()
-        );
-
-        if key_address == entry.wallet_address {
-            return Ok(TempoLookup::Direct(WalletSigner::Local(signer)));
         }
 
-        // Otherwise the key signs on behalf of wallet_address.
-        let key_authorization =
-            entry.key_authorization.as_deref().map(decode_key_authorization).transpose()?;
-
-        return Ok(TempoLookup::Keychain(tempo_access_key_wallet(
-            entry.wallet_address,
-            signer,
-            key_authorization,
-        )));
+        let Some(chain_id) = chain_id else {
+            return build_lookup(entry, None);
+        };
+        if entry.chain_id == chain_id {
+            return build_lookup(entry, None);
+        }
+        if entry.chain_id == 0 && fallback.is_none() {
+            fallback = Some(entry);
+        }
     }
 
-    Ok(TempoLookup::NotFound)
+    match (fallback, chain_id) {
+        (Some(entry), Some(chain_id)) => build_lookup(entry, Some(chain_id)),
+        _ => Ok(TempoLookup::NotFound),
+    }
 }
 
 #[cfg(test)]
@@ -234,7 +279,8 @@ mod tests {
             ],
         };
 
-        let TempoLookup::Direct(found) = lookup_signer_in(&file, account, 100).unwrap() else {
+        let TempoLookup::Direct(found) = lookup_signer_in(&file, account, None, 100).unwrap()
+        else {
             panic!("expected a direct signer");
         };
         assert_eq!(found.address(), account);
@@ -254,9 +300,65 @@ mod tests {
             )],
         };
 
-        let Err(error) = lookup_signer_in(&file, account, 0) else {
+        let Err(error) = lookup_signer_in(&file, account, None, 0) else {
             panic!("expected mismatched key material to fail");
         };
         assert!(error.to_string().contains("Tempo key material resolves to"));
+    }
+
+    #[test]
+    fn chain_lookup_prefers_exact_match_over_legacy_fallback() {
+        const SECOND_PRIVATE_KEY: &str =
+            "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+        let account = Address::repeat_byte(0x11);
+        let fallback_signer = utils::create_local_signer(PRIVATE_KEY).unwrap();
+        let exact_signer = utils::create_local_signer(SECOND_PRIVATE_KEY).unwrap();
+        let mut fallback = entry(
+            account,
+            WalletType::Local,
+            KeyType::Secp256k1,
+            Some(fallback_signer.address()),
+            Some(PRIVATE_KEY),
+            None,
+        );
+        fallback.chain_id = 0;
+        let mut exact = entry(
+            account,
+            WalletType::Local,
+            KeyType::Secp256k1,
+            Some(exact_signer.address()),
+            Some(SECOND_PRIVATE_KEY),
+            None,
+        );
+        exact.chain_id = 4217;
+        let file = KeysFile { keys: vec![fallback, exact] };
+
+        let TempoLookup::Keychain(wallet) =
+            lookup_signer_in(&file, account, Some(4217), 0).unwrap()
+        else {
+            panic!("expected an access-key wallet");
+        };
+        assert_eq!(wallet.key_id(), exact_signer.address());
+    }
+
+    #[test]
+    fn chain_lookup_rejects_entries_for_other_chains() {
+        let signer = utils::create_local_signer(PRIVATE_KEY).unwrap();
+        let account = Address::repeat_byte(0x11);
+        let mut key = entry(
+            account,
+            WalletType::Local,
+            KeyType::Secp256k1,
+            Some(signer.address()),
+            Some(PRIVATE_KEY),
+            None,
+        );
+        key.chain_id = 1;
+        let file = KeysFile { keys: vec![key] };
+
+        assert!(matches!(
+            lookup_signer_in(&file, account, Some(4217), 0).unwrap(),
+            TempoLookup::NotFound
+        ));
     }
 }
