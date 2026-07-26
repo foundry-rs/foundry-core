@@ -1,7 +1,9 @@
 use alloy_primitives::{Address, hex};
 use alloy_rlp::Decodable;
+use alloy_signer_local::PrivateKeySigner;
 use eyre::Result;
 use std::path::PathBuf;
+use tempo_alloy::accounts::TempoKeychainWallet;
 use tempo_primitives::transaction::SignedKeyAuthorization;
 
 use crate::{WalletSigner, utils};
@@ -65,22 +67,20 @@ struct KeysFile {
     keys: Vec<KeyEntry>,
 }
 
-/// Configuration for a Tempo access key (keychain mode).
-///
-/// When a Tempo wallet entry uses keychain mode (`wallet_address != key_address`), the signer
-/// is an access key that signs on behalf of the root wallet. This struct carries the metadata
-/// needed to construct the correct transaction.
-#[derive(Debug, Clone)]
-pub struct TempoAccessKeyConfig {
-    /// The root wallet address (the `from` address for transactions).
-    pub wallet_address: Address,
-    /// The access key's address (derived from the private key that actually signs).
-    pub key_address: Address,
-    /// Decoded key authorization for on-chain provisioning.
-    ///
-    /// When present, callers should check whether the key is already provisioned on-chain
-    /// (via the AccountKeychain precompile) before including this in a transaction.
-    pub key_authorization: Option<SignedKeyAuthorization>,
+/// A Foundry signer carrying its complete Tempo access-key context.
+pub type TempoAccessKeyWallet = TempoKeychainWallet<PrivateKeySigner>;
+
+/// Build a Tempo access-key wallet from a local signer.
+pub fn tempo_access_key_wallet(
+    account: Address,
+    signer: PrivateKeySigner,
+    key_authorization: Option<SignedKeyAuthorization>,
+) -> TempoAccessKeyWallet {
+    let wallet = TempoKeychainWallet::new(account, signer);
+    match key_authorization {
+        Some(key_authorization) => wallet.with_key_authorization(key_authorization),
+        None => wallet,
+    }
 }
 
 /// Result of looking up an address in Tempo's key store.
@@ -88,7 +88,7 @@ pub enum TempoLookup {
     /// A direct (EOA) signer was found — `wallet_address == key_address`.
     Direct(WalletSigner),
     /// A keychain (access key) signer was found — `wallet_address != key_address`.
-    Keychain(WalletSigner, Box<TempoAccessKeyConfig>),
+    Keychain(TempoAccessKeyWallet),
     /// No matching entry was found.
     NotFound,
 }
@@ -112,8 +112,8 @@ fn decode_key_authorization(hex_str: &str) -> Result<SignedKeyAuthorization> {
 
 /// Looks up a signer for the given address in Tempo's `keys.toml`.
 ///
-/// Returns [`TempoLookup::Direct`] if a direct-mode (EOA) key is found,
-/// [`TempoLookup::Keychain`] if a keychain-mode access key is found,
+/// Returns [`TempoLookup::Direct`] if an EOA key is found,
+/// [`TempoLookup::Keychain`] if an account access key is found,
 /// or [`TempoLookup::NotFound`] if no entry matches.
 pub fn lookup_signer(from: Address) -> Result<TempoLookup> {
     let path = match keys_path() {
@@ -133,27 +133,32 @@ pub fn lookup_signer(from: Address) -> Result<TempoLookup> {
             continue;
         };
 
-        // Direct mode: wallet_address == key_address (or key_address is absent).
+        // An EOA signs for itself when wallet_address == key_address (or key_address is absent).
         let is_direct =
             entry.key_address.is_none() || entry.key_address == Some(entry.wallet_address);
 
-        let signer = utils::create_private_key_signer(key)?;
-
-        if is_direct {
-            return Ok(TempoLookup::Direct(signer));
+        let signer = utils::create_local_signer(key)?;
+        if let Some(key_address) = entry.key_address {
+            eyre::ensure!(
+                signer.address() == key_address,
+                "Tempo key material resolves to {}, expected {key_address}",
+                signer.address()
+            );
         }
 
-        // Keychain mode: the key is an access key signing on behalf of wallet_address.
+        if is_direct {
+            return Ok(TempoLookup::Direct(WalletSigner::Local(signer)));
+        }
+
+        // Otherwise the key signs on behalf of wallet_address.
         let key_authorization =
             entry.key_authorization.as_deref().map(decode_key_authorization).transpose()?;
 
-        let config = TempoAccessKeyConfig {
-            wallet_address: entry.wallet_address,
-            // SAFETY: `is_direct` was false, so `key_address` is `Some` and != wallet_address
-            key_address: entry.key_address.unwrap(),
+        return Ok(TempoLookup::Keychain(tempo_access_key_wallet(
+            entry.wallet_address,
+            signer,
             key_authorization,
-        };
-        return Ok(TempoLookup::Keychain(signer, Box::new(config)));
+        )));
     }
 
     Ok(TempoLookup::NotFound)

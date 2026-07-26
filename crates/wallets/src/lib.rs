@@ -24,10 +24,10 @@ pub mod wallet_raw;
 #[cfg(feature = "tempo")]
 pub use channel_db::{Channel, ChannelDb};
 pub use error::StoreError;
-pub use opts::{MaybeTempoConfig, WalletOpts};
+pub use opts::{MaybeTempoWallet, WalletOpts};
 pub use signer::{PendingSigner, WalletSigner};
 #[cfg(feature = "tempo")]
-pub use tempo::TempoAccessKeyConfig;
+pub use tempo::{TempoAccessKeyWallet, tempo_access_key_wallet};
 #[cfg(feature = "browser")]
 pub use wallet_browser::opts::BrowserWalletOpts;
 pub use wallet_multi::MultiWalletOpts;
