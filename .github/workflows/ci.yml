@@ -6,6 +6,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Commit SHA that the dispatched CI run must use
+        required: true
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -17,6 +23,20 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
+  validate-dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Validate dispatched SHA
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "Dispatched SHA does not match the requested SHA" >&2
+            exit 1
+          fi
+
   rustfmt:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -245,6 +265,7 @@ jobs:
     if: always()
     permissions: {}
     needs:
+      - validate-dispatch
       - rustfmt
       - browser-wallet
       - clippy

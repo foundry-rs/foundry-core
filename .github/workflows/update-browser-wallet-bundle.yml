@@ -1,0 +1,379 @@
+name: Update browser wallet bundle
+
+permissions: {}
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build browser wallet bundle
+    if: >-
+      (github.event.workflow_run.conclusion == 'success' ||
+       github.event.workflow_run.conclusion == 'failure') &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/npm_and_yarn/crates/wallets/src/wallet_browser/app/src/npm-weekly-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      head-ref: ${{ steps.context.outputs.head-ref }}
+      head-sha: ${{ steps.context.outputs.head-sha }}
+      pr-number: ${{ steps.context.outputs.pr-number }}
+    steps:
+      - name: Record trusted workflow context
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          prs_json="$(
+            gh api \
+              --method GET \
+              "repos/$GITHUB_REPOSITORY/pulls" \
+              -f state=open \
+              -f "head=$REPOSITORY_OWNER:$HEAD_REF" \
+              -f base=main \
+              -f per_page=2
+          )"
+          jq -e \
+            --arg head_ref "$HEAD_REF" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            'length == 1 and
+             .[0].user.login == "dependabot[bot]" and
+             .[0].base.ref == "main" and
+             .[0].head.ref == $head_ref and
+             .[0].head.sha == $head_sha and
+             .[0].head.repo.full_name == $repository' \
+            <<< "$prs_json" > /dev/null
+
+          base_sha="$(jq -r '.[0].base.sha' <<< "$prs_json")"
+          pr_number="$(jq -r '.[0].number' <<< "$prs_json")"
+          echo "head-ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "head-sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base-sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "pr-number=$pr_number" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate changed paths
+        env:
+          BASE_SHA: ${{ steps.context.outputs.base-sha }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          expected_paths=(
+            "crates/wallets/src/wallet_browser/app/src/package.json"
+            "crates/wallets/src/wallet_browser/app/src/pnpm-lock.yaml"
+          )
+          mapfile -d '' -t changed_paths < <(
+            git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" | LC_ALL=C sort -z
+          )
+
+          if [[ "${#changed_paths[@]}" -ne "${#expected_paths[@]}" ||
+                "${changed_paths[0]:-}" != "${expected_paths[0]}" ||
+                "${changed_paths[1]:-}" != "${expected_paths[1]}" ]]; then
+            printf 'Unexpected changed path: %q\n' "${changed_paths[@]}" >&2
+            exit 1
+          fi
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.9.0
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: crates/wallets/src/wallet_browser/app/src/.nvmrc
+          cache: pnpm
+          cache-dependency-path: crates/wallets/src/wallet_browser/app/src/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: crates/wallets/src/wallet_browser/app/src
+        env:
+          CI: true
+        run: pnpm install --frozen-lockfile
+
+      - name: Build browser wallet
+        working-directory: crates/wallets/src/wallet_browser/app/src
+        env:
+          CI: true
+        run: pnpm run build
+
+      - name: Collect bundle
+        env:
+          ASSET_DIR: crates/wallets/src/wallet_browser/app/assets
+          BUNDLE_DIR: ${{ runner.temp }}/browser-wallet-bundle
+        run: |
+          expected_files=(
+            "banner.png"
+            "index.html"
+            "logo.png"
+            "main.js"
+            "main.js.map"
+            "styles.css"
+          )
+
+          mkdir -p "$BUNDLE_DIR"
+          for file in "${expected_files[@]}"; do
+            if [[ ! -f "$ASSET_DIR/$file" || -L "$ASSET_DIR/$file" ]]; then
+              echo "Missing or invalid asset: $file" >&2
+              exit 1
+            fi
+            install -m 0644 "$ASSET_DIR/$file" "$BUNDLE_DIR/$file"
+          done
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-wallet-bundle
+          path: |
+            ${{ runner.temp }}/browser-wallet-bundle/banner.png
+            ${{ runner.temp }}/browser-wallet-bundle/index.html
+            ${{ runner.temp }}/browser-wallet-bundle/logo.png
+            ${{ runner.temp }}/browser-wallet-bundle/main.js
+            ${{ runner.temp }}/browser-wallet-bundle/main.js.map
+            ${{ runner.temp }}/browser-wallet-bundle/styles.css
+          if-no-files-found: error
+          retention-days: 1
+
+  commit:
+    name: Commit browser wallet bundle
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Validate pull request
+        env:
+          EXPECTED_HEAD_REF: ${{ needs.build.outputs.head-ref }}
+          EXPECTED_HEAD_SHA: ${{ needs.build.outputs.head-sha }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.build.outputs.pr-number }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$WORKFLOW_RUN_ID")"
+          jq -e \
+            --arg head_ref "$EXPECTED_HEAD_REF" \
+            --arg head_sha "$EXPECTED_HEAD_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '((.conclusion == "success") or (.conclusion == "failure")) and
+             .event == "pull_request" and
+             .actor.login == "dependabot[bot]" and
+             .head_branch == $head_ref and
+             .head_sha == $head_sha and
+             .head_repository.full_name == $repository and
+             .path == ".github/workflows/ci.yml"' \
+            <<< "$run_json" > /dev/null
+
+          pr_json="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          jq -e \
+            --arg head_ref "$EXPECTED_HEAD_REF" \
+            --arg head_sha "$EXPECTED_HEAD_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '.state == "open" and
+             .user.login == "dependabot[bot]" and
+             .base.ref == "main" and
+             .head.ref == $head_ref and
+             .head.sha == $head_sha and
+             .head.repo.full_name == $repository and
+             .changed_files == 2 and
+             ($head_ref | startswith("dependabot/npm_and_yarn/crates/wallets/src/wallet_browser/app/src/npm-weekly-"))' \
+            <<< "$pr_json" > /dev/null
+
+          files_json="$(
+            gh api \
+              --method GET \
+              "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+              -f per_page=100
+          )"
+          jq -e \
+            --arg package_json "crates/wallets/src/wallet_browser/app/src/package.json" \
+            --arg pnpm_lock "crates/wallets/src/wallet_browser/app/src/pnpm-lock.yaml" \
+            'length == 2 and
+             all(.[]; .status == "modified" and .previous_filename == null) and
+             (map(.filename) | sort) == [$package_json, $pnpm_lock]' \
+            <<< "$files_json" > /dev/null
+
+      - name: Download bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: browser-wallet-bundle
+          path: ${{ runner.temp }}/browser-wallet-bundle
+
+      - name: Validate bundle
+        env:
+          BUNDLE_DIR: ${{ runner.temp }}/browser-wallet-bundle
+        run: |
+          expected_files=(
+            "banner.png"
+            "index.html"
+            "logo.png"
+            "main.js"
+            "main.js.map"
+            "styles.css"
+          )
+          mapfile -d '' -t artifact_entries < <(
+            find "$BUNDLE_DIR" -mindepth 1 -maxdepth 1 -printf '%f\0' |
+              LC_ALL=C sort -z
+          )
+
+          if [[ "${#artifact_entries[@]}" -ne "${#expected_files[@]}" ]]; then
+            printf 'Unexpected artifact entry: %q\n' "${artifact_entries[@]}" >&2
+            exit 1
+          fi
+
+          for i in "${!expected_files[@]}"; do
+            file="${expected_files[$i]}"
+            if [[ "${artifact_entries[$i]}" != "$file" ]]; then
+              printf 'Unexpected artifact entry: %q\n' "${artifact_entries[@]}" >&2
+              exit 1
+            fi
+            if [[ ! -f "$BUNDLE_DIR/$file" || -L "$BUNDLE_DIR/$file" ]]; then
+              echo "Invalid artifact entry: $file" >&2
+              exit 1
+            fi
+          done
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build.outputs.head-sha }}
+          fetch-depth: 0
+
+      - name: Stage bundle
+        id: stage
+        env:
+          ASSET_DIR: crates/wallets/src/wallet_browser/app/assets
+          BUNDLE_DIR: ${{ runner.temp }}/browser-wallet-bundle
+        run: |
+          expected_files=(
+            "banner.png"
+            "index.html"
+            "logo.png"
+            "main.js"
+            "main.js.map"
+            "styles.css"
+          )
+
+          for file in "${expected_files[@]}"; do
+            cp -- "$BUNDLE_DIR/$file" "$ASSET_DIR/$file"
+            git add -- "$ASSET_DIR/$file"
+          done
+
+          expected_paths=()
+          for file in "${expected_files[@]}"; do
+            expected_paths+=("$ASSET_DIR/$file")
+          done
+          mapfile -t staged_paths < <(git diff --cached --name-only | sort)
+
+          for staged_path in "${staged_paths[@]}"; do
+            allowed=false
+            for expected_path in "${expected_paths[@]}"; do
+              if [[ "$staged_path" == "$expected_path" ]]; then
+                allowed=true
+                break
+              fi
+            done
+            if [[ "$allowed" != true ]]; then
+              echo "Unexpected staged path: $staged_path" >&2
+              exit 1
+            fi
+          done
+
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit bundle
+        if: steps.stage.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: regenerate browser wallet assets"
+
+      - name: Push bundle
+        id: push
+        if: steps.stage.outputs.changed == 'true'
+        env:
+          EXPECTED_HEAD_SHA: ${{ needs.build.outputs.head-sha }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ needs.build.outputs.head-ref }}
+          PR_NUMBER: ${{ needs.build.outputs.pr-number }}
+        run: |
+          pr_json="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          jq -e \
+            --arg head_ref "$HEAD_REF" \
+            --arg head_sha "$EXPECTED_HEAD_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            '.state == "open" and
+             .user.login == "dependabot[bot]" and
+             .base.ref == "main" and
+             .head.ref == $head_ref and
+             .head.sha == $head_sha and
+             .head.repo.full_name == $repository and
+             .changed_files == 2 and
+             ($head_ref | startswith("dependabot/npm_and_yarn/crates/wallets/src/wallet_browser/app/src/npm-weekly-"))' \
+            <<< "$pr_json" > /dev/null
+
+          files_json="$(
+            gh api \
+              --method GET \
+              "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+              -f per_page=100
+          )"
+          jq -e \
+            --arg package_json "crates/wallets/src/wallet_browser/app/src/package.json" \
+            --arg pnpm_lock "crates/wallets/src/wallet_browser/app/src/pnpm-lock.yaml" \
+            'length == 2 and
+             all(.[]; .status == "modified" and .previous_filename == null) and
+             (map(.filename) | sort) == [$package_json, $pnpm_lock]' \
+            <<< "$files_json" > /dev/null
+
+          updated_head_sha="$(git rev-parse HEAD)"
+          git push origin "HEAD:refs/heads/$HEAD_REF"
+
+          pushed_head_sha="$(
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha'
+          )"
+          if [[ "$pushed_head_sha" != "$updated_head_sha" ]]; then
+            echo "Pull request head changed after push" >&2
+            exit 1
+          fi
+
+          echo "head-sha=$updated_head_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Run CI on updated head
+        if: steps.stage.outputs.changed == 'true'
+        env:
+          EXPECTED_HEAD_SHA: ${{ steps.push.outputs.head-sha }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ needs.build.outputs.head-ref }}
+        run: |
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/dispatches" \
+            -f "ref=$HEAD_REF" \
+            -f "inputs[expected_sha]=$EXPECTED_HEAD_SHA"
