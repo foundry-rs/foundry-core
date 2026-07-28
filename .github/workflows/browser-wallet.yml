@@ -1,0 +1,59 @@
+name: Browser wallet / Validate
+
+permissions: {}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/browser-wallet.yml
+      - crates/wallets/src/wallet_browser/app/assets/**
+      - crates/wallets/src/wallet_browser/app/src/**
+  pull_request:
+    paths:
+      - .github/workflows/browser-wallet.yml
+      - crates/wallets/src/wallet_browser/app/assets/**
+      - crates/wallets/src/wallet_browser/app/src/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  browser-wallet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.9.0
+          run_install: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: crates/wallets/src/wallet_browser/app/src/.nvmrc
+          cache: pnpm
+          cache-dependency-path: crates/wallets/src/wallet_browser/app/src/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: crates/wallets/src/wallet_browser/app/src
+        run: pnpm install --frozen-lockfile
+      - name: Check formatting
+        working-directory: crates/wallets/src/wallet_browser/app/src
+        run: pnpm run fmt:check
+      - name: Lint
+        working-directory: crates/wallets/src/wallet_browser/app/src
+        run: pnpm run lint:check
+      - name: Build bundle
+        working-directory: crates/wallets/src/wallet_browser/app/src
+        run: pnpm run build
+      - name: Check generated assets
+        run: git diff --exit-code -- crates/wallets/src/wallet_browser/app/assets

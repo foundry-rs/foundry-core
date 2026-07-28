@@ -6,12 +6,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
-    inputs:
-      expected_sha:
-        description: Commit SHA that the dispatched CI run must use
-        required: true
-        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -23,20 +17,6 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
-  validate-dispatch:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Validate dispatched SHA
-        env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_SHA" != "$EXPECTED_SHA" ]]; then
-            echo "Dispatched SHA does not match the requested SHA" >&2
-            exit 1
-          fi
-
   rustfmt:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -51,63 +31,6 @@ jobs:
           toolchain: nightly
           components: rustfmt
       - run: cargo fmt --all --check
-
-  browser-wallet:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Detect browser wallet changes
-        id: changes
-        env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}"; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$BASE_SHA" "$GITHUB_SHA" -- \
-            crates/wallets/src/wallet_browser/app/src \
-            crates/wallets/src/wallet_browser/app/assets; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Set up pnpm
-        if: steps.changes.outputs.changed == 'true'
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-        with:
-          version: 11.9.0
-          run_install: false
-      - name: Set up Node
-        if: steps.changes.outputs.changed == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: crates/wallets/src/wallet_browser/app/src/.nvmrc
-          cache: pnpm
-          cache-dependency-path: crates/wallets/src/wallet_browser/app/src/pnpm-lock.yaml
-      - name: Install dependencies
-        if: steps.changes.outputs.changed == 'true'
-        working-directory: crates/wallets/src/wallet_browser/app/src
-        run: pnpm install --frozen-lockfile
-      - name: Check formatting
-        if: steps.changes.outputs.changed == 'true'
-        working-directory: crates/wallets/src/wallet_browser/app/src
-        run: pnpm run fmt:check
-      - name: Lint
-        if: steps.changes.outputs.changed == 'true'
-        working-directory: crates/wallets/src/wallet_browser/app/src
-        run: pnpm run lint:check
-      - name: Build bundle
-        if: steps.changes.outputs.changed == 'true'
-        working-directory: crates/wallets/src/wallet_browser/app/src
-        run: pnpm run build
-      - name: Check generated assets
-        if: steps.changes.outputs.changed == 'true'
-        run: git diff --exit-code -- crates/wallets/src/wallet_browser/app/assets
 
   clippy:
     runs-on: ubuntu-latest
@@ -265,9 +188,7 @@ jobs:
     if: always()
     permissions: {}
     needs:
-      - validate-dispatch
       - rustfmt
-      - browser-wallet
       - clippy
       - feature-checks
       - test

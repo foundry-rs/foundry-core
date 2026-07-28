@@ -1,10 +1,10 @@
-name: Update browser wallet bundle
+name: Browser wallet / Update bundle
 
 permissions: {}
 
 on:
   workflow_run:
-    workflows: [CI]
+    workflows: [Browser wallet / Validate]
     types: [completed]
 
 concurrency:
@@ -161,7 +161,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      actions: write
       contents: write
       pull-requests: read
     steps:
@@ -184,7 +183,7 @@ jobs:
              .head_branch == $head_ref and
              .head_sha == $head_sha and
              .head_repository.full_name == $repository and
-             .path == ".github/workflows/ci.yml"' \
+             .path == ".github/workflows/browser-wallet.yml"' \
             <<< "$run_json" > /dev/null
 
           pr_json="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
@@ -315,7 +314,6 @@ jobs:
           git commit -m "chore: regenerate browser wallet assets"
 
       - name: Push bundle
-        id: push
         if: steps.stage.outputs.changed == 'true'
         env:
           EXPECTED_HEAD_SHA: ${{ needs.build.outputs.head-sha }}
@@ -352,28 +350,4 @@ jobs:
              (map(.filename) | sort) == [$package_json, $pnpm_lock]' \
             <<< "$files_json" > /dev/null
 
-          updated_head_sha="$(git rev-parse HEAD)"
           git push origin "HEAD:refs/heads/$HEAD_REF"
-
-          pushed_head_sha="$(
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha'
-          )"
-          if [[ "$pushed_head_sha" != "$updated_head_sha" ]]; then
-            echo "Pull request head changed after push" >&2
-            exit 1
-          fi
-
-          echo "head-sha=$updated_head_sha" >> "$GITHUB_OUTPUT"
-
-      - name: Run CI on updated head
-        if: steps.stage.outputs.changed == 'true'
-        env:
-          EXPECTED_HEAD_SHA: ${{ steps.push.outputs.head-sha }}
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ needs.build.outputs.head-ref }}
-        run: |
-          gh api \
-            --method POST \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/dispatches" \
-            -f "ref=$HEAD_REF" \
-            -f "inputs[expected_sha]=$EXPECTED_HEAD_SHA"
