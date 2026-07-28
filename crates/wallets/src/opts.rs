@@ -1,19 +1,17 @@
 #[cfg(feature = "tempo")]
-use crate::tempo::TempoAccessKeyConfig;
+use crate::TempoAccountsWallet;
 use crate::{signer::WalletSigner, utils, wallet_raw::RawWalletOpts};
 use alloy_primitives::Address;
-#[cfg(feature = "tempo")]
-use alloy_signer::Signer;
 use clap::Parser;
 use eyre::Result;
 use serde::Serialize;
 
-/// When the `tempo` feature is enabled this is [`TempoAccessKeyConfig`];
+/// When the `tempo` feature is enabled this is [`TempoAccountsWallet`];
 /// otherwise it is `()` so the API shape stays the same.
 #[cfg(feature = "tempo")]
-pub type MaybeTempoConfig = TempoAccessKeyConfig;
+pub type MaybeTempoWallet = TempoAccountsWallet;
 #[cfg(not(feature = "tempo"))]
-pub type MaybeTempoConfig = ();
+pub type MaybeTempoWallet = ();
 
 /// The wallet options can either be:
 /// 1. Raw (via private key / mnemonic file, see `RawWallet`)
@@ -144,13 +142,33 @@ pub struct WalletOpts {
 impl WalletOpts {
     /// Attempts to resolve a signer from the configured wallet options.
     ///
-    /// Returns the signer and, when the `tempo` feature is enabled and Tempo keychain mode is
-    /// used, a [`TempoAccessKeyConfig`] describing the root wallet and provisioning data.
+    /// Returns the signer and, when the `tempo` feature is enabled and Tempo Accounts mode is
+    /// used, a [`TempoAccountsWallet`] owning the complete signing context.
     ///
     /// Returns `Ok((None, None))` if no wallet option was configured and no Tempo fallback
     /// matched.
-    pub async fn maybe_signer(&self) -> Result<(Option<WalletSigner>, Option<MaybeTempoConfig>)> {
+    pub async fn maybe_signer(&self) -> Result<(Option<WalletSigner>, Option<MaybeTempoWallet>)> {
+        self.maybe_signer_inner(None).await
+    }
+
+    /// Attempts to resolve a signer for a concrete chain.
+    ///
+    /// This is identical to [`Self::maybe_signer`], except the Tempo Accounts
+    /// wallet is pinned to the selected chain.
+    pub async fn maybe_signer_for_chain(
+        &self,
+        chain_id: u64,
+    ) -> Result<(Option<WalletSigner>, Option<MaybeTempoWallet>)> {
+        self.maybe_signer_inner(Some(chain_id)).await
+    }
+
+    async fn maybe_signer_inner(
+        &self,
+        chain_id: Option<u64>,
+    ) -> Result<(Option<WalletSigner>, Option<MaybeTempoWallet>)> {
         trace!("start finding signer");
+        #[cfg(not(feature = "tempo"))]
+        let _ = chain_id;
 
         // If a Tempo access key is provided on the CLI, use it directly.
         #[cfg(feature = "tempo")]
@@ -158,14 +176,13 @@ impl WalletOpts {
             let root_account = self.tempo_root_account.ok_or_else(|| {
                 eyre::eyre!("--tempo.root-account is required when --tempo.access-key is set")
             })?;
-            let signer = utils::create_private_key_signer(access_key)?;
-            let key_address = signer.address();
-            let config = TempoAccessKeyConfig {
-                wallet_address: root_account,
-                key_address,
-                key_authorization: None,
+            let signer = utils::create_local_signer(access_key)?;
+            let wallet = TempoAccountsWallet::from_secp256k1(root_account, signer, None);
+            let wallet = match chain_id {
+                Some(chain_id) => wallet.with_chain_id(chain_id),
+                None => wallet,
             };
-            return Ok((Some(signer), Some(config)));
+            return Ok((None, Some(wallet)));
         }
 
         let get_env = |key: &str| {
@@ -218,19 +235,18 @@ impl WalletOpts {
                 unreachable!()
             }
         } else {
-            // No explicit wallet option was provided. Try Tempo wallet as a fallback
-            // if `--from` is set.
+            // No explicit wallet option was provided. Try the Tempo Accounts store
+            // if `--from` selects one of its accounts.
             #[cfg(feature = "tempo")]
-            if let Some(from) = self.from {
-                match crate::tempo::lookup_signer(from)? {
-                    crate::tempo::TempoLookup::Direct(signer) => {
-                        return Ok((Some(signer), None));
-                    }
-                    crate::tempo::TempoLookup::Keychain(signer, config) => {
-                        return Ok((Some(signer), Some(*config)));
-                    }
-                    crate::tempo::TempoLookup::NotFound => {}
-                }
+            if let Some(from) = self.from
+                && let Some(wallet) = TempoAccountsWallet::try_from_default_store()?
+                && wallet.has_account(from)?
+            {
+                let wallet = match chain_id {
+                    Some(chain_id) => wallet.with_chain_id(chain_id),
+                    None => wallet,
+                };
+                return Ok((None, Some(wallet)));
             }
 
             return Ok((None, None));
@@ -339,5 +355,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "tempo")]
+    #[tokio::test]
+    async fn tempo_access_key_resolves_to_one_wallet() {
+        let account = Address::repeat_byte(0x11);
+        let wallet = WalletOpts {
+            tempo_access_key: Some(
+                "0x59c6995e998f97a5a004497e5da3b5d2b2b66a87f064d39c44da0b6d6e4f8ff0".to_owned(),
+            ),
+            tempo_root_account: Some(account),
+            ..Default::default()
+        };
+
+        let (signer, tempo_wallet) = wallet.maybe_signer().await.unwrap();
+        assert!(signer.is_none());
+        assert_eq!(tempo_wallet.unwrap().account(), account);
     }
 }

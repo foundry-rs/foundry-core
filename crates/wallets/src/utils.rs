@@ -18,12 +18,17 @@ fn ensure_pk_not_env(pk: &str) -> Result<()> {
 
 /// Validates and sanitizes user inputs, returning configured [WalletSigner].
 pub fn create_private_key_signer(private_key_str: &str) -> Result<WalletSigner> {
+    create_local_signer(private_key_str).map(WalletSigner::Local)
+}
+
+/// Validates and sanitizes user inputs, returning a local private-key signer.
+pub fn create_local_signer(private_key_str: &str) -> Result<PrivateKeySigner> {
     let Ok(private_key) = B256::from_hex(private_key_str) else {
         ensure_pk_not_env(private_key_str)?;
         eyre::bail!("Failed to decode private key");
     };
     match PrivateKeySigner::from_bytes(&private_key) {
-        Ok(pk) => Ok(WalletSigner::Local(pk)),
+        Ok(pk) => Ok(pk),
         Err(err) => {
             ensure_pk_not_env(private_key_str)?;
             eyre::bail!("Failed to create wallet from private key: {err}");
@@ -177,8 +182,10 @@ mod tests {
         let pk = B256::random();
         let pk_str = pk.to_string();
         assert!(create_private_key_signer(&pk_str).is_ok());
+        assert!(create_local_signer(&pk_str).is_ok());
         // skip 0x
         assert!(create_private_key_signer(&pk_str[2..]).is_ok());
+        assert!(create_local_signer(&pk_str[2..]).is_ok());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(feature = "tempo")]
-use {alloy_primitives::B256, tempo_primitives::transaction::KeyAuthorization};
+use {alloy_primitives::B256, tempo_alloy::primitives::transaction::KeyAuthorization};
 
 /// Response format for API endpoints.
 /// - `Ok(T)` serializes as: {"status":"ok","data": ...}
@@ -172,7 +172,7 @@ pub struct BrowserKeyAuthorizationResponse {
     pub id: Uuid,
     /// `0x`-prefixed RLP-encoded `SignedKeyAuthorization` produced by the
     /// wallet. Decoded server-side via the existing
-    /// `tempo_primitives::transaction::SignedKeyAuthorization::decode` impl.
+    /// `tempo_alloy::primitives::transaction::SignedKeyAuthorization::decode` impl.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_hex: Option<String>,
     /// Error message if signing was rejected or failed.

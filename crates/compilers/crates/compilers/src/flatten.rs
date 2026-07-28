@@ -1,6 +1,6 @@
 use crate::{
-    ArtifactOutput, CompilerSettings, Graph, Project, ProjectPathsConfig, SourceParser, Updates,
-    apply_updates,
+    ArtifactOutput, Graph, Project, ProjectPathsConfig, SourceParser, Updates, VersionedSourceFile,
+    VersionedSourceFiles, apply_updates,
     compilers::{Compiler, ParsedSource},
     filter::MaybeSolData,
     resolver::parse::SolData,
@@ -192,10 +192,10 @@ impl Flattener {
     where
         C::Parser: SourceParser<ParsedSource: MaybeSolData>,
     {
-        // Configure project to compile the target file and only request AST for target file.
+        // Configure every settings profile to request only AST output when compiling the target.
         project.cached = false;
         project.no_artifacts = true;
-        project.settings.update_output_selection(|selection| {
+        project.update_output_selection(|selection| {
             *selection = OutputSelection::ast_output_selection();
         });
 
@@ -222,12 +222,23 @@ impl Flattener {
             sources
         };
 
-        let sources = Source::read_all(&ordered_sources)?;
+        let mut sources = Source::read_all(&ordered_sources)?;
+
+        // AST IDs are only unique within a single compiler invocation. Select a target build only
+        // if it produced an AST for every source, then use that build exclusively.
+        let Some(target_build_id) =
+            complete_ast_build_id(&output.sources, &ordered_sources, target)
+        else {
+            return Err(FlattenerError::Compilation(SolcError::msg(
+                "no compiler build produced ASTs for every source",
+            )));
+        };
 
         // Convert all ASTs from artifacts to strongly typed ASTs
         let mut asts: Vec<(PathBuf, SourceUnit)> = Vec::new();
         for (path, ast) in output.sources.0.iter().filter_map(|(path, files)| {
-            if let Some(ast) = files.first().and_then(|source| source.source_file.ast.as_ref())
+            let source = source_with_ast(files, &target_build_id);
+            if let Some(ast) = source.and_then(|source| source.source_file.ast.as_ref())
                 && sources.contains_key(path)
             {
                 return Some((path, ast));
@@ -235,6 +246,15 @@ impl Flattener {
             None
         }) {
             asts.push((PathBuf::from(path), serde_json::from_str(&serde_json::to_string(ast)?)?));
+        }
+
+        // Prune intermediary-only sources. If semantic resolution fails, retain the complete
+        // dependency closure.
+        let mut ordered_sources = ordered_sources;
+        if let Some(retained) = collect_semantic_sources(target, &asts) {
+            ordered_sources.retain(|path| retained.contains(path));
+            sources.retain(|path, _| retained.contains(path));
+            asts.retain(|(path, _)| retained.contains(path));
         }
 
         Ok(Self {
@@ -784,6 +804,117 @@ impl Flattener {
     }
 }
 
+/// Returns the ID of a target build that produced an AST for every source.
+fn complete_ast_build_id(
+    sources: &VersionedSourceFiles,
+    paths: &[PathBuf],
+    target: &Path,
+) -> Option<String> {
+    sources.0.get(target)?.iter().find_map(|target_source| {
+        let build_id = &target_source.build_id;
+        (target_source.source_file.ast.is_some()
+            && paths.iter().all(|path| {
+                sources.0.get(path).is_some_and(|files| source_with_ast(files, build_id).is_some())
+            }))
+        .then(|| build_id.clone())
+    })
+}
+
+/// Returns the source produced by the selected build only if it contains an AST.
+fn source_with_ast<'a>(
+    files: &'a [VersionedSourceFile],
+    build_id: &str,
+) -> Option<&'a VersionedSourceFile> {
+    files.iter().find(|source| source.build_id == build_id && source.source_file.ast.is_some())
+}
+
+/// Collects source units selected by imports, resolving named imports to their declaration owners.
+/// Returns `None` if the AST data is incomplete or inconsistent.
+fn collect_semantic_sources(
+    target: &Path,
+    asts: &[(PathBuf, SourceUnit)],
+) -> Option<HashSet<PathBuf>> {
+    let mut asts_by_path = HashMap::new();
+    let mut source_units = HashMap::new();
+    let mut declaration_owners = HashMap::new();
+
+    for (path, ast) in asts {
+        asts_by_path.insert(path.clone(), ast);
+        if source_units.insert(ast.id, path.clone()).is_some() {
+            return None;
+        }
+        for node in &ast.nodes {
+            if let Some(id) = top_level_declaration_id(node)
+                && declaration_owners.insert(id, path.clone()).is_some()
+            {
+                return None;
+            }
+        }
+    }
+
+    let mut retained = HashSet::new();
+    let mut pending = vec![target.to_path_buf()];
+
+    while let Some(path) = pending.pop() {
+        if !retained.insert(path.clone()) {
+            continue;
+        }
+        let ast = asts_by_path.get(&path)?;
+
+        for import in ast.nodes.iter().filter_map(|node| match node {
+            SourceUnitPart::ImportDirective(import) => Some(import),
+            _ => None,
+        }) {
+            if import.symbol_aliases.is_empty() {
+                pending.push(source_units.get(&import.source_unit)?.clone());
+                continue;
+            }
+
+            for alias in &import.symbol_aliases {
+                let mut ids = alias
+                    .foreign
+                    .overloaded_declarations
+                    .iter()
+                    .map(|id| usize::try_from(*id).ok())
+                    .collect::<Option<HashSet<_>>>()?;
+                if let Some(id) = alias.foreign.referenced_declaration
+                    && let Ok(id) = usize::try_from(id)
+                {
+                    ids.insert(id);
+                }
+                if ids.is_empty() {
+                    let imported_path = source_units.get(&import.source_unit)?;
+                    let imported_ast = asts_by_path.get(imported_path)?;
+                    ids.extend(imported_ast.exported_symbols.get(&alias.foreign.name)?);
+                }
+                if ids.is_empty() {
+                    return None;
+                }
+                for id in ids {
+                    pending.push(declaration_owners.get(&id)?.clone());
+                }
+            }
+        }
+    }
+
+    Some(retained)
+}
+
+/// Returns the ID of an importable top-level declaration.
+fn top_level_declaration_id(node: &SourceUnitPart) -> Option<usize> {
+    match node {
+        SourceUnitPart::VariableDeclaration(node) => Some(node.id),
+        SourceUnitPart::EnumDefinition(node) => Some(node.id),
+        SourceUnitPart::ErrorDefinition(node) => Some(node.id),
+        SourceUnitPart::EventDefinition(node) => Some(node.id),
+        SourceUnitPart::FunctionDefinition(node) => Some(node.id),
+        SourceUnitPart::StructDefinition(node) => Some(node.id),
+        SourceUnitPart::UserDefinedValueTypeDefinition(node) => Some(node.id),
+        SourceUnitPart::ContractDefinition(node) => Some(node.id),
+        _ => None,
+    }
+}
+
 /// Performs DFS to collect all dependencies of a target
 fn collect_deps<P: SourceParser<ParsedSource: MaybeSolData>>(
     path: &Path,
@@ -880,4 +1011,62 @@ pub fn combine_version_pragmas(pragmas: &[impl AsRef<str>]) -> Option<String> {
         return None;
     }
     Some(format!("pragma solidity {};", versions.iter().format(" ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use foundry_compilers_artifacts::SourceFile;
+    use semver::Version;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn versioned_source(build_id: &str, has_ast: bool) -> VersionedSourceFile {
+        VersionedSourceFile {
+            source_file: SourceFile {
+                id: 0,
+                ast: has_ast.then(|| {
+                    serde_json::from_value(json!({
+                        "absolutePath": "source.sol",
+                        "exportedSymbols": {},
+                        "id": 0,
+                        "nodeType": "SourceUnit",
+                        "nodes": [],
+                        "src": "0:0:0"
+                    }))
+                    .unwrap()
+                }),
+            },
+            version: Version::new(0, 8, 30),
+            build_id: build_id.to_string(),
+            profile: "default".to_string(),
+        }
+    }
+
+    #[test]
+    fn complete_ast_build_ignores_incomplete_target_build() {
+        let paths = vec![PathBuf::from("A.sol"), PathBuf::from("B.sol")];
+        let mut sources = VersionedSourceFiles(BTreeMap::from([
+            (
+                paths[0].clone(),
+                vec![versioned_source("incomplete", false), versioned_source("complete", true)],
+            ),
+            (
+                paths[1].clone(),
+                vec![
+                    versioned_source("incomplete", true),
+                    versioned_source("complete", false),
+                    versioned_source("complete", true),
+                ],
+            ),
+        ]));
+
+        assert_eq!(
+            complete_ast_build_id(&sources, &paths, &paths[0]),
+            Some("complete".to_string())
+        );
+
+        sources.0.get_mut(&paths[1]).unwrap().retain(|source| source.build_id == "incomplete");
+        assert_eq!(complete_ast_build_id(&sources, &paths, &paths[0]), None);
+    }
 }

@@ -202,7 +202,7 @@ alloy-sol-types = "1.6.0"
 alloy-chains = "0.2.34"
 
 # tempo
-tempo-primitives = { version = "1.8.0", default-features = false, features = ["std", "serde"] }
+tempo-alloy = { version = "1.10.1", git = "https://github.com/tempoxyz/tempo", rev = "ddbe8350c5b449a6bb98660e21bb6e9107f3cbe1", default-features = false }
 
 # misc
 async-trait = "0.1.89"
@@ -217,7 +217,6 @@ path-slash = "0.2.1"
 rayon = "1.11.0"
 regex = "1.11.3"
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls"] }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }

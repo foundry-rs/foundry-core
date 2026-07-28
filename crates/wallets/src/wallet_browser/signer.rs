@@ -14,7 +14,7 @@ use crate::wallet_browser::{
 };
 
 #[cfg(feature = "tempo")]
-use tempo_primitives::transaction::{KeyAuthorization, SignedKeyAuthorization};
+use tempo_alloy::primitives::transaction::{KeyAuthorization, SignedKeyAuthorization};
 
 #[derive(Clone, Debug)]
 pub struct BrowserSigner<N: Network> {
