@@ -94,7 +94,7 @@ private func accessControl(policy: Int32) throws -> SecAccessControl {
 }
 
 /// Maps a LocalAuthentication/Security failure onto a shim status.
-private func classify(_ error: Error) -> ShimError {
+private func classify(_ error: Error, policy: Int32) -> ShimError {
     let ns = error as NSError
     if ns.domain == LAError.errorDomain, let code = LAError.Code(rawValue: ns.code) {
         switch code {
@@ -104,6 +104,13 @@ private func classify(_ error: Error) -> ShimError {
             return ShimError(status: statusFailure, message: "authentication failed")
         case .biometryLockout:
             return ShimError(status: statusLockedOut, message: ns.localizedDescription)
+        case .biometryNotEnrolled where policy == policyCurrentBiometry:
+            // Under `.biometryCurrentSet`, removing the enrolled biometrics
+            // permanently invalidates the wrap key: "no biometrics enrolled"
+            // is the invalidation itself, not a recoverable environment.
+            return ShimError(
+                status: statusInvalidated,
+                message: "biometric enrollment changed since this keystore was enrolled")
         case .passcodeNotSet, .biometryNotAvailable, .biometryNotEnrolled, .notInteractive:
             return ShimError(status: statusUnavailable, message: ns.localizedDescription)
         default: break
@@ -145,7 +152,7 @@ private func preauthenticate(_ context: LAContext, policy: Int32, reason: String
             throw ShimError(
                 status: statusFailure, message: "policy evaluation failed without an error")
         }
-        throw classify(check)
+        throw classify(check, policy: policy)
     }
 
     let done = DispatchSemaphore(value: 0)
@@ -158,7 +165,7 @@ private func preauthenticate(_ context: LAContext, policy: Int32, reason: String
     }
     done.wait()
     if let failure {
-        throw classify(failure)
+        throw classify(failure, policy: policy)
     }
 }
 
