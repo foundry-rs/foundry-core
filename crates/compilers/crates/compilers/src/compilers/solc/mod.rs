@@ -70,7 +70,7 @@ impl Compiler for SolcCompiler {
         solc.extra_args.extend_from_slice(&input.cli_settings.extra_args);
 
         let solc_output = solc.compile(&input.input)?;
-        compiler_output(input, solc_output)
+        compiler_output(&solc, input, solc_output)
     }
 
     fn available_versions(&self, _language: &Self::Language) -> Vec<CompilerVersion> {
@@ -108,10 +108,11 @@ impl Compiler for SolcCompiler {
 }
 
 fn compiler_output(
+    solc: &Solc,
     input: &SolcVersionedInput,
     output: foundry_compilers_artifacts::CompilerOutput,
 ) -> Result<CompilerOutput<Error, Contract>> {
-    let build_info = lossless_build_info(input, &output)?;
+    let build_info = lossless_build_info(solc, input, &output)?;
     let foundry_compilers_artifacts::CompilerOutput { errors, sources, contracts } = output;
     Ok(CompilerOutput {
         errors,
@@ -143,6 +144,7 @@ fn filesystem_projection<T>(
 }
 
 fn lossless_build_info(
+    solc: &Solc,
     input: &SolcVersionedInput,
     output: &foundry_compilers_artifacts::CompilerOutput,
 ) -> Result<Option<Box<super::BuildInfoPayload>>> {
@@ -156,27 +158,26 @@ fn lossless_build_info(
         .get_mut("sources")
         .and_then(serde_json::Value::as_object_mut)
         .ok_or_else(|| SolcError::msg("compiler input does not contain a sources object"))?;
-    let original_sources = input_sources.clone();
+    let input_names = input_sources.keys().cloned().collect::<Vec<_>>();
 
-    // Build-info consumers expect source content under every output source unit name. Add
-    // byte-identical content for path-equivalent aliases emitted by solc. This creates a
-    // self-consistent compatibility context, not an exact copy of the input originally sent to
-    // solc.
+    // Exact input names use the potentially preprocessed standard JSON content. Path-equivalent
+    // aliases were loaded separately by Solc's filesystem callback, so recover their disk content
+    // using the same search roots rather than assuming it is identical to the input.
     for output_name in output.sources.keys() {
         if input_sources.contains_key(output_name.as_str()) {
             continue;
         }
 
-        let mut matches = original_sources
-            .iter()
-            .filter(|(input_name, _)| Path::new(input_name) == output_name.as_path());
-        let Some((_, source)) = matches.next() else { continue };
+        let mut matches =
+            input_names.iter().filter(|input_name| Path::new(input_name) == output_name.as_path());
+        let Some(_) = matches.next() else { continue };
         if matches.next().is_some() {
             return Err(SolcError::msg(format!(
                 "multiple compiler input sources match output source unit `{output_name}`"
             )));
         }
-        input_sources.insert(output_name.to_string(), source.clone());
+        let content = solc.read_source_unit(output_name.as_str())?;
+        input_sources.insert(output_name.to_string(), serde_json::json!({ "content": content }));
     }
 
     let source_id_to_path = output
@@ -633,7 +634,11 @@ mod tests {
         },
     };
 
-    use super::compiler_output;
+    use super::{Solc, compiler_output};
+
+    fn solc() -> Solc {
+        Solc::new_with_version("solc", Version::new(0, 8, 26))
+    }
 
     #[test]
     fn uses_standard_build_info_without_path_equivalent_source_units() {
@@ -652,7 +657,7 @@ mod tests {
             errors: Vec::new(),
         };
 
-        assert!(compiler_output(&input, output).unwrap().build_info.is_none());
+        assert!(compiler_output(&solc(), &input, output).unwrap().build_info.is_none());
     }
 
     #[test]
@@ -688,7 +693,14 @@ mod tests {
             errors: Vec::new(),
         };
 
-        let output = compiler_output(&input, output).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("src/file.sol");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "contract File {}").unwrap();
+        let mut solc = solc();
+        solc.base_path = Some(temp.path().to_path_buf());
+
+        let output = compiler_output(&solc, &input, output).unwrap();
         assert_eq!(output.sources[Path::new("src/file.sol")].id, 2);
         assert_eq!(output.sources[Path::new("generated.sol")].id, 3);
 

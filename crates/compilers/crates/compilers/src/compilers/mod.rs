@@ -289,6 +289,9 @@ impl<E, C> CompilerOutput<E, C> {
     }
 
     pub fn merge(&mut self, other: Self) {
+        // A build-info payload describes one compiler invocation and cannot represent merged
+        // outputs. Clear it before changing the projected sources and contracts.
+        self.build_info = None;
         self.errors.extend(other.errors);
         self.contracts.extend(other.contracts);
         self.sources.extend(other.sources);
@@ -324,6 +327,36 @@ impl<E, C> Default for CompilerOutput<E, C> {
             sources: BTreeMap::new(),
             metadata: BTreeMap::new(),
             build_info: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BuildInfoPayload, CompilerOutput};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn merging_outputs_clears_build_info_payload() {
+        let payload = || {
+            Some(Box::new(BuildInfoPayload {
+                input: serde_json::Value::Null,
+                output: serde_json::Value::Null,
+                source_id_to_path: BTreeMap::new(),
+            }))
+        };
+
+        for (left, right) in [(true, false), (false, true), (true, true)] {
+            let mut output = CompilerOutput::<(), ()> {
+                build_info: left.then(payload).flatten(),
+                ..Default::default()
+            };
+            let other =
+                CompilerOutput { build_info: right.then(payload).flatten(), ..Default::default() };
+
+            output.merge(other);
+
+            assert!(output.build_info.is_none());
         }
     }
 }
