@@ -49,9 +49,6 @@ alloy-signer-turnkey = { workspace = true, features = ["eip712"], optional = tru
 # tempo
 tempo-alloy = { workspace = true, optional = true }
 alloy-rlp = { workspace = true, optional = true }
-alloy-json-rpc = { version = "2.2.0", default-features = false, optional = true }
-alloy-provider = { version = "2.2.0", default-features = false, optional = true }
-alloy-transport = { version = "2.2.0", default-features = false, optional = true }
 
 async-trait.workspace = true
 clap = { version = "4.6.1", features = ["derive", "env", "unicode", "wrap_help"] }
@@ -84,13 +81,7 @@ tokio = { workspace = true, features = ["macros"] }
 
 [features]
 browser = ["dep:axum", "dep:tokio", "dep:uuid", "dep:webbrowser", "dep:tower", "dep:tower-http"]
-tempo = [
-    "dep:tempo-alloy",
-    "dep:alloy-rlp",
-    "dep:alloy-json-rpc",
-    "dep:alloy-provider",
-    "dep:alloy-transport",
-]
+tempo = ["dep:tempo-alloy", "dep:alloy-rlp"]
 aws-kms = ["dep:alloy-signer-aws", "dep:aws-config", "dep:aws-smithy-time-compat"]
 gcp-kms = ["dep:alloy-signer-gcp"]
 turnkey = ["dep:alloy-signer-turnkey"]

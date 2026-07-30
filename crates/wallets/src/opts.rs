@@ -1,191 +1,15 @@
 #[cfg(feature = "tempo")]
 use crate::TempoAccountsWallet;
 use crate::{signer::WalletSigner, utils, wallet_raw::RawWalletOpts};
-#[cfg(feature = "tempo")]
-use alloy_consensus::Transaction;
-#[cfg(feature = "tempo")]
-use alloy_network::{NetworkWallet, TransactionBuilder};
 use alloy_primitives::Address;
-#[cfg(feature = "tempo")]
-use alloy_provider::{Provider, SendableTx, fillers::FillerControlFlow, fillers::TxFiller};
-#[cfg(feature = "tempo")]
-use alloy_transport::TransportResult;
 use clap::Parser;
 use eyre::Result;
 use serde::Serialize;
+
+/// When the `tempo` feature is enabled this is [`TempoAccountsWallet`];
+/// otherwise it is `()` so the API shape stays the same.
 #[cfg(feature = "tempo")]
-use tempo_alloy::{
-    TempoNetwork,
-    accounts::TempoAccessKey,
-    primitives::{TempoTxEnvelope, transaction::TempoTypedTransaction},
-    rpc::TempoTransactionRequest,
-};
-
-/// A Tempo wallet restricted to the account and optional chain selected by
-/// [`WalletOpts`].
-#[cfg(feature = "tempo")]
-#[derive(Clone, Debug)]
-pub struct MaybeTempoWallet {
-    inner: TempoAccountsWallet,
-    account: Address,
-    chain_id: Option<u64>,
-}
-
-#[cfg(feature = "tempo")]
-impl MaybeTempoWallet {
-    const fn new(inner: TempoAccountsWallet, account: Address, chain_id: Option<u64>) -> Self {
-        let inner = match chain_id {
-            Some(chain_id) => inner.with_chain_id(chain_id),
-            None => inner,
-        };
-        Self { inner, account, chain_id }
-    }
-
-    /// Account this wallet is permitted to sign for.
-    pub const fn account(&self) -> Address {
-        self.account
-    }
-
-    /// Chain this wallet is pinned to, when one was selected by the caller.
-    pub const fn chain_id(&self) -> Option<u64> {
-        self.chain_id
-    }
-
-    fn scope_request(
-        &self,
-        request: &mut TempoTransactionRequest,
-    ) -> std::result::Result<(), TempoWalletPolicyError> {
-        if let Some(actual) = request.from()
-            && actual != self.account
-        {
-            return Err(TempoWalletPolicyError::SenderMismatch { expected: self.account, actual });
-        }
-        request.set_from(self.account);
-
-        if let Some(expected) = self.chain_id {
-            if let Some(actual) = request.chain_id()
-                && actual != expected
-            {
-                return Err(TempoWalletPolicyError::ChainMismatch { expected, actual });
-            }
-            request.set_chain_id(expected);
-        }
-        Ok(())
-    }
-
-    fn validate_transaction(
-        &self,
-        sender: Address,
-        tx: &TempoTypedTransaction,
-    ) -> std::result::Result<(), TempoWalletPolicyError> {
-        if sender != self.account {
-            return Err(TempoWalletPolicyError::SenderMismatch {
-                expected: self.account,
-                actual: sender,
-            });
-        }
-        if let Some(expected) = self.chain_id {
-            let actual = tx.chain_id().ok_or(TempoWalletPolicyError::MissingChainId(expected))?;
-            if actual != expected {
-                return Err(TempoWalletPolicyError::ChainMismatch { expected, actual });
-            }
-        }
-        Ok(())
-    }
-}
-
-#[cfg(feature = "tempo")]
-#[derive(Debug, thiserror::Error)]
-enum TempoWalletPolicyError {
-    #[error("Tempo wallet is scoped to account {expected}, but the request selected {actual}")]
-    SenderMismatch { expected: Address, actual: Address },
-    #[error("Tempo wallet is pinned to chain {expected}, but the request selected {actual}")]
-    ChainMismatch { expected: u64, actual: u64 },
-    #[error("Tempo wallet is pinned to chain {0}, but the transaction has no chain ID")]
-    MissingChainId(u64),
-}
-
-#[cfg(feature = "tempo")]
-impl NetworkWallet<TempoNetwork> for MaybeTempoWallet {
-    fn default_signer_address(&self) -> Address {
-        self.account
-    }
-
-    fn has_signer_for(&self, address: &Address) -> bool {
-        *address == self.account && self.inner.has_signer_for(address)
-    }
-
-    fn signer_addresses(&self) -> impl Iterator<Item = Address> {
-        std::iter::once(self.account)
-    }
-
-    async fn sign_transaction_from(
-        &self,
-        sender: Address,
-        tx: TempoTypedTransaction,
-    ) -> alloy_signer::Result<TempoTxEnvelope> {
-        self.validate_transaction(sender, &tx).map_err(alloy_signer::Error::other)?;
-        self.inner.sign_transaction_from(sender, tx).await
-    }
-
-    async fn sign_request(
-        &self,
-        mut request: TempoTransactionRequest,
-    ) -> alloy_signer::Result<TempoTxEnvelope> {
-        self.scope_request(&mut request).map_err(alloy_signer::Error::other)?;
-        self.inner.sign_request(request).await
-    }
-}
-
-#[cfg(feature = "tempo")]
-impl TxFiller<TempoNetwork> for MaybeTempoWallet {
-    type Fillable = TempoAccessKey;
-
-    fn status(&self, request: &TempoTransactionRequest) -> FillerControlFlow {
-        self.inner.status(request)
-    }
-
-    fn fill_sync(&self, tx: &mut SendableTx<TempoNetwork>) {
-        if let Some(request) = tx.as_mut_builder()
-            && self.scope_request(request).is_ok()
-        {
-            self.inner.fill_sync(tx);
-        }
-    }
-
-    async fn prepare<P: Provider<TempoNetwork>>(
-        &self,
-        provider: &P,
-        request: &TempoTransactionRequest,
-    ) -> TransportResult<Self::Fillable> {
-        let mut request = request.clone();
-        self.scope_request(&mut request).map_err(alloy_json_rpc::RpcError::local_usage)?;
-        self.inner.prepare(provider, &request).await
-    }
-
-    async fn fill(
-        &self,
-        fillable: Self::Fillable,
-        mut tx: SendableTx<TempoNetwork>,
-    ) -> TransportResult<SendableTx<TempoNetwork>> {
-        if let Some(request) = tx.as_mut_builder() {
-            self.scope_request(request).map_err(alloy_json_rpc::RpcError::local_usage)?;
-        }
-        self.inner.fill(fillable, tx).await
-    }
-
-    async fn prepare_call(&self, request: &mut TempoTransactionRequest) -> TransportResult<()> {
-        self.scope_request(request).map_err(alloy_json_rpc::RpcError::local_usage)?;
-        self.inner.prepare_call(request).await
-    }
-
-    fn prepare_call_sync(&self, request: &mut TempoTransactionRequest) -> TransportResult<()> {
-        self.scope_request(request).map_err(alloy_json_rpc::RpcError::local_usage)?;
-        self.inner.prepare_call_sync(request)
-    }
-}
-
-/// Without the `tempo` feature the placeholder keeps the API shape unchanged.
+pub type MaybeTempoWallet = TempoAccountsWallet;
 #[cfg(not(feature = "tempo"))]
 pub type MaybeTempoWallet = ();
 
@@ -319,7 +143,7 @@ impl WalletOpts {
     /// Attempts to resolve a signer from the configured wallet options.
     ///
     /// Returns the signer and, when the `tempo` feature is enabled and Tempo Accounts mode is
-    /// used, a [`MaybeTempoWallet`] owning the scoped signing context.
+    /// used, a [`TempoAccountsWallet`] owning the complete signing context.
     ///
     /// Returns `Ok((None, None))` if no wallet option was configured and no Tempo fallback
     /// matched.
@@ -354,7 +178,10 @@ impl WalletOpts {
             })?;
             let signer = utils::create_local_signer(access_key)?;
             let wallet = TempoAccountsWallet::from_secp256k1(root_account, signer, None);
-            let wallet = MaybeTempoWallet::new(wallet, root_account, chain_id);
+            let wallet = match chain_id {
+                Some(chain_id) => wallet.with_chain_id(chain_id),
+                None => wallet,
+            };
             return Ok((None, Some(wallet)));
         }
 
@@ -415,7 +242,10 @@ impl WalletOpts {
                 && let Some(wallet) = TempoAccountsWallet::try_from_default_store()?
                 && wallet.has_account(from)?
             {
-                let wallet = MaybeTempoWallet::new(wallet, from, chain_id);
+                let wallet = match chain_id {
+                    Some(chain_id) => wallet.with_chain_id(chain_id),
+                    None => wallet,
+                };
                 return Ok((None, Some(wallet)));
             }
 
@@ -464,12 +294,8 @@ impl From<RawWalletOpts> for WalletOpts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "tempo")]
-    use alloy_primitives::B256;
     #[allow(redundant_imports)]
     use alloy_signer::Signer;
-    #[cfg(feature = "tempo")]
-    use alloy_signer_local::PrivateKeySigner;
     use std::{path::Path, str::FromStr};
 
     #[tokio::test]
@@ -545,36 +371,7 @@ mod tests {
 
         let (signer, tempo_wallet) = wallet.maybe_signer().await.unwrap();
         assert!(signer.is_none());
-        assert_eq!(tempo_wallet.unwrap().account(), account);
-    }
-
-    #[cfg(feature = "tempo")]
-    #[test]
-    fn tempo_wallet_enforces_selected_account_and_chain() {
-        let account = Address::repeat_byte(0x11);
-        let signer = PrivateKeySigner::from_bytes(&B256::from([1_u8; 32])).unwrap();
-        let wallet = MaybeTempoWallet::new(
-            TempoAccountsWallet::from_secp256k1(account, signer, None),
-            account,
-            Some(4217),
-        );
-
-        let mut request = TempoTransactionRequest::default();
-        wallet.scope_request(&mut request).unwrap();
-        assert_eq!(request.from(), Some(account));
-        assert_eq!(request.chain_id(), Some(4217));
-
-        request.set_from(Address::repeat_byte(0x22));
-        assert!(matches!(
-            wallet.scope_request(&mut request),
-            Err(TempoWalletPolicyError::SenderMismatch { .. })
-        ));
-
-        request.set_from(account);
-        request.set_chain_id(9999);
-        assert!(matches!(
-            wallet.scope_request(&mut request),
-            Err(TempoWalletPolicyError::ChainMismatch { expected: 4217, actual: 9999 })
-        ));
+        let tempo_wallet: TempoAccountsWallet = tempo_wallet.unwrap();
+        assert_eq!(tempo_wallet.account(), account);
     }
 }
