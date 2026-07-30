@@ -637,7 +637,7 @@ mod tests {
     use super::{Solc, compiler_output};
 
     fn solc() -> Solc {
-        Solc::new_with_version("solc", Version::new(0, 8, 26))
+        Solc::new("solc").unwrap_or_else(|_| Solc::new_with_version("solc", Version::new(0, 8, 26)))
     }
 
     #[test]
