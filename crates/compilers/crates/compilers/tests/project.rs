@@ -3000,7 +3000,7 @@ fn can_compile_std_json_input() {
     if let Ok(solc) = Solc::find_or_install(&Version::new(0, 8, 28)) {
         let out = solc.compile(&input).unwrap();
         assert!(out.errors.is_empty());
-        assert!(out.sources.contains_key(Path::new("lib/ds-test/src/test.sol")));
+        assert!(out.sources.contains_key("lib/ds-test/src/test.sol"));
     }
 }
 
@@ -3280,7 +3280,7 @@ async fn can_install_solc_and_compile_std_json_input_async() {
 
     let out = solc.async_compile(&input).await.unwrap();
     assert!(!out.has_error());
-    assert!(out.sources.contains_key(&PathBuf::from("lib/ds-test/src/test.sol")));
+    assert!(out.sources.contains_key("lib/ds-test/src/test.sol"));
 }
 
 #[test]

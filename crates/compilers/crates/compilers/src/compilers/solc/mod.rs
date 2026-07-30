@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use foundry_compilers_artifacts::{
-    BytecodeHash, Contract, Error, EvmVersion, Settings, Severity, SolcInput,
+    BytecodeHash, Contract, Error, EvmVersion, Settings, Severity, SolcInput, SourceUnitName,
     error::SourceLocation,
     output_selection::OutputSelection,
     remappings::Remapping,
@@ -22,7 +22,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
 };
@@ -70,15 +70,7 @@ impl Compiler for SolcCompiler {
         solc.extra_args.extend_from_slice(&input.cli_settings.extra_args);
 
         let solc_output = solc.compile(&input.input)?;
-
-        let output = CompilerOutput {
-            errors: solc_output.errors,
-            contracts: solc_output.contracts,
-            sources: solc_output.sources,
-            metadata: BTreeMap::new(),
-        };
-
-        Ok(output)
+        compiler_output(input, solc_output)
     }
 
     fn available_versions(&self, _language: &Self::Language) -> Vec<CompilerVersion> {
@@ -113,6 +105,95 @@ impl Compiler for SolcCompiler {
             }
         }
     }
+}
+
+fn compiler_output(
+    input: &SolcVersionedInput,
+    output: foundry_compilers_artifacts::CompilerOutput,
+) -> Result<CompilerOutput<Error, Contract>> {
+    let build_info = lossless_build_info(input, &output)?;
+    let foundry_compilers_artifacts::CompilerOutput { errors, sources, contracts } = output;
+    Ok(CompilerOutput {
+        errors,
+        sources: filesystem_projection(&input.input, sources),
+        contracts: filesystem_projection(&input.input, contracts),
+        metadata: BTreeMap::new(),
+        build_info,
+    })
+}
+
+fn filesystem_projection<T>(
+    input: &SolcInput,
+    output: BTreeMap<SourceUnitName, T>,
+) -> BTreeMap<PathBuf, T> {
+    let input_names = input.sources.keys().filter_map(|path| path.to_str()).collect::<HashSet<_>>();
+    let (exact, aliases): (Vec<_>, Vec<_>) =
+        output.into_iter().partition(|(name, _)| input_names.contains(name.as_str()));
+    let mut selected = BTreeMap::new();
+
+    // Insert exact input names last so they deterministically represent path-equivalent source
+    // units in the filesystem-oriented output used for artifacts and caching.
+    for (name, value) in aliases.into_iter().chain(exact) {
+        let path = PathBuf::from(name.as_str());
+        selected.remove(&path);
+        selected.insert(path, value);
+    }
+
+    selected
+}
+
+fn lossless_build_info(
+    input: &SolcVersionedInput,
+    output: &foundry_compilers_artifacts::CompilerOutput,
+) -> Result<Option<Box<super::BuildInfoPayload>>> {
+    if !path_projection_is_lossy(&output.sources) && !path_projection_is_lossy(&output.contracts) {
+        return Ok(None);
+    }
+
+    let mut serialized_input = serde_json::to_value(input)?;
+    let serialized_output = serde_json::to_value(output)?;
+    let input_sources = serialized_input
+        .get_mut("sources")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| SolcError::msg("compiler input does not contain a sources object"))?;
+    let original_sources = input_sources.clone();
+
+    // Build-info consumers expect source content under every output source unit name. Add
+    // byte-identical content for path-equivalent aliases emitted by solc. This creates a
+    // self-consistent compatibility context, not an exact copy of the input originally sent to
+    // solc.
+    for output_name in output.sources.keys() {
+        if input_sources.contains_key(output_name.as_str()) {
+            continue;
+        }
+
+        let mut matches = original_sources
+            .iter()
+            .filter(|(input_name, _)| Path::new(input_name) == output_name.as_path());
+        let Some((_, source)) = matches.next() else { continue };
+        if matches.next().is_some() {
+            return Err(SolcError::msg(format!(
+                "multiple compiler input sources match output source unit `{output_name}`"
+            )));
+        }
+        input_sources.insert(output_name.to_string(), source.clone());
+    }
+
+    let source_id_to_path = output
+        .sources
+        .iter()
+        .map(|(name, source)| (source.id, PathBuf::from(name.as_str())))
+        .collect();
+    Ok(Some(Box::new(super::BuildInfoPayload {
+        input: serialized_input,
+        output: serialized_output,
+        source_id_to_path,
+    })))
+}
+
+fn path_projection_is_lossy<T>(output: &BTreeMap<SourceUnitName, T>) -> bool {
+    let mut paths = BTreeSet::new();
+    output.keys().any(|name| !paths.insert(name.as_path()))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -533,8 +614,15 @@ impl CompilationError for Error {
 
 #[cfg(test)]
 mod tests {
-    use foundry_compilers_artifacts::{CompilerOutput, SolcLanguage};
+    use foundry_compilers_artifacts::{
+        CompilerOutput, Contract, SolcLanguage, SourceFile,
+        sources::{Source, Sources},
+    };
     use semver::Version;
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+    };
 
     use crate::{
         AggregatedCompilerOutput,
@@ -544,6 +632,83 @@ mod tests {
             solc::{SolcCompiler, SolcVersionedInput},
         },
     };
+
+    use super::compiler_output;
+
+    #[test]
+    fn uses_standard_build_info_without_path_equivalent_source_units() {
+        let input = SolcVersionedInput::build(
+            Sources::from([(PathBuf::from("src/file.sol"), Source::new("contract File {}"))]),
+            Default::default(),
+            SolcLanguage::Solidity,
+            Version::new(0, 8, 26),
+        );
+        let output = CompilerOutput {
+            sources: BTreeMap::from([(
+                "src/file.sol".to_string().into(),
+                SourceFile { id: 1, ast: None },
+            )]),
+            contracts: BTreeMap::new(),
+            errors: Vec::new(),
+        };
+
+        assert!(compiler_output(&input, output).unwrap().build_info.is_none());
+    }
+
+    #[test]
+    fn preserves_lossless_build_info_for_path_equivalent_source_units() {
+        let input = SolcVersionedInput::build(
+            Sources::from([(PathBuf::from("src/file.sol"), Source::new("contract File {}"))]),
+            Default::default(),
+            SolcLanguage::Solidity,
+            Version::new(0, 8, 26),
+        );
+        let output = CompilerOutput {
+            sources: BTreeMap::from([
+                ("src//file.sol".to_string().into(), SourceFile { id: 1, ast: None }),
+                ("src/file.sol".to_string().into(), SourceFile { id: 2, ast: None }),
+                ("generated.sol".to_string().into(), SourceFile { id: 3, ast: None }),
+            ]),
+            contracts: BTreeMap::from([
+                (
+                    "src//file.sol".to_string().into(),
+                    BTreeMap::from([(
+                        "Alias".to_string(),
+                        serde_json::from_str::<Contract>("{}").unwrap(),
+                    )]),
+                ),
+                (
+                    "src/file.sol".to_string().into(),
+                    BTreeMap::from([(
+                        "Exact".to_string(),
+                        serde_json::from_str::<Contract>("{}").unwrap(),
+                    )]),
+                ),
+            ]),
+            errors: Vec::new(),
+        };
+
+        let output = compiler_output(&input, output).unwrap();
+        assert_eq!(output.sources[Path::new("src/file.sol")].id, 2);
+        assert_eq!(output.sources[Path::new("generated.sol")].id, 3);
+
+        let build_info = RawBuildInfo::new(&input, &output, true).unwrap();
+        let input_sources = &build_info.build_info["input"]["sources"];
+        assert_eq!(input_sources["src//file.sol"], input_sources["src/file.sol"]);
+        let output_sources = &build_info.build_info["output"]["sources"];
+        assert_eq!(output_sources["src//file.sol"]["id"], 1);
+        assert_eq!(output_sources["src/file.sol"]["id"], 2);
+        assert!(build_info.build_info["output"]["contracts"].get("src//file.sol").is_some());
+        assert!(build_info.build_info["output"]["contracts"].get("src/file.sol").is_some());
+        assert_eq!(
+            build_info.build_context.source_id_to_path,
+            BTreeMap::from([
+                (1, PathBuf::from("src//file.sol")),
+                (2, PathBuf::from("src/file.sol")),
+                (3, PathBuf::from("generated.sol")),
+            ])
+        );
+    }
 
     #[test]
     fn can_parse_declaration_error() {
@@ -574,6 +739,7 @@ mod tests {
             contracts: Default::default(),
             sources: Default::default(),
             metadata: Default::default(),
+            build_info: None,
         };
 
         let v = Version::new(0, 8, 12);

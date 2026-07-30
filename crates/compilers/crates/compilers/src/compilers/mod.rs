@@ -253,6 +253,22 @@ pub struct CompilerOutput<E, C> {
     pub sources: BTreeMap<PathBuf, SourceFile>,
     #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, serde_json::Value>,
+    /// Immutable compiler-run provenance used when the generic path-based projection would
+    /// collapse distinct source unit names. This intentionally survives transformations of the
+    /// projected output so build-info remains lossless.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub build_info: Option<Box<BuildInfoPayload>>,
+}
+
+/// A lossless build-info representation for compiler output that cannot be represented by the
+/// generic path-based output maps.
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct BuildInfoPayload {
+    pub(crate) input: serde_json::Value,
+    pub(crate) output: serde_json::Value,
+    pub(crate) source_id_to_path: BTreeMap<u32, PathBuf>,
 }
 
 impl<E, C> CompilerOutput<E, C> {
@@ -295,6 +311,7 @@ impl<E, C> CompilerOutput<E, C> {
             contracts: self.contracts,
             sources: self.sources,
             metadata: self.metadata,
+            build_info: self.build_info,
         }
     }
 }
@@ -306,6 +323,7 @@ impl<E, C> Default for CompilerOutput<E, C> {
             contracts: BTreeMap::new(),
             sources: BTreeMap::new(),
             metadata: BTreeMap::new(),
+            build_info: None,
         }
     }
 }

@@ -93,10 +93,21 @@ impl<L: Language> RawBuildInfo<L> {
         full_build_info: bool,
     ) -> Result<Self> {
         let version = input.version().clone();
-        let build_context = BuildContext::new(input, output)?;
+        let build_context = if let Some(payload) = &output.build_info {
+            BuildContext {
+                source_id_to_path: payload.source_id_to_path.clone(),
+                language: input.language(),
+            }
+        } else {
+            BuildContext::new(input, output)?
+        };
 
         let solc_short = format!("{}.{}.{}", version.major, version.minor, version.patch);
-        let input = serde_json::to_value(input)?;
+        let input = if let Some(payload) = &output.build_info {
+            payload.input.clone()
+        } else {
+            serde_json::to_value(input)?
+        };
         let id = utils::unique_hash_many([
             ETHERS_FORMAT_VERSION,
             &version.to_string(),
@@ -110,7 +121,12 @@ impl<L: Language> RawBuildInfo<L> {
             build_info.insert("solcVersion".to_string(), serde_json::to_value(&solc_short)?);
             build_info.insert("solcLongVersion".to_string(), serde_json::to_value(&version)?);
             build_info.insert("input".to_string(), input);
-            build_info.insert("output".to_string(), serde_json::to_value(output)?);
+            let output = if let Some(payload) = &output.build_info {
+                payload.output.clone()
+            } else {
+                serde_json::to_value(output)?
+            };
+            build_info.insert("output".to_string(), output);
         }
 
         Ok(Self { id, build_info, build_context })
