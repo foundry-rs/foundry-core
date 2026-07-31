@@ -16,6 +16,8 @@ use alloy_rlp as _;
 pub mod error;
 pub mod opts;
 pub mod signer;
+#[cfg(all(target_os = "macos", feature = "touch-id"))]
+pub mod touch_id;
 pub mod utils;
 #[cfg(feature = "browser")]
 pub mod wallet_browser;
