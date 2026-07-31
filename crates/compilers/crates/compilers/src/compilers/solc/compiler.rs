@@ -527,6 +527,65 @@ impl Solc {
         cmd
     }
 
+    /// Reads a source unit using the same base and include paths passed to Solc's filesystem
+    /// loader.
+    pub(super) fn read_source_unit(&self, source_unit: &str) -> Result<String> {
+        if self.extra_args.iter().any(|arg| {
+            arg == "--base-path"
+                || arg.starts_with("--base-path=")
+                || arg == "--include-path"
+                || arg.starts_with("--include-path=")
+        }) {
+            return Err(SolcError::msg(
+                "cannot recover source-unit content when extra Solc arguments override base or include paths",
+            ));
+        }
+
+        let source_unit = source_unit.strip_prefix("file://").unwrap_or(source_unit);
+        let cwd = std::env::current_dir().map_err(|err| SolcError::io(err, "."))?;
+        let child_cwd =
+            self.base_path.as_deref().map(|path| absolute_path(&cwd, path)).unwrap_or(cwd);
+        let mut roots = Vec::new();
+        if let Some(base_path) = &self.base_path
+            && SUPPORTS_BASE_PATH.matches(&self.version)
+        {
+            roots.push(absolute_path(&child_cwd, base_path));
+        }
+        if let Some(base_path) = &self.base_path
+            && SUPPORTS_BASE_PATH.matches(&self.version)
+            && SUPPORTS_INCLUDE_PATH.matches(&self.version)
+        {
+            roots.extend(
+                self.include_paths
+                    .iter()
+                    .filter(|path| path.as_path() != base_path.as_path())
+                    .map(|path| absolute_path(&child_cwd, path)),
+            );
+        }
+        let mut candidates = if roots.is_empty() {
+            vec![absolute_path(&child_cwd, Path::new(source_unit))]
+        } else {
+            roots.into_iter().map(|root| append_source_unit(&root, source_unit)).collect()
+        };
+        candidates.retain(|path| path.is_file());
+
+        let path = match candidates.as_slice() {
+            [] => {
+                return Err(SolcError::msg(format!(
+                    "source unit `{source_unit}` was emitted by Solc but could not be found in the base or include paths"
+                )));
+            }
+            [path] => path,
+            _ => {
+                return Err(SolcError::msg(format!(
+                    "source unit `{source_unit}` is ambiguous; found in {}",
+                    candidates.iter().map(|path| path.display()).format(", ")
+                )));
+            }
+        };
+        std::fs::read_to_string(path).map_err(|err| SolcError::io(err, path))
+    }
+
     /// Either finds an installed Solc version or installs it if it's not found.
     #[cfg(feature = "svm-solc")]
     pub fn find_or_install(version: &Version) -> Result<Self> {
@@ -538,6 +597,22 @@ impl Solc {
 
         Ok(solc)
     }
+}
+
+fn absolute_path(cwd: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) }
+}
+
+fn append_source_unit(root: &Path, source_unit: &str) -> PathBuf {
+    #[cfg(windows)]
+    let source_unit = source_unit.trim_start_matches(['/', '\\']);
+    #[cfg(not(windows))]
+    let source_unit = source_unit.trim_start_matches('/');
+
+    let mut path = root.as_os_str().to_os_string();
+    path.push(std::path::MAIN_SEPARATOR_STR);
+    path.push(source_unit);
+    path.into()
 }
 
 #[cfg(feature = "async")]
@@ -694,6 +769,67 @@ mod tests {
         for (_, c) in out.split().1.contracts_iter() {
             assert!(c.metadata.is_some());
         }
+    }
+
+    #[test]
+    fn reads_source_units_like_solc() {
+        let cwd = std::env::current_dir().unwrap();
+        let temp = tempfile::tempdir_in(&cwd).unwrap();
+        let relative_base = PathBuf::from(temp.path().file_name().unwrap());
+        let effective_base = temp.path().join(&relative_base);
+        let effective_include = temp.path().join("include");
+        std::fs::create_dir_all(effective_base.join("src")).unwrap();
+        std::fs::create_dir_all(effective_include.join("lib")).unwrap();
+        std::fs::write(effective_base.join("src/A.sol"), "base").unwrap();
+        std::fs::write(effective_include.join("lib/Include.sol"), "include").unwrap();
+        let absolute = temp.path().join("Absolute.sol");
+        std::fs::write(&absolute, "absolute").unwrap();
+
+        let mut configured_solc = solc();
+        configured_solc.base_path = Some(relative_base);
+        configured_solc.include_paths.insert(PathBuf::from("include"));
+
+        assert_eq!(configured_solc.read_source_unit("src/A.sol").unwrap(), "base");
+        assert_eq!(configured_solc.read_source_unit("lib/Include.sol").unwrap(), "include");
+        assert_eq!(configured_solc.read_source_unit("/src//A.sol").unwrap(), "base");
+        assert_eq!(configured_solc.read_source_unit("file://src//A.sol").unwrap(), "base");
+
+        let source = absolute.to_str().unwrap();
+        assert_eq!(solc().read_source_unit(source).unwrap(), "absolute");
+        assert_eq!(solc().read_source_unit(&format!("file://{source}")).unwrap(), "absolute");
+        configured_solc.version = Version::new(0, 6, 8);
+        assert_eq!(configured_solc.read_source_unit(source).unwrap(), "absolute");
+
+        #[cfg(not(windows))]
+        {
+            let backslash_dir = append_source_unit(&effective_base, "\\src");
+            std::fs::create_dir_all(&backslash_dir).unwrap();
+            std::fs::write(backslash_dir.join("A.sol"), "backslash").unwrap();
+            configured_solc.version = Version::new(0, 8, 26);
+            assert_eq!(configured_solc.read_source_unit("\\src/A.sol").unwrap(), "backslash");
+        }
+    }
+
+    #[test]
+    fn rejects_unreliable_source_unit_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("base");
+        let include = temp.path().join("include");
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::create_dir_all(include.join("src")).unwrap();
+        std::fs::write(base.join("src/A.sol"), "base").unwrap();
+        std::fs::write(include.join("src/A.sol"), "include").unwrap();
+
+        let mut solc = solc();
+        solc.base_path = Some(base);
+        solc.include_paths.insert(include);
+
+        let err = solc.read_source_unit("src/A.sol").unwrap_err();
+        assert!(err.to_string().contains("source unit `src/A.sol` is ambiguous"));
+
+        solc.extra_args.push("--base-path=other".to_string());
+        let err = solc.read_source_unit("src/A.sol").unwrap_err();
+        assert!(err.to_string().contains("extra Solc arguments override base or include paths"));
     }
 
     #[test]

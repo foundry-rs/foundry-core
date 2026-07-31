@@ -13,6 +13,7 @@ impl From<VyperOutput> for super::CompilerOutput<VyperCompilationError, Contract
                 .collect(),
             sources: output.sources.into_iter().map(|(k, v)| (k, v.into())).collect(),
             metadata: Default::default(),
+            build_info: None,
         }
     }
 }

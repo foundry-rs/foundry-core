@@ -45,15 +45,77 @@ use foundry_compilers_core::{
 pub use serde_helpers::{deserialize_bytes, deserialize_opt_bytes};
 pub use sources::*;
 
+/// An exact source unit name from Solidity's standard JSON interface.
+///
+/// Unlike a file system path, a source unit name preserves repeated separators and other lexical
+/// differences. Path-style accessors are provided for consumers that use source unit names as
+/// paths after compiler output has been correlated with compiler input.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SourceUnitName(String);
+
+impl SourceUnitName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn as_path(&self) -> &Path {
+        Path::new(&self.0)
+    }
+
+    pub fn display(&self) -> std::path::Display<'_> {
+        self.as_path().display()
+    }
+
+    pub fn to_string_lossy(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(&self.0)
+    }
+}
+
+impl std::ops::Deref for SourceUnitName {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for SourceUnitName {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SourceUnitName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<String> for SourceUnitName {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<SourceUnitName> for PathBuf {
+    fn from(value: SourceUnitName) -> Self {
+        value.0.into()
+    }
+}
+
 /// Solidity files are made up of multiple `source units`, a solidity contract is such a `source
 /// unit`, therefore a solidity file can contain multiple contracts: (1-N*) relationship.
 ///
 /// This types represents this mapping as `file name -> (contract name -> T)`, where the generic is
-/// intended to represent contract specific information, like [`Contract`] itself, See [`Contracts`]
+/// intended to represent contract specific information, like [`Contract`] itself.
 pub type FileToContractsMap<T> = BTreeMap<PathBuf, BTreeMap<String, T>>;
 
-/// file -> (contract name -> Contract)
-pub type Contracts = FileToContractsMap<Contract>;
+/// Source unit name -> (contract name -> Contract).
+///
+/// Source unit names in compiler output are identifiers, not file system paths, and must retain
+/// their exact spelling.
+pub type Contracts = BTreeMap<SourceUnitName, BTreeMap<String, Contract>>;
 
 pub const SOLIDITY: &str = "Solidity";
 pub const YUL: &str = "Yul";
@@ -1526,7 +1588,7 @@ pub struct CompilerOutput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<Error>,
     #[serde(default)]
-    pub sources: BTreeMap<PathBuf, SourceFile>,
+    pub sources: BTreeMap<SourceUnitName, SourceFile>,
     #[serde(default)]
     pub contracts: Contracts,
 }
@@ -1563,7 +1625,7 @@ impl CompilerOutput {
     /// bytecode, runtime bytecode, and abi
     pub fn get(&self, path: &Path, contract: &str) -> Option<CompactContractRef<'_>> {
         self.contracts
-            .get(path)
+            .get(path.to_str()?)
             .and_then(|contracts| contracts.get(contract))
             .map(CompactContractRef::from)
     }
@@ -1585,8 +1647,8 @@ impl CompilerOutput {
         // e.g. `src/utils/upgradeProxy.sol` is emitted as `src/utils/UpgradeProxy.sol`
         let files: HashSet<_> =
             files.into_iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
-        self.contracts.retain(|f, _| files.contains(&f.to_string_lossy().to_lowercase()));
-        self.sources.retain(|f, _| files.contains(&f.to_string_lossy().to_lowercase()));
+        self.contracts.retain(|f, _| files.contains(&f.to_lowercase()));
+        self.sources.retain(|f, _| files.contains(&f.to_lowercase()));
     }
 
     pub fn merge(&mut self, other: Self) {
@@ -1873,17 +1935,17 @@ impl SourceFile {
 
 /// A wrapper type for a list of source files: `path -> SourceFile`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceFiles(pub BTreeMap<PathBuf, SourceFile>);
+pub struct SourceFiles(pub BTreeMap<SourceUnitName, SourceFile>);
 
 impl SourceFiles {
     /// Returns an iterator over the source files' IDs and path.
     pub fn into_ids(self) -> impl Iterator<Item = (u32, PathBuf)> {
-        self.0.into_iter().map(|(k, v)| (v.id, k))
+        self.0.into_iter().map(|(k, v)| (v.id, k.into()))
     }
 
     /// Returns an iterator over the source files' paths and IDs.
     pub fn into_paths(self) -> impl Iterator<Item = (PathBuf, u32)> {
-        self.0.into_iter().map(|(k, v)| (k, v.id))
+        self.0.into_iter().map(|(k, v)| (k.into(), v.id))
     }
 }
 
@@ -1953,6 +2015,33 @@ mod tests {
                 panic!("Failed to read compiler output of {} {}", path.display(), err)
             });
         }
+    }
+
+    #[test]
+    fn compiler_output_preserves_source_unit_names() {
+        let output = r#"{
+            "sources": {
+                "src/file.sol": {"id": 1},
+                "src//file.sol": {"id": 2}
+            },
+            "contracts": {
+                "src/file.sol": {"Exact": {}},
+                "src//file.sol": {"Alias": {}}
+            }
+        }"#;
+
+        let output: CompilerOutput = serde_json::from_str(output).unwrap();
+        assert_eq!(output.sources.len(), 2);
+        assert_eq!(output.sources["src/file.sol"].id, 1);
+        assert_eq!(output.sources["src//file.sol"].id, 2);
+        assert!(output.contracts["src/file.sol"].contains_key("Exact"));
+        assert!(output.contracts["src//file.sol"].contains_key("Alias"));
+
+        let output = serde_json::to_value(output).unwrap();
+        assert!(output["sources"].get("src/file.sol").is_some());
+        assert!(output["sources"].get("src//file.sol").is_some());
+        assert!(output["contracts"].get("src/file.sol").is_some());
+        assert!(output["contracts"].get("src//file.sol").is_some());
     }
 
     #[test]

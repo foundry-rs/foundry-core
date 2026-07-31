@@ -3000,7 +3000,7 @@ fn can_compile_std_json_input() {
     if let Ok(solc) = Solc::find_or_install(&Version::new(0, 8, 28)) {
         let out = solc.compile(&input).unwrap();
         assert!(out.errors.is_empty());
-        assert!(out.sources.contains_key(Path::new("lib/ds-test/src/test.sol")));
+        assert!(out.sources.contains_key("lib/ds-test/src/test.sol"));
     }
 }
 
@@ -3280,7 +3280,7 @@ async fn can_install_solc_and_compile_std_json_input_async() {
 
     let out = solc.async_compile(&input).await.unwrap();
     assert!(!out.has_error());
-    assert!(out.sources.contains_key(&PathBuf::from("lib/ds-test/src/test.sol")));
+    assert!(out.sources.contains_key("lib/ds-test/src/test.sol"));
 }
 
 #[test]
@@ -4631,6 +4631,99 @@ fn can_preprocess() {
     };
     compiled.assert_success();
     assert!(!compiled.is_unchanged());
+}
+
+#[test]
+fn build_info_uses_filesystem_content_for_preprocessed_source_alias() {
+    const DISK_SOURCE: &str = r#"// disk source
+pragma solidity 0.8.26;
+contract Dependency {
+    function diskOnlyMarker() external pure returns (uint256) {
+        return 1;
+    }
+}
+"#;
+    const PREPROCESSED_MARKER: &str =
+        "// preprocessed source with a deliberately much longer leading comment";
+
+    #[derive(Debug)]
+    struct MutatingPreprocessor;
+
+    impl Preprocessor<MultiCompiler> for MutatingPreprocessor {
+        fn preprocess(
+            &self,
+            _compiler: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            _paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _mocks: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            let MultiCompilerInput::Solc(input) = input else {
+                return Ok(());
+            };
+            let source = input.input.sources.get_mut(Path::new("src/Dependency.sol")).unwrap();
+            source.content = source.content.replace("// disk source", PREPROCESSED_MARKER).into();
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.26");
+    project.project_mut().build_info = true;
+    project.project_mut().update_output_selection(|selection| {
+        selection
+            .0
+            .entry("*".to_string())
+            .or_default()
+            .insert(String::new(), vec!["ast".to_string()]);
+    });
+    project.add_source("Dependency.sol", DISK_SOURCE).unwrap();
+    project
+        .add_source(
+            "Consumer.sol",
+            r#"pragma solidity 0.8.26;
+import "src//Dependency.sol";
+contract Consumer is Dependency {}
+"#,
+        )
+        .unwrap();
+
+    let compiled = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(MutatingPreprocessor)
+        .compile()
+        .unwrap();
+    compiled.assert_success();
+
+    let build_info_path =
+        fs::read_dir(project.project().build_info_path()).unwrap().next().unwrap().unwrap().path();
+    let build_info: serde_json::Value = utils::read_json_file(&build_info_path).unwrap();
+    let exact_content =
+        build_info["input"]["sources"]["src/Dependency.sol"]["content"].as_str().unwrap();
+    let alias_content =
+        build_info["input"]["sources"]["src//Dependency.sol"]["content"].as_str().unwrap();
+    assert!(exact_content.starts_with(PREPROCESSED_MARKER));
+    assert_eq!(alias_content, DISK_SOURCE);
+    assert_ne!(exact_content, alias_content);
+
+    let alias_source = &build_info["output"]["sources"]["src//Dependency.sol"];
+    let alias_id = alias_source["id"].as_u64().unwrap() as usize;
+    let parse_src = |src: &str| {
+        let mut parts = src.split(':').map(|part| part.parse::<usize>().unwrap());
+        (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap())
+    };
+    let (start, length, id) = parse_src(alias_source["ast"]["src"].as_str().unwrap());
+    assert_eq!(start, alias_content.find("pragma").unwrap());
+    assert_eq!((start + length, id), (alias_content.len(), alias_id));
+
+    let contract = alias_source["ast"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["nodeType"] == "ContractDefinition" && node["name"] == "Dependency")
+        .unwrap();
+    let (start, length, id) = parse_src(contract["src"].as_str().unwrap());
+    assert_eq!(id, alias_id);
+    assert!(alias_content.get(start..start + length).unwrap().contains("contract Dependency"));
 }
 
 // https://github.com/foundry-rs/foundry/issues/13057
