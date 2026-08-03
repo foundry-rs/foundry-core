@@ -103,7 +103,16 @@ impl<N: Network> BrowserSigner<N> {
         };
         let signature =
             self.server.request_signing(request).await.map_err(alloy_signer::Error::other)?;
-        Signature::from_raw(&signature).map_err(alloy_signer::Error::other)
+        let signature = Signature::from_raw(&signature).map_err(alloy_signer::Error::other)?;
+        let recovered =
+            signature.recover_address_from_msg(message).map_err(alloy_signer::Error::other)?;
+        if recovered != self.address {
+            return Err(alloy_signer::Error::other(format!(
+                "Signature recovered to {recovered}, expected connected wallet address {}",
+                self.address
+            )));
+        }
+        Ok(signature)
     }
 
     /// Ask the connected browser wallet to sign dynamic EIP-712 typed data.
@@ -113,7 +122,17 @@ impl<N: Network> BrowserSigner<N> {
             .request_typed_data_signing(self.address, typed_data.clone())
             .await
             .map_err(alloy_signer::Error::other)?;
-        Signature::from_raw(&signature).map_err(alloy_signer::Error::other)
+        let signature = Signature::from_raw(&signature).map_err(alloy_signer::Error::other)?;
+        let digest = typed_data.eip712_signing_hash().map_err(alloy_signer::Error::other)?;
+        let recovered =
+            signature.recover_address_from_prehash(&digest).map_err(alloy_signer::Error::other)?;
+        if recovered != self.address {
+            return Err(alloy_signer::Error::other(format!(
+                "Signature recovered to {recovered}, expected connected wallet address {}",
+                self.address
+            )));
+        }
+        Ok(signature)
     }
 
     #[cfg(test)]
