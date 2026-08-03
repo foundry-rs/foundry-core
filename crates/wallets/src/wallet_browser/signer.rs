@@ -3,14 +3,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alloy_dyn_abi::TypedData;
 use alloy_network::{Network, TransactionBuilder};
-use alloy_primitives::{Address, B256, ChainId};
+use alloy_primitives::{Address, B256, ChainId, Signature, hex};
 use alloy_signer::Result;
 use uuid::Uuid;
 
 use crate::wallet_browser::{
     server::BrowserWalletServer,
-    types::{BrowserTransactionRequest, Connection},
+    types::{BrowserSignRequest, BrowserTransactionRequest, Connection, SignRequest, SignType},
 };
 
 #[cfg(feature = "tempo")]
@@ -88,6 +89,40 @@ impl<N: Network> BrowserSigner<N> {
             self.server.request_transaction(request).await.map_err(alloy_signer::Error::other)?;
 
         Ok(tx_hash)
+    }
+
+    /// Ask the connected browser wallet to sign a personal message.
+    pub async fn sign_message(&self, message: &[u8]) -> Result<Signature> {
+        let request = BrowserSignRequest {
+            id: Uuid::new_v4(),
+            sign_type: SignType::PersonalSign,
+            request: SignRequest {
+                message: format!("0x{}", hex::encode(message)),
+                address: self.address,
+            },
+        };
+        let signature =
+            self.server.request_signing(request).await.map_err(alloy_signer::Error::other)?;
+        Signature::from_raw(&signature).map_err(alloy_signer::Error::other)
+    }
+
+    /// Ask the connected browser wallet to sign dynamic EIP-712 typed data.
+    pub async fn sign_dynamic_typed_data(&self, typed_data: &TypedData) -> Result<Signature> {
+        let signature = self
+            .server
+            .request_typed_data_signing(self.address, typed_data.clone())
+            .await
+            .map_err(alloy_signer::Error::other)?;
+        Signature::from_raw(&signature).map_err(alloy_signer::Error::other)
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_server(server: BrowserWalletServer<N>, connection: Connection) -> Self {
+        Self {
+            server: Arc::new(server),
+            address: connection.address,
+            chain_id: Arc::new(RwLock::new(connection.chain_id)),
+        }
     }
 
     pub const fn address(&self) -> Address {
