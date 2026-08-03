@@ -14,8 +14,9 @@ mod types;
 mod tests {
     use std::time::Duration;
 
+    use alloy_dyn_abi::TypedData;
     use alloy_network::{Ethereum, Network, TransactionBuilder};
-    use alloy_primitives::{Address, Bytes, TxHash, TxKind, U256, address};
+    use alloy_primitives::{Address, Bytes, Signature, TxHash, TxKind, U256, address};
     use axum::http::{HeaderMap, HeaderValue};
     use tokio::task::JoinHandle;
     use uuid::Uuid;
@@ -23,6 +24,7 @@ mod tests {
     use crate::wallet_browser::{
         error::BrowserWalletError,
         server::BrowserWalletServer,
+        signer::BrowserSigner,
         types::{
             BrowserApiResponse, BrowserChainSwitchRequest, BrowserChainSwitchResponse,
             BrowserSignRequest, BrowserSignResponse, BrowserTransactionRequest,
@@ -49,6 +51,7 @@ mod tests {
 
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
     const DEFAULT_DEVELOPMENT: bool = false;
+    const SIGNATURE: [u8; 65] = [1; 65];
 
     #[tokio::test]
     async fn test_setup_server() {
@@ -1308,6 +1311,121 @@ mod tests {
         assert_eq!(message, "No pending key authorization request");
 
         server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_browser_signer_personal_message() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        let port = server.port();
+        let connection = Connection::new(ALICE, 1);
+        connect_wallet(&client, &server, connection).await;
+        let signer = BrowserSigner::from_server(server, connection);
+
+        let response = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let BrowserApiResponse::Ok(request) = client
+                .get(format!("http://127.0.0.1:{port}/api/signing/request"))
+                .send()
+                .await
+                .unwrap()
+                .json::<BrowserApiResponse<BrowserSignRequest>>()
+                .await
+                .unwrap()
+            else {
+                panic!("expected signing request")
+            };
+            assert_eq!(request.sign_type, SignType::PersonalSign);
+            assert_eq!(
+                request.request,
+                SignRequest { message: "0x68656c6c6f".into(), address: ALICE }
+            );
+            client
+                .post(format!("http://127.0.0.1:{port}/api/signing/response"))
+                .json(&BrowserSignResponse {
+                    id: request.id,
+                    signature: Some(Bytes::copy_from_slice(&SIGNATURE)),
+                    error: None,
+                })
+                .send()
+                .await
+                .unwrap();
+        };
+        let (signature, ()) = tokio::join!(signer.sign_message(b"hello"), response);
+        assert_eq!(signature.unwrap(), Signature::from_raw(&SIGNATURE).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_browser_signer_typed_data_and_errors() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        let port = server.port();
+        let connection = Connection::new(ALICE, 1);
+        connect_wallet(&client, &server, connection).await;
+        let signer = BrowserSigner::from_server(server, connection);
+        let typed_data: TypedData = serde_json::from_str(r#"{"types":{"EIP712Domain":[],"Message":[]},"primaryType":"Message","domain":{},"message":{}}"#).unwrap();
+
+        let response = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let BrowserApiResponse::Ok(request) = client
+                .get(format!("http://127.0.0.1:{port}/api/signing/request"))
+                .send()
+                .await
+                .unwrap()
+                .json::<BrowserApiResponse<BrowserSignRequest>>()
+                .await
+                .unwrap()
+            else {
+                panic!("expected signing request")
+            };
+            assert_eq!(request.sign_type, SignType::SignTypedDataV4);
+            assert_eq!(request.request.address, ALICE);
+            assert_eq!(
+                serde_json::from_str::<TypedData>(&request.request.message).unwrap(),
+                typed_data
+            );
+            client
+                .post(format!("http://127.0.0.1:{port}/api/signing/response"))
+                .json(&BrowserSignResponse {
+                    id: request.id,
+                    signature: Some(Bytes::from_static(b"invalid")),
+                    error: None,
+                })
+                .send()
+                .await
+                .unwrap();
+        };
+        let (signature, ()) = tokio::join!(signer.sign_dynamic_typed_data(&typed_data), response);
+        assert!(signature.is_err());
+
+        let rejection = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let BrowserApiResponse::Ok(request) = client
+                .get(format!("http://127.0.0.1:{port}/api/signing/request"))
+                .send()
+                .await
+                .unwrap()
+                .json::<BrowserApiResponse<BrowserSignRequest>>()
+                .await
+                .unwrap()
+            else {
+                panic!("expected signing request")
+            };
+            client
+                .post(format!("http://127.0.0.1:{port}/api/signing/response"))
+                .json(&BrowserSignResponse {
+                    id: request.id,
+                    signature: None,
+                    error: Some("user rejected".into()),
+                })
+                .send()
+                .await
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(signer.sign_message(b"hello"), rejection);
+        assert!(result.unwrap_err().to_string().contains("user rejected"));
     }
 
     /// Helper to create a default browser wallet server.
