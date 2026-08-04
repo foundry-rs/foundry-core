@@ -55,6 +55,18 @@ pub struct Remapping {
     pub path: String,
 }
 
+/// The result of ownership-aware remapping discovery.
+#[cfg(feature = "walkdir")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemappingDiscovery {
+    /// Remappings selected using the global package priority.
+    pub global: Vec<Remapping>,
+    /// Preferred nested remappings for each lexical owner and alias.
+    ///
+    /// This includes aliases that occur only once within the scanned directory.
+    pub contextual: Vec<Remapping>,
+}
+
 impl Remapping {
     /// Convenience function for [`RelativeRemapping::new`]
     pub fn into_relative(self, root: &Path) -> RelativeRemapping {

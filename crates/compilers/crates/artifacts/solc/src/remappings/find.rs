@@ -1,4 +1,4 @@
-use super::Remapping;
+use super::{Remapping, RemappingDiscovery};
 use foundry_compilers_core::utils;
 use rayon::prelude::*;
 use std::{
@@ -57,29 +57,17 @@ impl Remapping {
     /// (`@aave`)
     #[instrument(level = "trace", name = "Remapping::find_many")]
     pub fn find_many(dir: &Path) -> Vec<Self> {
-        /// prioritize
-        ///   - ("a", "1/2") over ("a", "1/2/3")
-        ///   - if a path ends with `src`
-        fn insert_prioritized(
-            mappings: &mut BTreeMap<String, PathBuf>,
-            key: String,
-            path: PathBuf,
-        ) {
-            match mappings.entry(key) {
-                Entry::Occupied(mut e) => {
-                    if e.get().components().count() > path.components().count()
-                        || (path.ends_with(DAPPTOOLS_CONTRACTS_DIR)
-                            && !e.get().ends_with(DAPPTOOLS_CONTRACTS_DIR))
-                    {
-                        e.insert(path);
-                    }
-                }
-                Entry::Vacant(e) => {
-                    e.insert(path);
-                }
-            }
-        }
+        Self::find_many_with_context(dir).global
+    }
 
+    /// Attempts to autodetect global remappings and their nested dependency ownership.
+    ///
+    /// This performs the same traversal and global selection as [`Self::find_many`], while also
+    /// retaining the preferred nested candidate for each lexical owner and alias, using the same
+    /// priority rules as global discovery. The owner is the path prefix before the rightmost
+    /// lexical `lib` or `node_modules` barrier.
+    #[instrument(level = "trace", name = "Remapping::find_many_with_context")]
+    pub fn find_many_with_context(dir: &Path) -> RemappingDiscovery {
         let is_inside_node_modules = dir.ends_with("node_modules");
         let visited_symlink_dirs = Mutex::new(HashSet::new());
 
@@ -104,19 +92,75 @@ impl Remapping {
         // same number of components.
         candidates.sort_by(|a, b| a.source_dir.cmp(&b.source_dir));
 
-        // all combined remappings from all subdirs
+        // Select remappings globally and within each lexical dependency owner.
         let mut all_remappings = BTreeMap::new();
+        let mut contextual_remappings = BTreeMap::new();
         for candidate in candidates {
             if let Some(name) = candidate.window_start.file_name().and_then(|s| s.to_str()) {
-                insert_prioritized(&mut all_remappings, format!("{name}/"), candidate.source_dir);
+                let name = format!("{name}/");
+                if let Some(owner) = dependency_owner(dir, &candidate.window_start) {
+                    insert_prioritized(
+                        contextual_remappings.entry(owner).or_default(),
+                        name.clone(),
+                        candidate.source_dir.clone(),
+                    );
+                }
+                insert_prioritized(&mut all_remappings, name, candidate.source_dir);
             }
         }
 
-        all_remappings
+        let global = all_remappings
             .into_iter()
             .map(|(name, path)| Self { context: None, name, path: format!("{}/", path.display()) })
-            .collect()
+            .collect();
+        let contextual = contextual_remappings
+            .into_iter()
+            .flat_map(|(context, remappings)| {
+                remappings.into_iter().map(move |(name, path)| Self {
+                    context: Some(format!("{}/", context.display())),
+                    name,
+                    path: format!("{}/", path.display()),
+                })
+            })
+            .collect();
+        RemappingDiscovery { global, contextual }
     }
+}
+
+/// Prioritizes:
+/// - ("a", "1/2") over ("a", "1/2/3")
+/// - a path ending with `src` over one that does not
+fn insert_prioritized(mappings: &mut BTreeMap<String, PathBuf>, key: String, path: PathBuf) {
+    match mappings.entry(key) {
+        Entry::Occupied(mut entry) => {
+            if entry.get().components().count() > path.components().count()
+                || (path.ends_with(DAPPTOOLS_CONTRACTS_DIR)
+                    && !entry.get().ends_with(DAPPTOOLS_CONTRACTS_DIR))
+            {
+                entry.insert(path);
+            }
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(path);
+        }
+    }
+}
+
+/// Returns the lexical dependency that owns a nested package window.
+///
+/// The nearest `lib` or `node_modules` component below the scan root is the dependency barrier.
+/// The package containing that barrier owns imports of the nested package. This uses the same
+/// barriers as candidate discovery and intentionally preserves symlink aliases.
+fn dependency_owner(root: &Path, window_start: &Path) -> Option<PathBuf> {
+    let relative = window_start.strip_prefix(root).ok()?;
+    let components = relative.components().collect::<Vec<_>>();
+    let barrier = components.iter().rposition(|component| {
+        let component = Path::new(component.as_os_str());
+        component == Path::new(DAPPTOOLS_LIB_DIR) || component == Path::new(JS_LIB_DIR)
+    })?;
+    (barrier > 0).then(|| {
+        components[..barrier].iter().fold(root.to_path_buf(), |path, part| path.join(part))
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -493,6 +537,9 @@ mod tests {
     use super::{super::tests::*, *};
     use foundry_compilers_core::utils::{mkdir_or_touch, tempdir, touch};
 
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     /// Helper function for converting PathBufs to remapping strings.
     fn to_str(p: std::path::PathBuf) -> String {
         format!("{}/", p.display())
@@ -511,6 +558,144 @@ mod tests {
             Path::new(
                 "/var/folders/l5/lprhf87s6xv8djgd017f0b2h0000gn/T/lib.Z6ODLZJQeJQa/repo1/lib/ds-test"
             )
+        );
+    }
+
+    #[test]
+    fn discovers_contextual_sibling_remappings_without_changing_global_selection() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let root = tmp_dir.path();
+        mkdir_or_touch(
+            root,
+            &[
+                "a/src/A.sol",
+                "a/lib/shared/src/Shared.sol",
+                "b/src/B.sol",
+                "b/lib/shared/src/Shared.sol",
+                "unique/lib/only/src/Only.sol",
+            ],
+        );
+
+        let discovery = Remapping::find_many_with_context(root);
+        assert_eq!(Remapping::find_many(root), discovery.global);
+        assert!(discovery.global.contains(&Remapping {
+            context: None,
+            name: "shared/".to_string(),
+            path: to_str(root.join("a/lib/shared/src")),
+        }));
+        assert_eq!(
+            discovery
+                .contextual
+                .iter()
+                .filter(|remapping| remapping.name == "shared/")
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                Remapping {
+                    context: Some(to_str(root.join("a"))),
+                    name: "shared/".to_string(),
+                    path: to_str(root.join("a/lib/shared/src")),
+                },
+                Remapping {
+                    context: Some(to_str(root.join("b"))),
+                    name: "shared/".to_string(),
+                    path: to_str(root.join("b/lib/shared/src")),
+                },
+            ]
+        );
+        assert!(discovery.contextual.contains(&Remapping {
+            context: Some(to_str(root.join("unique"))),
+            name: "only/".to_string(),
+            path: to_str(root.join("unique/lib/only/src")),
+        }));
+    }
+
+    #[test]
+    fn discovers_nearest_contextual_owner() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let root = tmp_dir.path();
+        mkdir_or_touch(
+            root,
+            &[
+                "a/lib/x/src/X.sol",
+                "a/lib/x/lib/shared/src/Shared.sol",
+                "a/lib/y/src/Y.sol",
+                "a/lib/y/lib/shared/src/Shared.sol",
+            ],
+        );
+
+        let discovery = Remapping::find_many_with_context(root);
+        assert_eq!(
+            discovery
+                .contextual
+                .iter()
+                .filter(|remapping| remapping.name == "shared/")
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                Remapping {
+                    context: Some(to_str(root.join("a/lib/x"))),
+                    name: "shared/".to_string(),
+                    path: to_str(root.join("a/lib/x/lib/shared/src")),
+                },
+                Remapping {
+                    context: Some(to_str(root.join("a/lib/y"))),
+                    name: "shared/".to_string(),
+                    path: to_str(root.join("a/lib/y/lib/shared/src")),
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contextual_remappings_preserve_symlink_paths() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let external = tempdir("external").unwrap();
+        let root = tmp_dir.path();
+        let target = external.path().join("cache/packages/shared");
+        mkdir_or_touch(root, &["a/src/A.sol"]);
+        mkdir_or_touch(&target, &["src/Shared.sol"]);
+        std::fs::create_dir_all(root.join("a/lib")).unwrap();
+        symlink(&target, root.join("a/lib/shared")).unwrap();
+
+        let discovery = Remapping::find_many_with_context(root);
+        assert!(
+            discovery.contextual.contains(&Remapping {
+                context: Some(to_str(root.join("a"))),
+                name: "shared/".to_string(),
+                path: to_str(root.join("a/lib/shared/src")),
+            }),
+            "{discovery:#?}"
+        );
+        assert!(discovery.contextual.iter().all(|remapping| {
+            !remapping.path.starts_with(external.path().to_string_lossy().as_ref())
+        }));
+    }
+
+    #[test]
+    fn discovers_full_scoped_package_owner() {
+        let tmp_dir = tempdir("node_modules").unwrap();
+        let root = tmp_dir.path().join("node_modules");
+        mkdir_or_touch(
+            tmp_dir.path(),
+            &[
+                "node_modules/@scope/a/contracts/A.sol",
+                "node_modules/@scope/a/node_modules/shared/contracts/Shared.sol",
+                "node_modules/@scope/b/contracts/B.sol",
+                "node_modules/@scope/b/node_modules/shared/contracts/Shared.sol",
+            ],
+        );
+
+        let discovery = Remapping::find_many_with_context(&root);
+        assert_eq!(
+            discovery
+                .contextual
+                .iter()
+                .filter(|remapping| remapping.name == "shared/")
+                .map(|remapping| remapping.context.clone().unwrap())
+                .collect::<Vec<_>>(),
+            vec![to_str(root.join("@scope/a")), to_str(root.join("@scope/b"))]
         );
     }
 
