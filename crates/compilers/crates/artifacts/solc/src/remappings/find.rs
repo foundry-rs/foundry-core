@@ -5,7 +5,6 @@ use std::{
     collections::{BTreeMap, HashSet, btree_map::Entry},
     fs::FileType,
     path::{Path, PathBuf},
-    sync::Mutex,
 };
 
 const DAPPTOOLS_CONTRACTS_DIR: &str = "src";
@@ -69,7 +68,6 @@ impl Remapping {
     #[instrument(level = "trace", name = "Remapping::find_many_with_context")]
     pub fn find_many_with_context(dir: &Path) -> RemappingDiscovery {
         let is_inside_node_modules = dir.ends_with("node_modules");
-        let visited_symlink_dirs = Mutex::new(HashSet::new());
 
         // iterate over all dirs that are children of the root
         let mut candidates = read_dir(dir)
@@ -77,13 +75,7 @@ impl Remapping {
             .collect::<Vec<_>>()
             .par_iter()
             .flat_map_iter(|(dir, _, _)| {
-                find_remapping_candidates(
-                    dir,
-                    dir,
-                    0,
-                    is_inside_node_modules,
-                    &visited_symlink_dirs,
-                )
+                find_remapping_candidates(dir, dir, 0, is_inside_node_modules, &HashSet::new())
             })
             .collect::<Vec<_>>();
 
@@ -340,14 +332,14 @@ fn is_hidden(path: &Path) -> bool {
 
 /// Finds all remappings in the directory recursively
 ///
-/// Note: this supports symlinks and will short-circuit if a symlink dir has already been visited,
-/// this can occur in pnpm setups: <https://github.com/foundry-rs/foundry/issues/7820>
+/// Note: this supports symlinks and will short-circuit cycles within the current traversal path.
+/// This can occur in pnpm setups: <https://github.com/foundry-rs/foundry/issues/7820>.
 fn find_remapping_candidates(
     current_dir: &Path,
     open: &Path,
     current_level: usize,
     is_inside_node_modules: bool,
-    visited_symlink_dirs: &Mutex<HashSet<PathBuf>>,
+    visited_symlink_dirs: &HashSet<PathBuf>,
 ) -> Vec<Candidate> {
     trace!("find_remapping_candidates({})", current_dir.display());
 
@@ -361,6 +353,7 @@ fn find_remapping_candidates(
         if !is_candidate && file_type.is_file() && subdir.extension() == Some("sol".as_ref()) {
             is_candidate = true;
         } else if file_type.is_dir() {
+            let mut visited_symlink_dirs = visited_symlink_dirs.clone();
             // if the dir is a symlink to a parent dir we short circuit here
             // `walkdir` will catch symlink loops, but this check prevents that we end up scanning a
             // workspace like
@@ -370,22 +363,19 @@ fn find_remapping_candidates(
             //     ├── symlink to `my-package`
             // ```
             if path_is_symlink && let Ok(target) = utils::canonicalize(&subdir) {
-                if !visited_symlink_dirs.lock().unwrap().insert(target.clone()) {
-                    // short-circuiting if we've already visited the symlink
-                    return Vec::new();
-                }
-                // the symlink points to a parent dir of the current window
-                if open.components().count() > target.components().count()
-                    && utils::common_ancestor(open, &target).is_some()
+                if visited_symlink_dirs.contains(&target)
+                    || utils::canonicalize(current_dir)
+                        .is_ok_and(|current| current.starts_with(&target))
                 {
-                    // short-circuiting
-                    return Vec::new();
+                    // short-circuiting if we've already visited the symlink
+                    continue;
                 }
+                visited_symlink_dirs.insert(target);
             }
 
             // we skip commonly used subdirs that should not be searched for recursively
             if !no_recurse(&subdir) {
-                search.push(subdir);
+                search.push((subdir, visited_symlink_dirs));
             }
         }
     }
@@ -393,7 +383,7 @@ fn find_remapping_candidates(
     // all found candidates
     let mut candidates = search
         .par_iter()
-        .flat_map_iter(|subdir| {
+        .flat_map_iter(|(subdir, visited_symlink_dirs)| {
             // scan the subdirectory for remappings, but we need a way to identify nested
             // dependencies like `ds-token/lib/ds-stop/lib/ds-note/src/contract.sol`, or
             // `oz/{tokens,auth}/{contracts, interfaces}/contract.sol` to assign
@@ -670,6 +660,69 @@ mod tests {
         );
         assert!(discovery.contextual.iter().all(|remapping| {
             !remapping.path.starts_with(external.path().to_string_lossy().as_ref())
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contextual_remappings_preserve_shared_symlink_target_owners() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let external = tempdir("external").unwrap();
+        let root = tmp_dir.path();
+        let target = external.path().join("shared");
+        mkdir_or_touch(root, &["a/src/A.sol", "b/src/B.sol"]);
+        mkdir_or_touch(&target, &["src/Shared.sol"]);
+        std::fs::create_dir_all(root.join("a/lib")).unwrap();
+        std::fs::create_dir_all(root.join("b/lib")).unwrap();
+        symlink(&target, root.join("a/lib/shared")).unwrap();
+        symlink(&target, root.join("b/lib/shared")).unwrap();
+
+        let discovery = Remapping::find_many_with_context(root);
+        assert!(discovery.global.contains(&Remapping {
+            context: None,
+            name: "shared/".to_string(),
+            path: to_str(root.join("a/lib/shared/src")),
+        }));
+        assert_eq!(
+            discovery
+                .contextual
+                .into_iter()
+                .filter(|remapping| remapping.name == "shared/")
+                .collect::<Vec<_>>(),
+            vec![
+                Remapping {
+                    context: Some(to_str(root.join("a"))),
+                    name: "shared/".to_string(),
+                    path: to_str(root.join("a/lib/shared/src")),
+                },
+                Remapping {
+                    context: Some(to_str(root.join("b"))),
+                    name: "shared/".to_string(),
+                    path: to_str(root.join("b/lib/shared/src")),
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contextual_remappings_short_circuit_symlink_cycles() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let external = tempdir("external").unwrap();
+        let root = tmp_dir.path();
+        let target = external.path().join("shared");
+        mkdir_or_touch(root, &["a/src/A.sol"]);
+        mkdir_or_touch(&target, &["src/Shared.sol"]);
+        std::fs::create_dir_all(root.join("a/lib")).unwrap();
+        std::fs::create_dir_all(target.join("lib")).unwrap();
+        symlink(&target, root.join("a/lib/shared")).unwrap();
+        symlink(&target, target.join("lib/self")).unwrap();
+
+        let discovery = Remapping::find_many_with_context(root);
+        assert!(discovery.contextual.contains(&Remapping {
+            context: Some(to_str(root.join("a"))),
+            name: "shared/".to_string(),
+            path: to_str(root.join("a/lib/shared/src")),
         }));
     }
 
