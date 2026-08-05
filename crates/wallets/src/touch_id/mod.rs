@@ -232,7 +232,7 @@ pub fn is_available() -> bool {
     unsafe { foundry_se_available() == 1 }
 }
 
-/// Returns the sidecar path for a keystore: the keystore path with `.touchid` appended.
+/// Forms a sidecar path by appending `.touchid`, preserving dots in the keystore name.
 pub fn sidecar_path(keystore: &Path) -> PathBuf {
     let mut path = keystore.as_os_str().to_os_string();
     path.push(".");
@@ -243,6 +243,11 @@ pub fn sidecar_path(keystore: &Path) -> PathBuf {
 /// Whether the keystore has a Touch ID sidecar.
 pub fn is_enrolled(keystore: &Path) -> bool {
     sidecar_path(keystore).exists()
+}
+
+/// Reads the access-control policy stored in the keystore's Touch ID sidecar.
+pub fn policy(keystore: &Path) -> Result<Policy, TouchIdError> {
+    Ok(read_sidecar(keystore)?.policy)
 }
 
 /// Enrolls a keystore: creates a Secure Enclave wrap key under `policy` and stores
@@ -306,13 +311,7 @@ fn write_sidecar(keystore: &Path, sidecar: &Sidecar) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Unwraps the keystore password from the sidecar, triggering the enclave's
-/// access-control prompt (Touch ID under the default policy).
-///
-/// Blocks the calling thread until the prompt resolves; the authentication UI
-/// runs out of process, so calling from any CLI thread is fine. The returned
-/// password and the intermediate buffer are zeroed on drop.
-pub fn unwrap_password(keystore: &Path) -> Result<Zeroizing<String>, TouchIdError> {
+fn read_sidecar(keystore: &Path) -> Result<Sidecar, TouchIdError> {
     let path = sidecar_path(keystore);
     if !path.exists() {
         return Err(TouchIdError::NotEnrolled);
@@ -329,7 +328,17 @@ pub fn unwrap_password(keystore: &Path) -> Result<Zeroizing<String>, TouchIdErro
     if version != SIDECAR_VERSION {
         return Err(TouchIdError::UnsupportedVersion(version));
     }
-    let sidecar: Sidecar = serde_json::from_str(&raw)?;
+    Ok(serde_json::from_str(&raw)?)
+}
+
+/// Unwraps the keystore password from the sidecar, triggering the enclave's
+/// access-control prompt (Touch ID under the default policy).
+///
+/// Blocks the calling thread until the prompt resolves; the authentication UI
+/// runs out of process, so calling from any CLI thread is fine. Both the password
+/// and the intermediate buffer are zeroed on drop.
+pub fn unwrap_password(keystore: &Path) -> Result<Zeroizing<String>, TouchIdError> {
+    let sidecar = read_sidecar(keystore)?;
     let se_key = hex::decode(&sidecar.se_key)?;
     let sealed = hex::decode(&sidecar.sealed_password)?;
 
@@ -355,7 +364,7 @@ pub fn unwrap_password(keystore: &Path) -> Result<Zeroizing<String>, TouchIdErro
     Ok(Zeroizing::new(password.to_string()))
 }
 
-/// Removes the keystore's sidecar, if any. Returns whether one existed.
+/// Removes the keystore's sidecar, if any; the boolean indicates whether one existed.
 pub fn remove(keystore: &Path) -> Result<bool, TouchIdError> {
     let path = sidecar_path(keystore);
     if path.exists() {
@@ -405,6 +414,21 @@ mod tests {
             r#"{"version":1,"policy":"user-presence","se_key":"aa","sealed_password":"bb"}"#
         );
         assert_eq!(serde_json::from_str::<Sidecar>(&json).unwrap(), sidecar);
+    }
+
+    #[test]
+    fn reads_enrollment_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let keystore = dir.path().join("deployer");
+        let sidecar = Sidecar {
+            version: SIDECAR_VERSION,
+            policy: Policy::CurrentBiometry,
+            se_key: "aa".into(),
+            sealed_password: "bb".into(),
+        };
+        write_sidecar(&keystore, &sidecar).unwrap();
+
+        assert_eq!(policy(&keystore).unwrap(), Policy::CurrentBiometry);
     }
 
     /// Corrupt sidecars must surface structured errors without touching the
@@ -524,6 +548,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(unwrap_password(&keystore), Err(TouchIdError::UnsupportedVersion(2))));
+        assert!(matches!(policy(&keystore), Err(TouchIdError::UnsupportedVersion(2))));
     }
 
     /// Requires a Touch ID prompt; run manually:
