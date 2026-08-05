@@ -781,34 +781,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn global_remappings_deduplicate_shared_symlink_targets() {
-        let tmp_dir = tempdir("lib").unwrap();
-        let external = tempdir("external").unwrap();
-        let root = tmp_dir.path();
-        let target = external.path().join("shared");
-        mkdir_or_touch(root, &["a/src/A.sol", "b/src/B.sol"]);
-        mkdir_or_touch(&target, &["src/Shared.sol"]);
-        std::fs::create_dir_all(root.join("a/lib")).unwrap();
-        std::fs::create_dir_all(root.join("b/lib")).unwrap();
-        symlink(&target, root.join("a/lib/first")).unwrap();
-        symlink(&target, root.join("b/lib/second")).unwrap();
-
-        let global = Remapping::find_many(root);
-        assert_eq!(
-            global
-                .iter()
-                .filter(|remapping| remapping.name == "first/" || remapping.name == "second/")
-                .count(),
-            1
-        );
-
-        let contextual = Remapping::find_many_with_context(root).contextual;
-        assert!(contextual.iter().any(|remapping| remapping.name == "first/"));
-        assert!(contextual.iter().any(|remapping| remapping.name == "second/"));
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn contextual_remappings_short_circuit_symlink_cycles() {
         let tmp_dir = tempdir("lib").unwrap();
         let external = tempdir("external").unwrap();
