@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeMap, HashSet, btree_map::Entry},
     fs::FileType,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 const DAPPTOOLS_CONTRACTS_DIR: &str = "src";
@@ -56,38 +57,31 @@ impl Remapping {
     /// (`@aave`)
     #[instrument(level = "trace", name = "Remapping::find_many")]
     pub fn find_many(dir: &Path) -> Vec<Self> {
-        Self::find_many_with_context(dir).global
+        let mut all_remappings = BTreeMap::new();
+        for candidate in discover_candidates(dir, false) {
+            if let Some(name) = candidate.window_start.file_name().and_then(|s| s.to_str()) {
+                insert_prioritized(&mut all_remappings, format!("{name}/"), candidate.source_dir);
+            }
+        }
+        all_remappings
+            .into_iter()
+            .map(|(name, path)| Self { context: None, name, path: format!("{}/", path.display()) })
+            .collect()
     }
 
     /// Attempts to autodetect global remappings and their nested dependency ownership.
     ///
-    /// This performs the same traversal and global selection as [`Self::find_many`], while also
-    /// retaining the preferred nested candidate for each lexical owner and alias, using the same
-    /// priority rules as global discovery. The owner is the path prefix before the rightmost
-    /// lexical `lib` or `node_modules` barrier.
+    /// This uses the same global prioritization rules as [`Self::find_many`], while also retaining
+    /// the preferred nested candidate for each lexical owner and alias. The owner is the path
+    /// prefix before the rightmost lexical `lib` or `node_modules` barrier. Call
+    /// [`RemappingDiscovery::into_relative`] with the project root before installing the result
+    /// into a project configuration.
     #[instrument(level = "trace", name = "Remapping::find_many_with_context")]
     pub fn find_many_with_context(dir: &Path) -> RemappingDiscovery {
-        let is_inside_node_modules = dir.ends_with("node_modules");
-
-        // iterate over all dirs that are children of the root
-        let mut candidates = read_dir(dir)
-            .filter(|(_, file_type, _)| file_type.is_dir())
-            .collect::<Vec<_>>()
-            .par_iter()
-            .flat_map_iter(|(dir, _, _)| {
-                find_remapping_candidates(dir, dir, 0, is_inside_node_modules, &HashSet::new())
-            })
-            .collect::<Vec<_>>();
-
-        // sort candidates so they are deterministic.
-        // this ensures that hashes do not change due to non deterministic mappings for paths with
-        // same number of components.
-        candidates.sort_by(|a, b| a.source_dir.cmp(&b.source_dir));
-
         // Select remappings globally and within each lexical dependency owner.
         let mut all_remappings = BTreeMap::new();
         let mut contextual_remappings = BTreeMap::new();
-        for candidate in candidates {
+        for candidate in discover_candidates(dir, true) {
             if let Some(name) = candidate.window_start.file_name().and_then(|s| s.to_str()) {
                 let name = format!("{name}/");
                 if let Some(owner) = dependency_owner(dir, &candidate.window_start) {
@@ -105,7 +99,7 @@ impl Remapping {
             .into_iter()
             .map(|(name, path)| Self { context: None, name, path: format!("{}/", path.display()) })
             .collect();
-        let contextual = contextual_remappings
+        let mut contextual = contextual_remappings
             .into_iter()
             .flat_map(|(context, remappings)| {
                 remappings.into_iter().map(move |(name, path)| Self {
@@ -114,9 +108,41 @@ impl Remapping {
                     path: format!("{}/", path.display()),
                 })
             })
-            .collect();
+            .collect::<Vec<_>>();
+        contextual.sort_by(|a, b| {
+            let a = a.context.as_deref().unwrap_or_default();
+            let b = b.context.as_deref().unwrap_or_default();
+            Path::new(b)
+                .components()
+                .count()
+                .cmp(&Path::new(a).components().count())
+                .then_with(|| a.cmp(b))
+        });
         RemappingDiscovery { global, contextual }
     }
+}
+
+fn discover_candidates(dir: &Path, preserve_symlink_owners: bool) -> Vec<Candidate> {
+    let is_inside_node_modules = dir.ends_with("node_modules");
+    let visited_symlink_dirs = Mutex::new(HashSet::new());
+    let global_symlink_dirs = (!preserve_symlink_owners).then_some(&visited_symlink_dirs);
+    let mut candidates = read_dir(dir)
+        .filter(|(_, file_type, _)| file_type.is_dir())
+        .collect::<Vec<_>>()
+        .par_iter()
+        .flat_map_iter(|(dir, _, _)| {
+            find_remapping_candidates(
+                dir,
+                dir,
+                0,
+                is_inside_node_modules,
+                global_symlink_dirs,
+                &HashSet::new(),
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.source_dir.cmp(&b.source_dir));
+    candidates
 }
 
 /// Prioritizes:
@@ -339,6 +365,7 @@ fn find_remapping_candidates(
     open: &Path,
     current_level: usize,
     is_inside_node_modules: bool,
+    global_symlink_dirs: Option<&Mutex<HashSet<PathBuf>>>,
     visited_symlink_dirs: &HashSet<PathBuf>,
 ) -> Vec<Candidate> {
     trace!("find_remapping_candidates({})", current_dir.display());
@@ -363,14 +390,22 @@ fn find_remapping_candidates(
             //     ├── symlink to `my-package`
             // ```
             if path_is_symlink && let Ok(target) = utils::canonicalize(&subdir) {
-                if visited_symlink_dirs.contains(&target)
-                    || utils::canonicalize(current_dir)
-                        .is_ok_and(|current| current.starts_with(&target))
-                {
-                    // short-circuiting if we've already visited the symlink
-                    continue;
+                if let Some(global_symlink_dirs) = global_symlink_dirs {
+                    if !global_symlink_dirs.lock().unwrap().insert(target.clone())
+                        || open.components().count() > target.components().count()
+                            && utils::common_ancestor(open, &target).is_some()
+                    {
+                        return Vec::new();
+                    }
+                } else {
+                    if visited_symlink_dirs.contains(&target)
+                        || utils::canonicalize(current_dir)
+                            .is_ok_and(|current| current.starts_with(&target))
+                    {
+                        continue;
+                    }
+                    visited_symlink_dirs.insert(target);
                 }
-                visited_symlink_dirs.insert(target);
             }
 
             // we skip commonly used subdirs that should not be searched for recursively
@@ -398,6 +433,7 @@ fn find_remapping_candidates(
                     subdir,
                     current_level + 1,
                     is_inside_node_modules,
+                    global_symlink_dirs,
                     visited_symlink_dirs,
                 )
             } else {
@@ -407,6 +443,7 @@ fn find_remapping_candidates(
                     open,
                     current_level,
                     is_inside_node_modules,
+                    global_symlink_dirs,
                     visited_symlink_dirs,
                 )
             }
@@ -598,6 +635,26 @@ mod tests {
             name: "only/".to_string(),
             path: to_str(root.join("unique/lib/only/src")),
         }));
+        let relative = discovery.into_relative(root);
+        assert!(relative.global.contains(&Remapping {
+            context: None,
+            name: "shared/".to_string(),
+            path: format!("a/lib/shared/src{MAIN_SEPARATOR}"),
+        }));
+        assert!(relative.contextual.contains(&Remapping {
+            context: Some(format!("a{MAIN_SEPARATOR}")),
+            name: "shared/".to_string(),
+            path: format!("a/lib/shared/src{MAIN_SEPARATOR}"),
+        }));
+        assert_eq!(
+            relative
+                .contextual
+                .into_iter()
+                .filter(|remapping| remapping.name == "shared/")
+                .map(|remapping| remapping.context.unwrap())
+                .collect::<Vec<_>>(),
+            vec![format!("a{MAIN_SEPARATOR}"), format!("b{MAIN_SEPARATOR}")]
+        );
     }
 
     #[test]
@@ -634,6 +691,24 @@ mod tests {
                     path: to_str(root.join("a/lib/y/lib/shared/src")),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn contextual_remappings_order_nested_owners_first() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let root = tmp_dir.path();
+        mkdir_or_touch(root, &["a/lib/shared/src/Shared.sol", "a/lib/x/lib/shared/src/Shared.sol"]);
+
+        let discovery = Remapping::find_many_with_context(root);
+        assert_eq!(
+            discovery
+                .contextual
+                .into_iter()
+                .filter(|remapping| remapping.name == "shared/")
+                .map(|remapping| remapping.context.unwrap())
+                .collect::<Vec<_>>(),
+            vec![to_str(root.join("a/lib/x")), to_str(root.join("a"))]
         );
     }
 
@@ -702,6 +777,34 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn global_remappings_deduplicate_shared_symlink_targets() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let external = tempdir("external").unwrap();
+        let root = tmp_dir.path();
+        let target = external.path().join("shared");
+        mkdir_or_touch(root, &["a/src/A.sol", "b/src/B.sol"]);
+        mkdir_or_touch(&target, &["src/Shared.sol"]);
+        std::fs::create_dir_all(root.join("a/lib")).unwrap();
+        std::fs::create_dir_all(root.join("b/lib")).unwrap();
+        symlink(&target, root.join("a/lib/first")).unwrap();
+        symlink(&target, root.join("b/lib/second")).unwrap();
+
+        let global = Remapping::find_many(root);
+        assert_eq!(
+            global
+                .iter()
+                .filter(|remapping| remapping.name == "first/" || remapping.name == "second/")
+                .count(),
+            1
+        );
+
+        let contextual = Remapping::find_many_with_context(root).contextual;
+        assert!(contextual.iter().any(|remapping| remapping.name == "first/"));
+        assert!(contextual.iter().any(|remapping| remapping.name == "second/"));
     }
 
     #[cfg(unix)]
