@@ -513,35 +513,32 @@ impl<L> ProjectPathsConfig<L> {
         // if the import path starts with the name of the remapping then we get the resolved path by
         // removing the name and adding the remainder to the path of the remapping
         let cwd = cwd.strip_prefix(&self.root).unwrap_or(cwd);
-        if let Some(path) = self
-            .remappings
-            .iter()
-            .filter(|r| {
-                // only check remappings that are either global or for `cwd`
-                if let Some(ctx) = r.context.as_ref() { cwd.starts_with(ctx) } else { true }
-            })
-            .find_map(|r| {
-                import.strip_prefix(&r.name).ok().map(|stripped_import| {
-                    let lib_path =
-                        if stripped_import.as_os_str().is_empty() && r.path.ends_with(".sol") {
-                            r.path.clone().into()
-                        } else {
-                            Path::new(&r.path).join(stripped_import)
-                        };
+        if let Some(path) = self.remappings.iter().find_map(|r| {
+            let stripped_import = import.strip_prefix(&r.name).ok()?;
+            // only check remappings that are either global or for `cwd`
+            if let Some(ctx) = r.context.as_ref()
+                && !path_starts_with_rooted(cwd, Path::new(ctx), &self.root)
+            {
+                return None;
+            }
 
-                    // we handle the edge case where the path of a remapping ends with "contracts"
-                    // (`<name>/=.../contracts`) and the stripped import also starts with
-                    // `contracts`
-                    if let Ok(adjusted_import) = stripped_import.strip_prefix("contracts/")
-                        && r.path.ends_with("contracts/")
-                        && !self.root.join(&lib_path).exists()
-                    {
-                        return Path::new(&r.path).join(adjusted_import);
-                    }
-                    lib_path
-                })
-            })
-        {
+            let lib_path = if stripped_import.as_os_str().is_empty() && r.path.ends_with(".sol") {
+                r.path.clone().into()
+            } else {
+                Path::new(&r.path).join(stripped_import)
+            };
+
+            // we handle the edge case where the path of a remapping ends with "contracts"
+            // (`<name>/=.../contracts`) and the stripped import also starts with
+            // `contracts`
+            if let Ok(adjusted_import) = stripped_import.strip_prefix("contracts/")
+                && r.path.ends_with("contracts/")
+                && !self.root.join(&lib_path).exists()
+            {
+                return Some(Path::new(&r.path).join(adjusted_import));
+            }
+            Some(lib_path)
+        }) {
             Some(self.root.join(path))
         } else {
             utils::resolve_library(&self.libraries, import)
@@ -1045,15 +1042,18 @@ impl SolcConfigBuilder {
     }
 }
 
-/// Return true if `a` starts with `b` or `b - root`.
+/// Returns true if `a` starts with `b` after resolving either path against `root` when needed.
 fn path_starts_with_rooted(a: &Path, b: &Path, root: &Path) -> bool {
     if a.starts_with(b) {
         return true;
     }
-    if let Ok(b) = b.strip_prefix(root) {
-        return a.starts_with(b);
+    if let Ok(b) = b.strip_prefix(root)
+        && a.starts_with(b)
+    {
+        return true;
     }
-    false
+    let Ok(a) = utils::normalize_solidity_import_path(root, a) else { return false };
+    utils::normalize_solidity_import_path(root, b).is_ok_and(|b| a.starts_with(b))
 }
 
 #[cfg(test)]
@@ -1225,6 +1225,102 @@ mod tests {
                 )
                 .unwrap(),
             dependency.join("A.sol")
+        );
+    }
+
+    #[test]
+    fn can_resolve_discovered_contextual_remapping_outside_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let mut config = ProjectPathsConfig::builder().root(&project).build::<()>().unwrap();
+        config.create_all().unwrap();
+
+        let workspace = config.root.parent().unwrap();
+        let dependency = workspace.join("node_modules/dependency");
+        fs::create_dir_all(dependency.join("src")).unwrap();
+        fs::write(
+            dependency.join("src/Dependency.sol"),
+            r"pragma solidity ^0.8.0; contract Dependency {}",
+        )
+        .unwrap();
+
+        let library = workspace.join("node_modules/library");
+        fs::create_dir_all(&library).unwrap();
+        fs::write(library.join("Vm.sol"), r"pragma solidity ^0.8.0; contract Vm {}").unwrap();
+        let dependency_library = dependency.join("node_modules/library");
+        fs::create_dir_all(&dependency_library).unwrap();
+        fs::write(dependency_library.join("Vm.sol"), r"pragma solidity ^0.8.0; contract Vm {}")
+            .unwrap();
+
+        let discovery = Remapping::find_many_with_context(&workspace.join("node_modules"))
+            .into_relative(&config.root);
+        config.remappings = discovery.contextual;
+        config.remappings.push(Remapping {
+            context: None,
+            name: "library/".into(),
+            path: "../node_modules/library/".into(),
+        });
+
+        assert_eq!(
+            config
+                .resolve_import_and_include_paths(
+                    &dependency,
+                    Path::new("library/Vm.sol"),
+                    &mut Default::default(),
+                )
+                .unwrap(),
+            dependency_library.join("Vm.sol")
+        );
+        assert_eq!(
+            config
+                .resolve_import_and_include_paths(
+                    &config.sources,
+                    Path::new("library/Vm.sol"),
+                    &mut Default::default(),
+                )
+                .unwrap(),
+            config.root.join("../node_modules/library/Vm.sol")
+        );
+    }
+
+    #[test]
+    fn can_resolve_absolute_context_with_root_relative_importer() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let mut config = ProjectPathsConfig::builder().root(&project).build::<()>().unwrap();
+        config.create_all().unwrap();
+
+        let workspace = config.root.parent().unwrap();
+        let dependency = workspace.join("node_modules/dependency");
+        fs::create_dir_all(&dependency).unwrap();
+
+        let library = workspace.join("node_modules/library");
+        fs::create_dir_all(library.join("src")).unwrap();
+        fs::write(library.join("Vm.sol"), r"pragma solidity ^0.8.0; contract Vm {}").unwrap();
+        fs::write(library.join("src/Vm.sol"), r"pragma solidity ^0.8.0; contract Vm {}").unwrap();
+
+        config.remappings.push(Remapping {
+            context: Some(dependency.display().to_string()),
+            name: "library/".into(),
+            path: "../node_modules/library/src/".into(),
+        });
+        config.remappings.push(Remapping {
+            context: None,
+            name: "library/".into(),
+            path: "../node_modules/library/".into(),
+        });
+
+        assert_eq!(
+            config
+                .resolve_import_and_include_paths(
+                    &config.root.join("../node_modules/dependency"),
+                    Path::new("library/Vm.sol"),
+                    &mut Default::default(),
+                )
+                .unwrap(),
+            config.root.join("../node_modules/library/src/Vm.sol")
         );
     }
 
