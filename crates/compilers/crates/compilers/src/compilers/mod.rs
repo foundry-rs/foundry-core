@@ -21,6 +21,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+mod compiler_path;
 pub mod multi;
 pub mod solc;
 pub mod vyper;
