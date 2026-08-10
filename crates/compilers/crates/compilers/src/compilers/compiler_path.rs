@@ -63,9 +63,22 @@ fn resolve(path: &Path) -> Result<PathBuf> {
 }
 
 fn resolve_in_path(path: &Path, search_path: &OsStr) -> Option<PathBuf> {
-    env::split_paths(search_path)
-        .flat_map(|dir| executable_candidates(dir.join(path)))
-        .find_map(|candidate| candidate.is_file().then(|| canonicalize(candidate).ok()).flatten())
+    env::split_paths(search_path).flat_map(|dir| executable_candidates(dir.join(path))).find_map(
+        |candidate| is_executable(&candidate).then(|| canonicalize(candidate).ok()).flatten(),
+    )
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 #[cfg(not(windows))]
@@ -75,17 +88,17 @@ fn executable_candidates(path: PathBuf) -> impl Iterator<Item = PathBuf> {
 
 #[cfg(windows)]
 fn executable_candidates(path: PathBuf) -> impl Iterator<Item = PathBuf> {
-    let mut candidates = vec![path.clone()];
-    if path.extension().is_none() {
+    let candidates = if path.extension().is_none() {
         let path_ext = env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-        candidates.extend(
-            path_ext
-                .to_string_lossy()
-                .split(';')
-                .filter(|ext| !ext.is_empty())
-                .map(|ext| path.with_extension(ext.trim_start_matches('.'))),
-        );
-    }
+        path_ext
+            .to_string_lossy()
+            .split(';')
+            .filter(|ext| !ext.is_empty())
+            .map(|ext| path.with_extension(ext.trim_start_matches('.')))
+            .collect()
+    } else {
+        vec![path]
+    };
     candidates.into_iter()
 }
 
@@ -97,6 +110,15 @@ fn not_found(path: &Path) -> SolcError {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = path.metadata().unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
     #[test]
     fn resolves_bare_name_from_search_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -106,11 +128,35 @@ mod tests {
         let (name, file_name) = ("compiler", "compiler");
         let compiler = dir.path().join(file_name);
         std::fs::write(&compiler, []).unwrap();
+        #[cfg(unix)]
+        make_executable(&compiler);
         let search_path = env::join_paths([dir.path()]).unwrap();
 
         assert_eq!(
             resolve_in_path(Path::new(name), &search_path),
             Some(canonicalize(compiler).unwrap())
+        );
+    }
+
+    #[test]
+    fn skips_non_executable_path_entry() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let (name, file_name) = ("compiler", "compiler.exe");
+        #[cfg(not(windows))]
+        let (name, file_name) = ("compiler", "compiler");
+        let non_executable = first_dir.path().join(name);
+        let executable = second_dir.path().join(file_name);
+        std::fs::write(non_executable, []).unwrap();
+        std::fs::write(&executable, []).unwrap();
+        #[cfg(unix)]
+        make_executable(&executable);
+        let search_path = env::join_paths([first_dir.path(), second_dir.path()]).unwrap();
+
+        assert_eq!(
+            resolve_in_path(Path::new(name), &search_path),
+            Some(canonicalize(executable).unwrap())
         );
     }
 
