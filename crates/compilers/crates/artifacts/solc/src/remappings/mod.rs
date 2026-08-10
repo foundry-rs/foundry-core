@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
-    path::{Path, PathBuf},
+    path::{MAIN_SEPARATOR, Path, PathBuf},
     str::FromStr,
 };
 
@@ -53,6 +53,31 @@ pub struct Remapping {
     pub context: Option<String>,
     pub name: String,
     pub path: String,
+}
+
+/// The result of ownership-aware remapping discovery.
+#[cfg(feature = "walkdir")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemappingDiscovery {
+    /// Remappings selected using the global package priority.
+    pub global: Vec<Remapping>,
+    /// Preferred nested remappings for each lexical owner and alias.
+    ///
+    /// This includes aliases that occur only once within the scanned directory. Entries are
+    /// ordered by the most specific owner first, and consumers must preserve this order.
+    pub contextual: Vec<Remapping>,
+}
+
+#[cfg(feature = "walkdir")]
+impl RemappingDiscovery {
+    /// Makes all discovered remapping targets and contexts relative to `root`.
+    pub fn into_relative(self, root: &Path) -> Self {
+        let relative = |remapping| RelativeRemapping::new(remapping, root).to_relative_remapping();
+        Self {
+            global: self.global.into_iter().map(relative).collect(),
+            contextual: self.contextual.into_iter().map(relative).collect(),
+        }
+    }
 }
 
 impl Remapping {
@@ -191,10 +216,19 @@ pub struct RelativeRemapping {
 impl RelativeRemapping {
     /// Creates a new `RelativeRemapping` starting prefixed with `root`
     pub fn new(remapping: Remapping, root: &Path) -> Self {
+        let context = remapping.context.map(|context| {
+            let has_boundary = context.ends_with(['/', '\\']);
+            let mut context = RelativeRemappingPathBuf::with_root(root, context)
+                .path
+                .to_string_lossy()
+                .to_string();
+            if has_boundary && !context.ends_with(['/', '\\']) {
+                context.push(MAIN_SEPARATOR);
+            }
+            context
+        });
         Self {
-            context: remapping.context.map(|c| {
-                RelativeRemappingPathBuf::with_root(root, c).path.to_string_lossy().to_string()
-            }),
+            context,
             name: remapping.name,
             path: RelativeRemappingPathBuf::with_root(root, remapping.path),
         }
