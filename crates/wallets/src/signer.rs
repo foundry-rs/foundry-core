@@ -357,9 +357,9 @@ impl PendingSigner {
         match self {
             Self::Keystore(path, expected_address) => {
                 // Falling back to the password prompt is reserved for recoverable
-                // environmental failures and is always announced on stderr.
-                // Cancellation, corruption, invalidation, and a password mismatch
-                // require an explicit re-enroll/remove decision.
+                // environmental failures. Cancellation, corruption, invalidation,
+                // and a password mismatch require an explicit re-enroll/remove
+                // decision.
                 #[cfg(all(target_os = "macos", feature = "touch-id"))]
                 if crate::touch_id::is_enrolled(&path) {
                     match crate::touch_id::unwrap_password(&path) {
@@ -378,9 +378,7 @@ impl PendingSigner {
                                 Err(e) => return Err(WalletSignerError::Local(e)),
                             }
                         }
-                        Err(e) if e.is_recoverable() => {
-                            eprintln!("Warning: {e}; falling back to the password prompt.")
-                        }
+                        Err(e) if e.is_recoverable() => {}
                         Err(e) => return Err(e.into()),
                     }
                 }
