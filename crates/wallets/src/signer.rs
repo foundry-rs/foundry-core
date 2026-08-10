@@ -31,21 +31,6 @@ pub type Result<T> = std::result::Result<T, WalletSignerError>;
 
 const BIP32_HARDEN: u32 = 0x8000_0000;
 
-fn validate_bip32_path(path: &str) -> Result<()> {
-    for component in path.split('/') {
-        let index = component
-            .strip_suffix('\'')
-            .or_else(|| component.strip_suffix('h'))
-            .unwrap_or(component);
-        if let Ok(index) = index.parse::<u32>()
-            && index >= BIP32_HARDEN
-        {
-            return Err(WalletSignerError::InvalidBip32Index(index));
-        }
-    }
-    Ok(())
-}
-
 /// Wrapper enum around different signers.
 #[derive(Debug)]
 pub enum WalletSigner {
@@ -426,6 +411,21 @@ impl PendingSigner {
             }
         }
     }
+}
+
+fn validate_bip32_path(path: &str) -> Result<()> {
+    for component in path.split('/') {
+        let index = component
+            .strip_suffix('\'')
+            .or_else(|| component.strip_suffix('h'))
+            .unwrap_or(component);
+        if let Ok(index) = index.parse::<u32>()
+            && index >= BIP32_HARDEN
+        {
+            return Err(WalletSignerError::InvalidBip32Index(index));
+        }
+    }
+    Ok(())
 }
 
 fn checked_keystore_signer(
