@@ -1,6 +1,5 @@
 use self::input::VyperVersionedInput;
-use super::compiler_path::resolve_and_approve;
-use super::{Compiler, CompilerOutput, Language};
+use super::{Compiler, CompilerOutput, Language, compiler_path::resolve_and_approve};
 pub use crate::artifacts::vyper::{VyperCompilationError, VyperInput, VyperOutput, VyperSettings};
 use crate::parser::VyperParser;
 use core::fmt;
