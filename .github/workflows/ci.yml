@@ -152,8 +152,9 @@ jobs:
       fail-fast: false
       matrix:
         # Keep PR feedback fast by running the test matrix on Linux only.
+        # Temporarily add Windows for this PR to validate the contextual remapping path fix.
         # Pushes to main retain cross-platform coverage.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest", "windows-latest"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && (github.head_ref == 'mablr/fix-windows-contextual-remapping-tests' && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest"]') || '["ubuntu-latest", "macos-latest", "windows-latest"]') }}
         rust: ["stable", "1.95"]
         flags: ["", "--all-features"]
         exclude:
