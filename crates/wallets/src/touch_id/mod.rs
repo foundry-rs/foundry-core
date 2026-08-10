@@ -119,6 +119,11 @@ pub enum TouchIdError {
     PasswordMismatch,
     #[error("Secure Enclave: {0}")]
     SecureEnclave(String),
+    #[error(
+        "Touch ID sidecar path `{0}` contains an Ethereum keystore; rename the conflicting \
+         keystore before unlocking this account"
+    )]
+    KeystoreCollision(PathBuf),
     #[error("failed to access the Touch ID sidecar at `{path}`: {source}")]
     SidecarIo { path: PathBuf, source: std::io::Error },
     #[error(
@@ -257,6 +262,8 @@ pub fn policy(keystore: &Path) -> Result<Policy, TouchIdError> {
 /// wrapped password that fails to decrypt as tampering and aborts with
 /// [`TouchIdError::PasswordMismatch`] instead of falling back to the prompt.
 pub fn enroll(keystore: &Path, password: &str, policy: Policy) -> Result<(), TouchIdError> {
+    ensure_sidecar_is_not_keystore(keystore)?;
+
     let (mut ptr, mut len) = (std::ptr::null_mut(), 0);
     // SAFETY: the out parameters are valid for writes.
     let status = unsafe { foundry_se_create(policy.raw(), &raw mut ptr, &raw mut len) };
@@ -316,8 +323,9 @@ fn read_sidecar(keystore: &Path) -> Result<Sidecar, TouchIdError> {
     if !path.exists() {
         return Err(TouchIdError::NotEnrolled);
     }
-    let raw =
-        fs::read_to_string(&path).map_err(|source| TouchIdError::SidecarIo { path, source })?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|source| TouchIdError::SidecarIo { path: path.clone(), source })?;
+    reject_keystore_collision(&path, &raw)?;
     // Gate on the version before parsing the full schema, so a future format's
     // sidecar reports its version instead of a schema mismatch.
     #[derive(Deserialize)]
@@ -329,6 +337,29 @@ fn read_sidecar(keystore: &Path) -> Result<Sidecar, TouchIdError> {
         return Err(TouchIdError::UnsupportedVersion(version));
     }
     Ok(serde_json::from_str(&raw)?)
+}
+
+fn ensure_sidecar_is_not_keystore(keystore: &Path) -> Result<(), TouchIdError> {
+    let path = sidecar_path(keystore);
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|source| TouchIdError::SidecarIo { path: path.clone(), source })?;
+    reject_keystore_collision(&path, &raw)
+}
+
+fn reject_keystore_collision(path: &Path, raw: &str) -> Result<(), TouchIdError> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Ok(());
+    };
+    if value.get("version").is_some()
+        && (value.get("crypto").is_some() || value.get("Crypto").is_some())
+    {
+        Err(TouchIdError::KeystoreCollision(path.to_path_buf()))
+    } else {
+        Ok(())
+    }
 }
 
 /// Unwraps the keystore password from the sidecar, triggering the enclave's
@@ -368,6 +399,7 @@ pub fn unwrap_password(keystore: &Path) -> Result<Zeroizing<String>, TouchIdErro
 pub fn remove(keystore: &Path) -> Result<bool, TouchIdError> {
     let path = sidecar_path(keystore);
     if path.exists() {
+        ensure_sidecar_is_not_keystore(keystore)?;
         fs::remove_file(&path).map_err(|source| TouchIdError::SidecarIo { path, source })?;
         Ok(true)
     } else {
@@ -378,6 +410,25 @@ pub fn remove(keystore: &Path) -> Result<bool, TouchIdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const KEYSTORE_JSON: &str = r#"{
+        "crypto": {
+            "cipher": "aes-128-ctr",
+            "cipherparams": { "iv": "00000000000000000000000000000000" },
+            "ciphertext": "0000000000000000000000000000000000000000000000000000000000000000",
+            "kdf": "scrypt",
+            "kdfparams": {
+                "dklen": 32,
+                "n": 8192,
+                "p": 1,
+                "r": 8,
+                "salt": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "mac": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "id": "00000000-0000-0000-0000-000000000000",
+        "version": 3
+    }"#;
 
     #[test]
     fn lockout_and_password_mismatch_do_not_fall_back() {
@@ -448,6 +499,42 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(unwrap_password(&keystore), Err(TouchIdError::InvalidHex(_))));
+    }
+
+    #[test]
+    fn keystore_at_sidecar_path_is_never_treated_as_a_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let keystore = dir.path().join("deployer");
+        fs::write(&keystore, KEYSTORE_JSON).unwrap();
+        let collision = sidecar_path(&keystore);
+        fs::write(&collision, KEYSTORE_JSON).unwrap();
+
+        let err = unwrap_password(&keystore).unwrap_err();
+        assert!(matches!(&err, TouchIdError::KeystoreCollision(path) if path == &collision));
+        assert!(!err.to_string().contains("delete"));
+
+        assert!(matches!(
+            remove(&keystore),
+            Err(TouchIdError::KeystoreCollision(path)) if path == collision
+        ));
+        assert_eq!(fs::read_to_string(&collision).unwrap(), KEYSTORE_JSON);
+
+        assert!(matches!(
+            enroll(&keystore, "password", Policy::UserPresence),
+            Err(TouchIdError::KeystoreCollision(path)) if path == collision
+        ));
+        assert_eq!(fs::read_to_string(collision).unwrap(), KEYSTORE_JSON);
+    }
+
+    #[test]
+    fn legacy_keystore_shapes_are_rejected_as_sidecars() {
+        let path = Path::new("deployer.touchid");
+        for raw in [r#"{"version":"1","Crypto":{}}"#, r#"{"version":3,"crypto":{}}"#] {
+            assert!(matches!(
+                reject_keystore_collision(path, raw),
+                Err(TouchIdError::KeystoreCollision(collision)) if collision == path
+            ));
+        }
     }
 
     #[test]
