@@ -29,6 +29,23 @@ use alloy_signer_turnkey::TurnkeySigner;
 
 pub type Result<T> = std::result::Result<T, WalletSignerError>;
 
+const BIP32_HARDEN: u32 = 0x8000_0000;
+
+fn validate_bip32_path(path: &str) -> Result<()> {
+    for component in path.split('/') {
+        let index = component
+            .strip_suffix('\'')
+            .or_else(|| component.strip_suffix('h'))
+            .unwrap_or(component);
+        if let Ok(index) = index.parse::<u32>()
+            && index >= BIP32_HARDEN
+        {
+            return Err(WalletSignerError::InvalidBip32Index(index));
+        }
+    }
+    Ok(())
+}
+
 /// Wrapper enum around different signers.
 #[derive(Debug)]
 pub enum WalletSigner {
@@ -264,8 +281,12 @@ impl WalletSigner {
         }
 
         builder = if let Some(hd_path) = derivation_path {
+            validate_bip32_path(hd_path)?;
             builder.derivation_path(hd_path)?
         } else {
+            if index >= BIP32_HARDEN {
+                return Err(WalletSignerError::InvalidBip32Index(index));
+            }
             builder.index(index)?
         };
 
@@ -423,6 +444,38 @@ fn checked_keystore_signer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
+
+    #[test]
+    fn rejects_mnemonic_indices_that_set_harden_bit() {
+        assert!(matches!(
+            WalletSigner::from_mnemonic(TEST_MNEMONIC, None, None, BIP32_HARDEN),
+            Err(WalletSignerError::InvalidBip32Index(BIP32_HARDEN))
+        ));
+
+        for path in [
+            "m/2147483648",
+            "m/2147483648'",
+            "m/2147483648h",
+            "m/+2147483648'",
+            "m/02147483648'",
+            "m/4294967295",
+        ] {
+            assert!(matches!(
+                WalletSigner::from_mnemonic(TEST_MNEMONIC, None, Some(path), 0),
+                Err(WalletSignerError::InvalidBip32Index(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn accepts_largest_unhardened_mnemonic_index() {
+        assert!(WalletSigner::from_mnemonic(TEST_MNEMONIC, None, None, BIP32_HARDEN - 1).is_ok());
+        assert!(
+            WalletSigner::from_mnemonic(TEST_MNEMONIC, None, Some("m/2147483647'"), 0,).is_ok()
+        );
+    }
 
     #[test]
     fn rejects_keystore_signer_with_unexpected_address() {
