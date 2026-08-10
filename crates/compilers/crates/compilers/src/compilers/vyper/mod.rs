@@ -81,12 +81,10 @@ impl Vyper {
     }
 
     /// Creates a new instance after resolving `path` to an exact executable and passing that path
-    /// to `approve`. The resolved path is used for both the version probe and later compilations.
-    pub fn new_with_approval(
-        path: impl Into<PathBuf>,
-        approve: impl FnOnce(&Path) -> Result<()>,
-    ) -> Result<Self> {
-        let path = resolve_and_approve(path.into(), approve)?;
+    /// to the process-wide approval handler. The resolved path is used for both the version probe
+    /// and later compilations.
+    pub fn new_with_approval(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = resolve_and_approve(path.into())?;
         Self::new(path)
     }
 

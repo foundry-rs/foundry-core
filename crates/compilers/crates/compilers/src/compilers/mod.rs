@@ -22,6 +22,7 @@ use std::{
 };
 
 mod compiler_path;
+pub use compiler_path::set_compiler_approval_handler;
 pub mod multi;
 pub mod solc;
 pub mod vyper;

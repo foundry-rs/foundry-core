@@ -6,9 +6,37 @@ use std::{
     env,
     ffi::OsStr,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
 
-pub(super) fn resolve_and_approve(
+type CompilerApprovalHandler = dyn Fn(&Path) -> Result<()> + Send + Sync;
+
+static COMPILER_APPROVAL_HANDLER: RwLock<Option<Arc<CompilerApprovalHandler>>> = RwLock::new(None);
+
+/// Installs the process-wide handler used to approve resolved compiler executable paths.
+pub fn set_compiler_approval_handler(
+    handler: impl Fn(&Path) -> Result<()> + Send + Sync + 'static,
+) {
+    *COMPILER_APPROVAL_HANDLER.write().unwrap_or_else(|err| err.into_inner()) =
+        Some(Arc::new(handler));
+}
+
+pub(super) fn resolve_and_approve(path: PathBuf) -> Result<PathBuf> {
+    resolve_and_approve_with(path, |path| {
+        let handler = COMPILER_APPROVAL_HANDLER
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                SolcError::msg(format!(
+                    "compiler executable {path:?} requires approval, but no approval handler is installed"
+                ))
+            })?;
+        handler(path)
+    })
+}
+
+fn resolve_and_approve_with(
     path: PathBuf,
     approve: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<PathBuf> {
@@ -98,7 +126,7 @@ mod tests {
         symlink(&compiler, &alias).unwrap();
         let expected = canonicalize(&compiler).unwrap();
 
-        let resolved = resolve_and_approve(alias, |path| {
+        let resolved = resolve_and_approve_with(alias, |path| {
             assert_eq!(path, expected);
             Ok(())
         })

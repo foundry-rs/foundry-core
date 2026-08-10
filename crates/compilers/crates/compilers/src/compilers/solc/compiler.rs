@@ -95,12 +95,10 @@ impl Solc {
     }
 
     /// Creates a new instance after resolving `path` to an exact executable and passing that path
-    /// to `approve`. The resolved path is used for both the version probe and later compilations.
-    pub fn new_with_approval(
-        path: impl Into<PathBuf>,
-        approve: impl FnOnce(&Path) -> Result<()>,
-    ) -> Result<Self> {
-        Self::new_with_args_and_approval(path, Vec::<String>::new(), approve)
+    /// to the process-wide approval handler. The resolved path is used for both the version probe
+    /// and later compilations.
+    pub fn new_with_approval(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::new_with_args_and_approval(path, Vec::<String>::new())
     }
 
     /// A new instance which points to `solc` with additional cli arguments. Invokes `solc
@@ -118,13 +116,12 @@ impl Solc {
     }
 
     /// Creates a new instance with additional CLI arguments after resolving and approving its
-    /// exact executable path.
+    /// exact executable path with the process-wide approval handler.
     pub fn new_with_args_and_approval(
         path: impl Into<PathBuf>,
         extra_args: impl IntoIterator<Item: Into<String>>,
-        approve: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<Self> {
-        let path = resolve_and_approve(path.into(), approve)?;
+        let path = resolve_and_approve(path.into())?;
         Self::new_with_args(path, extra_args)
     }
 
@@ -767,7 +764,8 @@ fi
         }
         symlink(&first, &alias).unwrap();
 
-        let solc = Solc::new_with_approval(&alias, |_| Ok(())).unwrap();
+        crate::set_compiler_approval_handler(|_| Ok(()));
+        let solc = Solc::new_with_approval(&alias).unwrap();
         assert_eq!(solc.solc, foundry_compilers_core::utils::canonicalize(&first).unwrap());
         std::fs::remove_file(&alias).unwrap();
         symlink(&second, &alias).unwrap();
