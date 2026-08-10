@@ -36,6 +36,8 @@ pub enum PrivateKeyError {
 pub enum WalletSignerError {
     #[error(transparent)]
     Local(#[from] LocalSignerError),
+    #[error("BIP-32 index {0} must be less than 2147483648")]
+    InvalidBip32Index(u32),
     #[error("Failed to decrypt keystore: incorrect password")]
     IncorrectKeystorePassword,
     #[error("decrypted keystore address mismatch: expected {expected}, got {actual}")]
