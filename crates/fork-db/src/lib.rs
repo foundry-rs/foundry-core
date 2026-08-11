@@ -9,6 +9,6 @@ pub mod backend;
 pub mod cache;
 pub mod error;
 
-pub use backend::{BackendHandler, SharedBackend};
+pub use backend::{BackendHandler, ForkBlock, SharedBackend};
 pub use cache::{BlockchainDb, ForkBlockEnv};
 pub use error::{DatabaseError, DatabaseResult};

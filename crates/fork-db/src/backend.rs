@@ -4,6 +4,7 @@ use crate::{
     cache::{BlockchainDb, FlushJsonBlockCacheDB, ForkBlockEnv, MemDb, StorageInfo},
     error::{DatabaseError, DatabaseResult},
 };
+use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::U256Map};
 use alloy_provider::{
     DynProvider, Network, Provider,
@@ -51,7 +52,7 @@ supported. Please try to change your RPC url to an archive node if the issue per
 type AccountFuture<Err> =
     Pin<Box<dyn Future<Output = (Result<(U256, u64, Bytes), Err>, Address)> + Send>>;
 type StorageFuture<Err> = Pin<Box<dyn Future<Output = (Result<U256, Err>, Address, U256)> + Send>>;
-type BlockHashFuture<Err> = Pin<Box<dyn Future<Output = (Result<B256, Err>, u64)> + Send>>;
+type BlockHashFuture<Err> = Pin<Box<dyn Future<Output = (Result<BlockHashData, Err>, u64)> + Send>>;
 type FullBlockFuture<Err, N = AnyNetwork> = Pin<
     Box<
         dyn Future<
@@ -193,6 +194,8 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     /// The block to fetch data from.
     // This is an `Option` so that we can have less code churn in the functions below
     block_id: Option<BlockId>,
+    /// Exact block anchoring state reads and block ancestry.
+    block_anchor: Option<ForkBlock>,
     /// The mode for fetching account data
     account_fetch_mode: Arc<AtomicU8>,
 }
@@ -203,6 +206,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         db: BlockchainDb<B>,
         rx: UnboundedReceiver<BackendRequest<N>>,
         block_id: Option<BlockId>,
+        block_anchor: Option<ForkBlock>,
     ) -> Self {
         Self {
             provider,
@@ -214,6 +218,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             queued_requests: Default::default(),
             incoming: rx,
             block_id,
+            block_anchor,
             account_fetch_mode: Arc::new(AtomicU8::new(ACCOUNT_FETCH_UNCHECKED)),
         }
     }
@@ -265,6 +270,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             }
             BackendRequest::SetPinnedBlock(block_id) => {
                 self.block_id = Some(block_id);
+                self.block_anchor = None;
             }
             BackendRequest::UpdateAddress(address_data) => {
                 for (address, data) in address_data {
@@ -468,27 +474,96 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 self.db.cache().record_cache_miss();
                 entry.insert(vec![listener]);
                 let provider = self.provider.clone();
+                let anchor = self.block_anchor;
                 let fut = Box::pin(async move {
-                    let block = provider
-                        .get_block_by_number(number.into())
-                        .hashes()
-                        .await
-                        .wrap_err("failed to get block");
+                    let block_hashes = async {
+                        if let Some(anchor) = anchor
+                            && number < anchor.number
+                        {
+                            eyre::ensure!(
+                                anchor.number == anchor.rpc_number,
+                                "exact block ancestry is unsupported when the EVM-visible block \
+                                 number ({}) differs from the RPC block number ({})",
+                                anchor.number,
+                                anchor.rpc_number
+                            );
+                            if anchor.number - number > 256 {
+                                return Ok(BlockHashData::from_iter([(
+                                    U256::from(number),
+                                    KECCAK_EMPTY,
+                                )]));
+                            }
+                            let mut hashes = BlockHashData::default();
+                            let mut descendant = anchor;
+                            while descendant.number > number {
+                                let block = provider
+                                    .get_block_by_hash(descendant.hash)
+                                    .hashes()
+                                    .await
+                                    .wrap_err_with(|| {
+                                        format!(
+                                            "failed to get anchored block {} ({})",
+                                            descendant.rpc_number, descendant.hash
+                                        )
+                                    })?
+                                    .ok_or_else(|| {
+                                        eyre::eyre!(
+                                            "anchored block {} ({}) not found",
+                                            descendant.rpc_number,
+                                            descendant.hash
+                                        )
+                                    })?;
+                                let header = block.header();
+                                eyre::ensure!(
+                                    header.number() == descendant.rpc_number &&
+                                        header.hash() == descendant.hash,
+                                    "anchored block changed: expected {} ({}), got {} ({})",
+                                    descendant.rpc_number,
+                                    descendant.hash,
+                                    header.number(),
+                                    header.hash()
+                                );
+                                let rpc_number = descendant.rpc_number.checked_sub(1).ok_or_else(
+                                    || eyre::eyre!("anchored ancestry precedes the genesis block"),
+                                )?;
+                                descendant = ForkBlock::with_rpc_number(
+                                    descendant.number - 1,
+                                    rpc_number,
+                                    header.parent_hash(),
+                                );
+                                hashes.insert(U256::from(descendant.number), descendant.hash);
+                            }
+                            Ok(hashes)
+                        } else if anchor.is_none() {
+                            let block = provider
+                                .get_block_by_number(number.into())
+                                .hashes()
+                                .await
+                                .wrap_err("failed to get block");
 
-                    let block_hash = match block {
-                        Ok(Some(block)) => Ok(block.header().hash()),
-                        Ok(None) => {
-                            warn!(target: "backendhandler", ?number, "block not found");
-                            // if no block was returned then the block does not exist, in which case
-                            // we return empty hash
-                            Ok(KECCAK_EMPTY)
+                            match block {
+                                Ok(Some(block)) => Ok(BlockHashData::from_iter([(
+                                    U256::from(number),
+                                    block.header().hash(),
+                                )])),
+                                Ok(None) => {
+                                    warn!(target: "backendhandler", ?number, "block not found");
+                                    Ok(BlockHashData::from_iter([(
+                                        U256::from(number),
+                                        KECCAK_EMPTY,
+                                    )]))
+                                }
+                                Err(err) => {
+                                    error!(target: "backendhandler", %err, ?number, "failed to get block");
+                                    Err(err)
+                                }
+                            }
+                        } else {
+                            Ok(BlockHashData::from_iter([(U256::from(number), KECCAK_EMPTY)]))
                         }
-                        Err(err) => {
-                            error!(target: "backendhandler", %err, ?number, "failed to get block");
-                            Err(err)
-                        }
-                    };
-                    (block_hash, number)
+                    }
+                    .await;
+                    (block_hashes, number)
                 });
                 self.pending_requests.push(ProviderRequest::BlockHash(fut));
             }
@@ -606,7 +681,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                     }
                     ProviderRequest::BlockHash(fut) => {
                         if let Poll::Ready((block_hash, number)) = fut.poll_unpin(cx) {
-                            let value = match block_hash {
+                            let hashes = match block_hash {
                                 Ok(value) => value,
                                 Err(err) => {
                                     let err = Arc::new(err);
@@ -624,7 +699,8 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                             };
 
                             // update the cache
-                            pin.db.block_hashes().write().insert(U256::from(number), value);
+                            let value = hashes[&U256::from(number)];
+                            pin.db.block_hashes().write().extend(hashes);
 
                             // notify all listeners
                             if let Some(listeners) = pin.block_requests.remove(&number) {
@@ -696,6 +772,29 @@ pub enum BlockingMode {
     Block,
 }
 
+/// A block number and hash that identify the exact root of a fork.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForkBlock {
+    /// EVM-visible block number used to key `BLOCKHASH` requests.
+    pub number: u64,
+    /// RPC block number used to validate fetched headers.
+    pub rpc_number: u64,
+    /// Block hash of the fork root.
+    pub hash: B256,
+}
+
+impl ForkBlock {
+    /// Creates a new exact fork root.
+    pub const fn new(number: u64, hash: B256) -> Self {
+        Self { number, rpc_number: number, hash }
+    }
+
+    /// Creates an exact fork root whose RPC and EVM-visible block numbers differ.
+    pub const fn with_rpc_number(number: u64, rpc_number: u64, hash: B256) -> Self {
+        Self { number, rpc_number, hash }
+    }
+}
+
 impl BlockingMode {
     /// run process logic with the blocking mode
     pub fn run<F, R>(&self, f: F) -> R
@@ -749,6 +848,8 @@ pub struct SharedBackend<N: Network = AnyNetwork, B: Serialize + Clone = BlockEn
 
     /// The mode for the `SharedBackend` to block in place or not
     blocking_mode: BlockingMode,
+    /// Whether this backend is pinned to an immutable exact fork identity.
+    exact: bool,
 }
 
 impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
@@ -804,17 +905,38 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
     ) -> (Self, BackendHandler<N, B>) {
         let (backend, backend_rx) = unbounded();
         let cache = Arc::new(FlushJsonBlockCacheDB(Arc::clone(db.cache())));
-        let handler = BackendHandler::new(provider.erased(), db, backend_rx, pin_block);
-        (Self { backend, cache, blocking_mode: Default::default() }, handler)
+        let handler = BackendHandler::new(provider.erased(), db, backend_rx, pin_block, None);
+        (Self { backend, cache, blocking_mode: Default::default(), exact: false }, handler)
+    }
+
+    /// Returns a new [`SharedBackend`] and [`BackendHandler`] pinned to an exact block.
+    pub fn new_with_anchor<P: Provider<N> + 'static>(
+        provider: P,
+        db: BlockchainDb<B>,
+        anchor: ForkBlock,
+    ) -> (Self, BackendHandler<N, B>) {
+        let (backend, backend_rx) = unbounded();
+        let cache = Arc::new(FlushJsonBlockCacheDB(Arc::clone(db.cache())));
+        db.block_hashes().write().insert(U256::from(anchor.number), anchor.hash);
+        let block_id = BlockId::from((anchor.hash, Some(false)));
+        let handler =
+            BackendHandler::new(provider.erased(), db, backend_rx, Some(block_id), Some(anchor));
+        (Self { backend, cache, blocking_mode: Default::default(), exact: true }, handler)
     }
 
     /// Returns a new `SharedBackend` and the `BackendHandler` with a specific blocking mode
     pub fn with_blocking_mode(&self, mode: BlockingMode) -> Self {
-        Self { backend: self.backend.clone(), cache: self.cache.clone(), blocking_mode: mode }
+        Self {
+            backend: self.backend.clone(),
+            cache: self.cache.clone(),
+            blocking_mode: mode,
+            exact: self.exact,
+        }
     }
 
     /// Updates the pinned block to fetch data from
     pub fn set_pinned_block(&self, block: impl Into<BlockId>) -> eyre::Result<()> {
+        eyre::ensure!(!self.exact, "exact fork backends must be replaced instead of re-pinned");
         let req = BackendRequest::SetPinnedBlock(block.into());
         self.backend.unbounded_send(req).map_err(|e| eyre::eyre!("{:?}", e))
     }
@@ -1017,7 +1139,6 @@ impl<N: Network, B: ForkBlockEnv> DatabaseRef for SharedBackend<N, B> {
 mod tests {
     use super::*;
     use crate::cache::{BlockchainDbMeta, JsonBlockCacheDB};
-    use alloy_consensus::BlockHeader;
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_client::ClientBuilder;
     use serde::Deserialize;
@@ -1186,6 +1307,118 @@ mod tests {
         assert_eq!(backend.cache_misses(), 1);
 
         server_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exact_anchor_pins_storage_and_block_ancestry() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
+        let anchor_hash = B256::with_last_byte(0xaa);
+        let parent_hash = B256::with_last_byte(0xbb);
+
+        let server_handle = std::thread::spawn(move || {
+            #[derive(Debug, Deserialize)]
+            struct Request {
+                id: serde_json::Value,
+                method: String,
+                params: serde_json::Value,
+            }
+
+            let mut storage_request = server.recv().unwrap();
+            let storage: Request = serde_json::from_reader(storage_request.as_reader()).unwrap();
+            assert_eq!(storage.method, "eth_getStorageAt");
+            assert_eq!(storage.params[2]["blockHash"], anchor_hash.to_string());
+            assert_eq!(storage.params[2]["requireCanonical"], false);
+            storage_request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": storage.id,
+                        "result": "0x2a",
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+
+            let mut block_request = server.recv().unwrap();
+            let block: Request = serde_json::from_reader(block_request.as_reader()).unwrap();
+            assert_eq!(block.method, "eth_getBlockByHash");
+            assert_eq!(block.params[0], anchor_hash.to_string());
+            block_request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": block.id,
+                        "result": {
+                            "hash": anchor_hash,
+                            "parentHash": parent_hash,
+                            "sha3Uncles": B256::ZERO,
+                            "miner": Address::ZERO,
+                            "stateRoot": B256::ZERO,
+                            "transactionsRoot": B256::ZERO,
+                            "receiptsRoot": B256::ZERO,
+                            "logsBloom": format!("0x{}", "00".repeat(256)),
+                            "difficulty": "0x0",
+                            "number": "0xa",
+                            "gasLimit": "0x1c9c380",
+                            "gasUsed": "0x0",
+                            "timestamp": "0x1",
+                            "extraData": "0x",
+                            "mixHash": B256::ZERO,
+                            "nonce": "0x0000000000000000",
+                            "baseFeePerGas": "0x1",
+                            "transactions": [],
+                            "uncles": [],
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        });
+
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
+        let db = BlockchainDb::new(meta, None);
+        let (backend, handler) =
+            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, anchor_hash));
+        tokio::spawn(handler);
+
+        assert_eq!(backend.storage_ref(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
+        assert_eq!(backend.block_hash_ref(9).unwrap(), parent_hash);
+        server_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exact_anchor_rejects_remapped_block_number_ancestry() {
+        let provider = get_http_provider("http://127.0.0.1:1");
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), "http://127.0.0.1:1".to_string());
+        let db = BlockchainDb::new(meta, None);
+        let (backend, handler) = SharedBackend::new_with_anchor(
+            provider,
+            db,
+            ForkBlock::with_rpc_number(100, 10, B256::with_last_byte(1)),
+        );
+        tokio::spawn(handler);
+
+        let err = backend.block_hash_ref(99).unwrap_err().to_string();
+        assert!(
+            err.contains("EVM-visible block number (100) differs from the RPC block number (10)")
+        );
+    }
+
+    #[test]
+    fn exact_backend_cannot_be_repinned() {
+        let provider = get_http_provider("http://127.0.0.1:1");
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), "http://127.0.0.1:1".to_string());
+        let db = BlockchainDb::new(meta, None);
+        let (backend, _handler) = SharedBackend::new_with_anchor(
+            provider,
+            db,
+            ForkBlock::new(1, B256::with_last_byte(1)),
+        );
+
+        let err = backend.set_pinned_block(2).unwrap_err().to_string();
+        assert_eq!(err, "exact fork backends must be replaced instead of re-pinned");
     }
 
     #[tokio::test(flavor = "multi_thread")]

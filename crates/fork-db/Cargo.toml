@@ -23,6 +23,7 @@ zstd = ["dep:zstd"]
 
 [dependencies]
 alloy-chains = { workspace = true, features = ["serde"] }
+alloy-consensus.workspace = true
 alloy-primitives = { workspace = true, features = ["map"] }
 alloy-provider = { version = "2.2.0", default-features = false }
 alloy-rpc-types = { version = "2.2.0", features = ["eth"] }
@@ -45,7 +46,6 @@ url = "2.5.8"
 zstd = { version = "0.13.3", optional = true }
 
 [dev-dependencies]
-alloy-consensus.workspace = true
 alloy-rpc-client = "2.2.0"
 tempfile.workspace = true
 tiny_http = "0.12.0"
