@@ -713,15 +713,50 @@ fn compile_output(output: Output) -> Result<Vec<u8>> {
 
 fn version_from_output(output: Output) -> Result<Version> {
     if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let version = stdout
-            .lines()
-            .rfind(|l| !l.trim().is_empty())
-            .ok_or_else(|| SolcError::msg("Version not found in Solc output"))?;
-        // NOTE: semver doesn't like `+` in g++ in build metadata which is invalid semver
-        Ok(Version::from_str(&version.trim_start_matches("Version: ").replace(".g++", ".gcc"))?)
+        parse_version(&String::from_utf8_lossy(&output.stdout))
     } else {
         Err(SolcError::solc_output(&output))
+    }
+}
+
+fn parse_version(stdout: &str) -> Result<Version> {
+    let version = stdout
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("Version: ").or_else(|| line.strip_prefix("solar Version: "))
+        })
+        .ok_or_else(|| SolcError::msg("Version not found in Solc output"))?;
+    // NOTE: semver doesn't like `+` in g++ in build metadata which is invalid semver
+    Ok(Version::from_str(&version.replace(".g++", ".gcc"))?)
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn parses_solc_version_output() {
+        let version = parse_version(
+            "solc, the solidity compiler commandline interface\n\
+             Version: 0.8.35+commit.47b9dedd.Linux.g++\n",
+        )
+        .unwrap();
+
+        assert_eq!(version, Version::parse("0.8.35+commit.47b9dedd.Linux.gcc").unwrap());
+    }
+
+    #[test]
+    fn parses_solar_version_output() {
+        let version = parse_version(
+            "solar Version: 0.2.0\n\
+             Commit SHA: 3140f3eab033e0e620938f3f0e0ef6e31afa3bdd\n\
+             Build Profile: debug\n",
+        )
+        .unwrap();
+
+        assert_eq!(version, Version::new(0, 2, 0));
     }
 }
 
