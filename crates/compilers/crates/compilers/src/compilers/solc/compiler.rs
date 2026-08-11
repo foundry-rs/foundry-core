@@ -725,7 +725,7 @@ fn parse_version(stdout: &str) -> Result<Version> {
         .rev()
         .find_map(|line| {
             let line = line.trim();
-            line.strip_prefix("Version: ").or_else(|| line.strip_prefix("solar Version: "))
+            line.strip_prefix("Version: ")
         })
         .ok_or_else(|| SolcError::msg("Version not found in Solc output"))?;
     // NOTE: semver doesn't like `+` in g++ in build metadata which is invalid semver
@@ -765,13 +765,12 @@ mod tests {
     #[test]
     fn parses_solar_version_output() {
         let version = parse_version(
-            "solar Version: 0.2.0\n\
-             Commit SHA: 3140f3eab033e0e620938f3f0e0ef6e31afa3bdd\n\
-             Build Profile: debug\n",
+            "solar the Solidity compiler\n\
+             Version: 0.8.36+commit.3140f3e.solar.0.2.0\n",
         )
         .unwrap();
 
-        assert_eq!(version, Version::new(0, 2, 0));
+        assert_eq!(version, Version::parse("0.8.36+commit.3140f3e.solar.0.2.0").unwrap());
     }
 
     fn solc() -> Solc {
