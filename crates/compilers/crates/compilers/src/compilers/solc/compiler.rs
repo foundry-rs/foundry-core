@@ -491,6 +491,9 @@ impl Solc {
 
     fn version_impl(solc: &Path, args: &[String]) -> Result<Version> {
         let mut cmd = Command::new(solc);
+        if is_solar_binary(solc) {
+            cmd.env("SOLC_WRAPPER", "1");
+        }
         cmd.args(args)
             .arg("--version")
             .stdin(Stdio::piped())
@@ -676,6 +679,9 @@ impl Solc {
 
     pub async fn async_version(solc: &Path) -> Result<Version> {
         let mut cmd = tokio::process::Command::new(solc);
+        if is_solar_binary(solc) {
+            cmd.env("SOLC_WRAPPER", "1");
+        }
         cmd.arg("--version").stdin(Stdio::piped()).stderr(Stdio::piped()).stdout(Stdio::piped());
         debug!(?cmd, "getting version");
         let output = cmd.output().await.map_err(|e| SolcError::io(e, solc))?;
@@ -709,6 +715,10 @@ impl Solc {
 
 fn compile_output(output: Output) -> Result<Vec<u8>> {
     if output.status.success() { Ok(output.stdout) } else { Err(SolcError::solc_output(&output)) }
+}
+
+fn is_solar_binary(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name.to_string_lossy().contains("solar"))
 }
 
 fn version_from_output(output: Output) -> Result<Version> {
@@ -1019,5 +1029,33 @@ fi
         solc.compile_output(&serde_json::json!({})).unwrap();
         assert!(first_invoked.exists());
         assert!(!second_invoked.exists());
+    }
+
+    #[test]
+    fn solar_version_uses_solc_wrapper_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let solar = dir.path().join("solar");
+        std::fs::write(
+            &solar,
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+    if [ "$SOLC_WRAPPER" = "1" ]; then
+        echo "solar the Solidity compiler"
+        echo "Version: 0.8.36+commit.3140f3e.solar.0.2.0"
+    else
+        echo "solar Version: 0.2.0"
+    fi
+fi
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&solar).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&solar, permissions).unwrap();
+
+        assert_eq!(
+            Solc::version(&solar).unwrap(),
+            Version::parse("0.8.36+commit.3140f3e.solar.0.2.0").unwrap()
+        );
     }
 }
