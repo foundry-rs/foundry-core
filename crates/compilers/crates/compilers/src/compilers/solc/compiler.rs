@@ -732,34 +732,6 @@ fn parse_version(stdout: &str) -> Result<Version> {
     Ok(Version::from_str(&version.replace(".g++", ".gcc"))?)
 }
 
-#[cfg(test)]
-mod version_tests {
-    use super::*;
-
-    #[test]
-    fn parses_solc_version_output() {
-        let version = parse_version(
-            "solc, the solidity compiler commandline interface\n\
-             Version: 0.8.35+commit.47b9dedd.Linux.g++\n",
-        )
-        .unwrap();
-
-        assert_eq!(version, Version::parse("0.8.35+commit.47b9dedd.Linux.gcc").unwrap());
-    }
-
-    #[test]
-    fn parses_solar_version_output() {
-        let version = parse_version(
-            "solar Version: 0.2.0\n\
-             Commit SHA: 3140f3eab033e0e620938f3f0e0ef6e31afa3bdd\n\
-             Build Profile: debug\n",
-        )
-        .unwrap();
-
-        assert_eq!(version, Version::new(0, 2, 0));
-    }
-}
-
 impl AsRef<Path> for Solc {
     fn as_ref(&self) -> &Path {
         &self.solc
@@ -822,6 +794,29 @@ mod tests {
         let req = SolData::parse_version_req(">=0.6.2 <0.8.21").unwrap();
         let semver_req: VersionReq = ">=0.6.2,<0.8.21".parse().unwrap();
         assert_eq!(req, semver_req);
+    }
+
+    #[test]
+    fn parses_solc_version_output() {
+        let version = parse_version(
+            "solc, the solidity compiler commandline interface\n\
+             Version: 0.8.35+commit.47b9dedd.Linux.g++\n",
+        )
+        .unwrap();
+
+        assert_eq!(version, Version::parse("0.8.35+commit.47b9dedd.Linux.gcc").unwrap());
+    }
+
+    #[test]
+    fn parses_solar_version_output() {
+        let version = parse_version(
+            "solar Version: 0.2.0\n\
+             Commit SHA: 3140f3eab033e0e620938f3f0e0ef6e31afa3bdd\n\
+             Build Profile: debug\n",
+        )
+        .unwrap();
+
+        assert_eq!(version, Version::new(0, 2, 0));
     }
 
     fn solc() -> Solc {
