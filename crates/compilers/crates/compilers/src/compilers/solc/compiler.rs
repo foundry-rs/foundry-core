@@ -738,51 +738,6 @@ impl AsRef<Path> for Solc {
     }
 }
 
-#[cfg(all(test, unix))]
-mod approval_tests {
-    use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
-
-    #[test]
-    fn approved_symlink_target_is_used_for_compilation() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first");
-        let second = dir.path().join("second");
-        let alias = dir.path().join("solc");
-        let first_invoked = dir.path().join("first.invoked");
-        let second_invoked = dir.path().join("second.invoked");
-        for path in [&first, &second] {
-            std::fs::write(
-                path,
-                r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-    echo "solc, the solidity compiler commandline interface"
-    echo "Version: 0.8.35+commit.69074fbd"
-else
-    touch "$0.invoked"
-    echo '{}'
-fi
-"#,
-            )
-            .unwrap();
-            let mut permissions = std::fs::metadata(path).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(path, permissions).unwrap();
-        }
-        symlink(&first, &alias).unwrap();
-
-        crate::set_compiler_approval_handler(|_| Ok(()));
-        let solc = Solc::new_with_approval(&alias).unwrap();
-        assert_eq!(solc.solc, foundry_compilers_core::utils::canonicalize(&first).unwrap());
-        std::fs::remove_file(&alias).unwrap();
-        symlink(&second, &alias).unwrap();
-
-        solc.compile_output(&serde_json::json!({})).unwrap();
-        assert!(first_invoked.exists());
-        assert!(!second_invoked.exists());
-    }
-}
-
 #[cfg(test)]
 #[cfg(feature = "svm-solc")]
 mod tests {
@@ -1020,5 +975,50 @@ mod tests {
         let ver = Version::new(1, 1, 1);
         let res = Solc::find_svm_installed_version(&ver).unwrap();
         assert!(res.is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod approval_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn approved_symlink_target_is_used_for_compilation() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let alias = dir.path().join("solc");
+        let first_invoked = dir.path().join("first.invoked");
+        let second_invoked = dir.path().join("second.invoked");
+        for path in [&first, &second] {
+            std::fs::write(
+                path,
+                r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo "solc, the solidity compiler commandline interface"
+    echo "Version: 0.8.35+commit.69074fbd"
+else
+    touch "$0.invoked"
+    echo '{}'
+fi
+"#,
+            )
+            .unwrap();
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        symlink(&first, &alias).unwrap();
+
+        crate::set_compiler_approval_handler(|_| Ok(()));
+        let solc = Solc::new_with_approval(&alias).unwrap();
+        assert_eq!(solc.solc, foundry_compilers_core::utils::canonicalize(&first).unwrap());
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&second, &alias).unwrap();
+
+        solc.compile_output(&serde_json::json!({})).unwrap();
+        assert!(first_invoked.exists());
+        assert!(!second_invoked.exists());
     }
 }
