@@ -491,9 +491,6 @@ impl Solc {
 
     fn version_impl(solc: &Path, args: &[String]) -> Result<Version> {
         let mut cmd = Command::new(solc);
-        if is_solar_binary(solc) {
-            cmd.env("SOLC_WRAPPER", "1");
-        }
         cmd.args(args)
             .arg("--version")
             .stdin(Stdio::piped())
@@ -679,9 +676,6 @@ impl Solc {
 
     pub async fn async_version(solc: &Path) -> Result<Version> {
         let mut cmd = tokio::process::Command::new(solc);
-        if is_solar_binary(solc) {
-            cmd.env("SOLC_WRAPPER", "1");
-        }
         cmd.arg("--version").stdin(Stdio::piped()).stderr(Stdio::piped()).stdout(Stdio::piped());
         debug!(?cmd, "getting version");
         let output = cmd.output().await.map_err(|e| SolcError::io(e, solc))?;
@@ -717,34 +711,68 @@ fn compile_output(output: Output) -> Result<Vec<u8>> {
     if output.status.success() { Ok(output.stdout) } else { Err(SolcError::solc_output(&output)) }
 }
 
-fn is_solar_binary(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name.to_string_lossy().contains("solar"))
-}
-
 fn version_from_output(output: Output) -> Result<Version> {
     if output.status.success() {
-        parse_version(&String::from_utf8_lossy(&output.stdout))
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let version = stdout
+            .lines()
+            .rfind(|l| !l.trim().is_empty())
+            .ok_or_else(|| SolcError::msg("Version not found in Solc output"))?;
+        // NOTE: semver doesn't like `+` in g++ in build metadata which is invalid semver
+        Ok(Version::from_str(&version.trim_start_matches("Version: ").replace(".g++", ".gcc"))?)
     } else {
         Err(SolcError::solc_output(&output))
     }
 }
 
-fn parse_version(stdout: &str) -> Result<Version> {
-    let version = stdout
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let line = line.trim();
-            line.strip_prefix("Version: ")
-        })
-        .ok_or_else(|| SolcError::msg("Version not found in Solc output"))?;
-    // NOTE: semver doesn't like `+` in g++ in build metadata which is invalid semver
-    Ok(Version::from_str(&version.replace(".g++", ".gcc"))?)
-}
-
 impl AsRef<Path> for Solc {
     fn as_ref(&self) -> &Path {
         &self.solc
+    }
+}
+
+#[cfg(all(test, unix))]
+mod approval_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn approved_symlink_target_is_used_for_compilation() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let alias = dir.path().join("solc");
+        let first_invoked = dir.path().join("first.invoked");
+        let second_invoked = dir.path().join("second.invoked");
+        for path in [&first, &second] {
+            std::fs::write(
+                path,
+                r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo "solc, the solidity compiler commandline interface"
+    echo "Version: 0.8.35+commit.69074fbd"
+else
+    touch "$0.invoked"
+    echo '{}'
+fi
+"#,
+            )
+            .unwrap();
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        symlink(&first, &alias).unwrap();
+
+        crate::set_compiler_approval_handler(|_| Ok(()));
+        let solc = Solc::new_with_approval(&alias).unwrap();
+        assert_eq!(solc.solc, foundry_compilers_core::utils::canonicalize(&first).unwrap());
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&second, &alias).unwrap();
+
+        solc.compile_output(&serde_json::json!({})).unwrap();
+        assert!(first_invoked.exists());
+        assert!(!second_invoked.exists());
     }
 }
 
@@ -759,28 +787,6 @@ mod tests {
         let req = SolData::parse_version_req(">=0.6.2 <0.8.21").unwrap();
         let semver_req: VersionReq = ">=0.6.2,<0.8.21".parse().unwrap();
         assert_eq!(req, semver_req);
-    }
-
-    #[test]
-    fn parses_solc_version_output() {
-        let version = parse_version(
-            "solc, the solidity compiler commandline interface\n\
-             Version: 0.8.35+commit.47b9dedd.Linux.g++\n",
-        )
-        .unwrap();
-
-        assert_eq!(version, Version::parse("0.8.35+commit.47b9dedd.Linux.gcc").unwrap());
-    }
-
-    #[test]
-    fn parses_solar_version_output() {
-        let version = parse_version(
-            "solar the Solidity compiler\n\
-             Version: 0.8.36+commit.3140f3e.solar.0.2.0\n",
-        )
-        .unwrap();
-
-        assert_eq!(version, Version::parse("0.8.36+commit.3140f3e.solar.0.2.0").unwrap());
     }
 
     fn solc() -> Solc {
@@ -984,78 +990,5 @@ mod tests {
         let ver = Version::new(1, 1, 1);
         let res = Solc::find_svm_installed_version(&ver).unwrap();
         assert!(res.is_none());
-    }
-}
-
-#[cfg(all(test, unix))]
-mod approval_tests {
-    use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
-
-    #[test]
-    fn approved_symlink_target_is_used_for_compilation() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first");
-        let second = dir.path().join("second");
-        let alias = dir.path().join("solc");
-        let first_invoked = dir.path().join("first.invoked");
-        let second_invoked = dir.path().join("second.invoked");
-        for path in [&first, &second] {
-            std::fs::write(
-                path,
-                r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-    echo "solc, the solidity compiler commandline interface"
-    echo "Version: 0.8.35+commit.69074fbd"
-else
-    touch "$0.invoked"
-    echo '{}'
-fi
-"#,
-            )
-            .unwrap();
-            let mut permissions = std::fs::metadata(path).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(path, permissions).unwrap();
-        }
-        symlink(&first, &alias).unwrap();
-
-        crate::set_compiler_approval_handler(|_| Ok(()));
-        let solc = Solc::new_with_approval(&alias).unwrap();
-        assert_eq!(solc.solc, foundry_compilers_core::utils::canonicalize(&first).unwrap());
-        std::fs::remove_file(&alias).unwrap();
-        symlink(&second, &alias).unwrap();
-
-        solc.compile_output(&serde_json::json!({})).unwrap();
-        assert!(first_invoked.exists());
-        assert!(!second_invoked.exists());
-    }
-
-    #[test]
-    fn solar_version_uses_solc_wrapper_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let solar = dir.path().join("solar");
-        std::fs::write(
-            &solar,
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-    if [ "$SOLC_WRAPPER" = "1" ]; then
-        echo "solar the Solidity compiler"
-        echo "Version: 0.8.36+commit.3140f3e.solar.0.2.0"
-    else
-        echo "solar Version: 0.2.0"
-    fi
-fi
-"#,
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&solar).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&solar, permissions).unwrap();
-
-        assert_eq!(
-            Solc::version(&solar).unwrap(),
-            Version::parse("0.8.36+commit.3140f3e.solar.0.2.0").unwrap()
-        );
     }
 }
