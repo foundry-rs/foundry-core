@@ -4,6 +4,7 @@ use crate::{
     cache::{BlockchainDb, FlushJsonBlockCacheDB, ForkBlockEnv, MemDb, StorageInfo},
     error::{DatabaseError, DatabaseResult},
 };
+use alloy_chains::Chain;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::U256Map};
 use alloy_provider::{
     DynProvider, Network, Provider,
@@ -457,6 +458,46 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         self.pending_requests.push(ProviderRequest::Transaction(fut));
     }
 
+    /// Resolves an Arbitrum `BLOCKHASH` request in the remote EVM.
+    ///
+    /// Arbitrum's EVM block number is the L1 block number, while `eth_getBlockByNumber` uses the L2
+    /// block number. Executing `BLOCKHASH` lets ArbOS apply its L1-to-L2 block hash mapping.
+    async fn get_arbitrum_block_hash(
+        provider: &DynProvider<N>,
+        block_id: Option<BlockId>,
+        number: u64,
+    ) -> eyre::Result<B256> {
+        let mut code = Vec::with_capacity(41);
+        code.push(0x7f); // PUSH32
+        code.extend_from_slice(&U256::from(number).to_be_bytes::<32>());
+        code.extend_from_slice(&[
+            0x40, // BLOCKHASH
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]);
+
+        let address = Address::with_last_byte(0xde);
+        let code = Bytes::from(code);
+        let params = serde_json::json!([
+            { "to": address, "data": code },
+            block_id.unwrap_or_else(BlockId::latest),
+            { address.to_string(): { "code": code } },
+        ]);
+        let output: Bytes = provider
+            .raw_request("eth_call".into(), params)
+            .await
+            .wrap_err("failed to get Arbitrum block hash")?;
+        eyre::ensure!(
+            output.len() == 32,
+            "invalid Arbitrum block hash response length: expected 32 bytes, got {}",
+            output.len()
+        );
+        Ok(B256::from_slice(&output))
+    }
+
     /// process a request for a block hash
     fn request_hash(&mut self, number: u64, listener: BlockHashSender) {
         match self.block_requests.entry(number) {
@@ -468,26 +509,45 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 self.db.cache().record_cache_miss();
                 entry.insert(vec![listener]);
                 let provider = self.provider.clone();
+                let block_id = self.block_id;
+                let meta = Arc::clone(self.db.meta());
                 let fut = Box::pin(async move {
-                    let block = provider
-                        .get_block_by_number(number.into())
-                        .hashes()
-                        .await
-                        .wrap_err("failed to get block");
+                    let block_hash: eyre::Result<B256> = async {
+                        let cached_chain = meta.read().chain;
+                        let chain = if let Some(chain) = cached_chain {
+                            chain
+                        } else {
+                            let chain = Chain::from(
+                                provider.get_chain_id().await.wrap_err("failed to get chain ID")?,
+                            );
+                            meta.write().chain = Some(chain);
+                            chain
+                        };
+                        if chain.is_arbitrum() {
+                            return Self::get_arbitrum_block_hash(&provider, block_id, number)
+                                .await;
+                        }
 
-                    let block_hash = match block {
-                        Ok(Some(block)) => Ok(block.header().hash()),
-                        Ok(None) => {
-                            warn!(target: "backendhandler", ?number, "block not found");
-                            // if no block was returned then the block does not exist, in which case
-                            // we return empty hash
-                            Ok(KECCAK_EMPTY)
+                        match provider
+                            .get_block_by_number(number.into())
+                            .hashes()
+                            .await
+                            .wrap_err("failed to get block")
+                        {
+                            Ok(Some(block)) => Ok(block.header().hash()),
+                            Ok(None) => {
+                                warn!(target: "backendhandler", ?number, "block not found");
+                                // if no block was returned then the block does not exist, in which
+                                // case we return empty hash
+                                Ok(KECCAK_EMPTY)
+                            }
+                            Err(err) => Err(err),
                         }
-                        Err(err) => {
-                            error!(target: "backendhandler", %err, ?number, "failed to get block");
-                            Err(err)
-                        }
-                    };
+                    }
+                    .await;
+                    if let Err(err) = &block_hash {
+                        error!(target: "backendhandler", %err, ?number, "failed to get block");
+                    }
                     (block_hash, number)
                 });
                 self.pending_requests.push(ProviderRequest::BlockHash(fut));
@@ -1185,6 +1245,76 @@ mod tests {
         assert_eq!(backend.cache_hits(), 1);
         assert_eq!(backend.cache_misses(), 1);
 
+        server_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn arbitrum_block_hash_uses_pinned_eth_call() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
+        let expected_hash = B256::with_last_byte(0x42);
+
+        let server_handle = std::thread::spawn(move || {
+            #[derive(Debug, Deserialize)]
+            struct Request {
+                id: serde_json::Value,
+                method: String,
+                #[serde(default)]
+                params: serde_json::Value,
+            }
+
+            let mut request = server.recv().unwrap();
+            let rpc_request: Request =
+                serde_json::from_reader(request.as_reader()).expect("failed parsing request");
+            assert_eq!(rpc_request.method, "eth_chainId");
+            request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": rpc_request.id,
+                        "result": "0xa4b1",
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+
+            let mut request = server.recv().unwrap();
+            let rpc_request: Request =
+                serde_json::from_reader(request.as_reader()).expect("failed parsing request");
+            assert_eq!(rpc_request.method, "eth_call");
+            assert_eq!(rpc_request.params[1], "0x64");
+
+            let address = Address::with_last_byte(0xde);
+            assert_eq!(
+                rpc_request.params[0]["to"].as_str().unwrap().parse::<Address>().unwrap(),
+                address
+            );
+            let address = address.to_string();
+            assert_eq!(rpc_request.params[0]["data"], rpc_request.params[2][&address]["code"]);
+            assert_eq!(
+                rpc_request.params[0]["data"],
+                format!("0x7f{:064x}4060005260206000f3", U256::from(99))
+            );
+
+            request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": rpc_request.id,
+                        "result": expected_hash,
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        });
+
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
+        let db = BlockchainDb::new(meta, None);
+        let backend =
+            SharedBackend::spawn_backend(Arc::new(provider), db, Some(BlockId::from(100))).await;
+
+        assert_eq!(backend.block_hash_ref(99).unwrap(), expected_hash);
         server_handle.join().unwrap();
     }
 
