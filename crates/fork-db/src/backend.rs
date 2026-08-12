@@ -479,14 +479,8 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                     let block_hashes = async {
                         if let Some(anchor) = anchor
                             && number < anchor.number
+                            && anchor.number == anchor.rpc_number
                         {
-                            eyre::ensure!(
-                                anchor.number == anchor.rpc_number,
-                                "exact block ancestry is unsupported when the EVM-visible block \
-                                 number ({}) differs from the RPC block number ({})",
-                                anchor.number,
-                                anchor.rpc_number
-                            );
                             if anchor.number - number > 256 {
                                 return Ok(BlockHashData::from_iter([(
                                     U256::from(number),
@@ -534,7 +528,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                                 hashes.insert(U256::from(descendant.number), descendant.hash);
                             }
                             Ok(hashes)
-                        } else if anchor.is_none() {
+                        } else if anchor.is_none_or(|anchor| anchor.number != anchor.rpc_number) {
                             let block = provider
                                 .get_block_by_number(number.into())
                                 .hashes()
@@ -559,7 +553,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                                 }
                             }
                         } else {
-                            Ok(BlockHashData::from_iter([(U256::from(number), KECCAK_EMPTY)]))
+                            Ok(BlockHashData::from_iter([(U256::from(number), B256::ZERO)]))
                         }
                     }
                     .await;
@@ -1389,9 +1383,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn exact_anchor_rejects_remapped_block_number_ancestry() {
-        let provider = get_http_provider("http://127.0.0.1:1");
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), "http://127.0.0.1:1".to_string());
+    async fn remapped_exact_anchor_uses_numbered_block_hash_lookup() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
+        let block_hash = B256::with_last_byte(2);
+
+        let server_handle = std::thread::spawn(move || {
+            #[derive(Debug, Deserialize)]
+            struct Request {
+                id: serde_json::Value,
+                method: String,
+                params: serde_json::Value,
+            }
+
+            let mut request = server.recv().unwrap();
+            let block: Request = serde_json::from_reader(request.as_reader()).unwrap();
+            assert_eq!(block.method, "eth_getBlockByNumber");
+            assert_eq!(block.params[0], "0x63");
+            request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": block.id,
+                        "result": {
+                            "hash": block_hash,
+                            "parentHash": B256::ZERO,
+                            "sha3Uncles": B256::ZERO,
+                            "miner": Address::ZERO,
+                            "stateRoot": B256::ZERO,
+                            "transactionsRoot": B256::ZERO,
+                            "receiptsRoot": B256::ZERO,
+                            "logsBloom": format!("0x{}", "00".repeat(256)),
+                            "difficulty": "0x0",
+                            "number": "0x63",
+                            "gasLimit": "0x1c9c380",
+                            "gasUsed": "0x0",
+                            "timestamp": "0x1",
+                            "extraData": "0x",
+                            "mixHash": B256::ZERO,
+                            "nonce": "0x0000000000000000",
+                            "baseFeePerGas": "0x1",
+                            "transactions": [],
+                            "uncles": [],
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        });
+
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
         let db = BlockchainDb::new(meta, None);
         let (backend, handler) = SharedBackend::new_with_anchor(
             provider,
@@ -1400,10 +1442,24 @@ mod tests {
         );
         tokio::spawn(handler);
 
-        let err = backend.block_hash_ref(99).unwrap_err().to_string();
-        assert!(
-            err.contains("EVM-visible block number (100) differs from the RPC block number (10)")
+        assert_eq!(backend.block_hash_ref(99).unwrap(), block_hash);
+        server_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exact_anchor_returns_zero_for_post_anchor_block() {
+        let endpoint = "http://127.0.0.1:1";
+        let provider = get_http_provider(endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string());
+        let db = BlockchainDb::new(meta, None);
+        let (backend, handler) = SharedBackend::new_with_anchor(
+            provider,
+            db,
+            ForkBlock::new(10, B256::with_last_byte(1)),
         );
+        tokio::spawn(handler);
+
+        assert_eq!(backend.block_hash_ref(11).unwrap(), B256::ZERO);
     }
 
     #[test]
