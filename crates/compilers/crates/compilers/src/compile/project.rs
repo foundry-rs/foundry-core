@@ -118,7 +118,7 @@ use semver::Version;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -235,7 +235,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
         // convert paths on windows to ensure consistency with the `CompilerOutput` `solc` emits,
         // which is unix style `/`
-        sources.slash_paths();
+        sources.slash_paths(&project.paths.root, &project.paths.remappings);
 
         let mut cache = ArtifactsCache::new(project, edges, preprocessor.is_some())?;
         // retain and compile only dirty sources and all their imports
@@ -431,16 +431,33 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
     /// This effectively ensures that `solc` can find imported files like `/src/Cheats.sol` in the
     /// VFS (the `CompilerInput` as json) under `src/Cheats.sol`.
     #[allow(clippy::missing_const_for_fn)]
-    fn slash_paths(&mut self) {
+    fn slash_paths(
+        &mut self,
+        _root: &Path,
+        _remappings: &[foundry_compilers_artifacts::remappings::Remapping],
+    ) {
         #[cfg(windows)]
         {
             use path_slash::PathBufExt;
 
+            let contexts = _remappings
+                .iter()
+                .filter_map(|remapping| remapping.context.as_deref())
+                .map(PathBuf::from_slash)
+                .filter_map(|context| {
+                    crate::utils::normalize_solidity_import_path(_root, &context).ok()
+                })
+                .collect::<Vec<_>>();
             self.sources.values_mut().for_each(|versioned_sources| {
                 versioned_sources.iter_mut().for_each(|(_, sources, _)| {
                     *sources = std::mem::take(sources)
                         .into_iter()
                         .map(|(path, source)| {
+                            let path = if contexts.iter().any(|context| path.starts_with(context)) {
+                                relative_path(&path, _root).unwrap_or(path)
+                            } else {
+                                path
+                            };
                             (PathBuf::from(path.to_slash_lossy().as_ref()), source)
                         })
                         .collect()
@@ -578,6 +595,31 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
     }
 }
 
+#[cfg(windows)]
+fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
+    let mut path = path.components().peekable();
+    let mut base = base.components().peekable();
+
+    while path.peek() == base.peek() && path.peek().is_some() {
+        path.next();
+        base.next();
+    }
+    if matches!(path.peek(), Some(std::path::Component::Prefix(_)))
+        || matches!(base.peek(), Some(std::path::Component::Prefix(_)))
+    {
+        return None;
+    }
+
+    let mut relative = PathBuf::new();
+    for component in base {
+        if matches!(component, std::path::Component::Normal(_)) {
+            relative.push("..");
+        }
+    }
+    relative.extend(path);
+    Some(relative)
+}
+
 type CompilationResult<'a, I, E, C> = Result<Vec<(I, CompilerOutput<E, C>, &'a str, Vec<PathBuf>)>>;
 
 /// Compiles the input set sequentially and returns a [Vec] of outputs.
@@ -643,8 +685,6 @@ fn compile_parallel<'a, C: Compiler>(
 #[cfg(test)]
 #[cfg(all(feature = "project-util", feature = "svm-solc"))]
 mod tests {
-    use std::path::Path;
-
     use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
 
     use crate::{
@@ -659,6 +699,32 @@ mod tests {
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .try_init()
             .ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_source_unit_is_relative_to_project_root() {
+        let root = Path::new(r"C:\workspace\utils");
+        let source = Path::new(r"C:\workspace\node_modules\dependency\src\Core.sol");
+
+        assert_eq!(
+            relative_path(source, root).unwrap(),
+            Path::new(r"..\node_modules\dependency\src\Core.sol")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_source_unit_remains_absolute() {
+        let root = Path::new(r"C:\workspace\utils");
+        let source = PathBuf::from(r"C:\workspace\utils\src\Contract.sol");
+        let path = if source.starts_with(root) {
+            source.clone()
+        } else {
+            relative_path(&source, root).unwrap_or_else(|| source.clone())
+        };
+
+        assert_eq!(path, source);
     }
 
     #[test]
