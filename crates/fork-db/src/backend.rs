@@ -481,12 +481,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                             && number < anchor.number
                             && anchor.number == anchor.rpc_number
                         {
-                            if anchor.number - number > 256 {
-                                return Ok(BlockHashData::from_iter([(
-                                    U256::from(number),
-                                    KECCAK_EMPTY,
-                                )]));
-                            }
                             let mut hashes = BlockHashData::default();
                             let mut descendant = anchor;
                             while descendant.number > number {
@@ -1379,6 +1373,76 @@ mod tests {
 
         assert_eq!(backend.storage_ref(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
         assert_eq!(backend.block_hash_ref(9).unwrap(), parent_hash);
+        server_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exact_anchor_walks_beyond_256_blocks() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
+        let block_hash = |number| B256::from(U256::from(number + 1));
+        let anchor_number = 300;
+        let requested_number = 43;
+        let anchor_hash = block_hash(anchor_number);
+        let expected_hash = block_hash(requested_number);
+
+        let server_handle = std::thread::spawn(move || {
+            #[derive(Debug, Deserialize)]
+            struct Request {
+                id: serde_json::Value,
+                method: String,
+                params: serde_json::Value,
+            }
+
+            for number in ((requested_number + 1)..=anchor_number).rev() {
+                let mut request = server.recv().unwrap();
+                let block: Request = serde_json::from_reader(request.as_reader()).unwrap();
+                assert_eq!(block.method, "eth_getBlockByHash");
+                assert_eq!(block.params[0], block_hash(number).to_string());
+                request
+                    .respond(Response::from_string(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": block.id,
+                            "result": {
+                                "hash": block_hash(number),
+                                "parentHash": block_hash(number - 1),
+                                "sha3Uncles": B256::ZERO,
+                                "miner": Address::ZERO,
+                                "stateRoot": B256::ZERO,
+                                "transactionsRoot": B256::ZERO,
+                                "receiptsRoot": B256::ZERO,
+                                "logsBloom": format!("0x{}", "00".repeat(256)),
+                                "difficulty": "0x0",
+                                "number": format!("0x{number:x}"),
+                                "gasLimit": "0x1c9c380",
+                                "gasUsed": "0x0",
+                                "timestamp": "0x1",
+                                "extraData": "0x",
+                                "mixHash": B256::ZERO,
+                                "nonce": "0x0000000000000000",
+                                "baseFeePerGas": "0x1",
+                                "transactions": [],
+                                "uncles": [],
+                            },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+            }
+        });
+
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
+        let db = BlockchainDb::new(meta, None);
+        let (backend, handler) = SharedBackend::new_with_anchor(
+            provider,
+            db,
+            ForkBlock::new(anchor_number, anchor_hash),
+        );
+        tokio::spawn(handler);
+
+        assert_eq!(backend.block_hash_ref(requested_number).unwrap(), expected_hash);
         server_handle.join().unwrap();
     }
 
