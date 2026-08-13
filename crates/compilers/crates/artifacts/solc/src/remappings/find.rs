@@ -569,6 +569,7 @@ mod tests {
 
     /// Helper function for converting PathBufs to remapping strings.
     fn to_str(p: std::path::PathBuf) -> String {
+        let p = p.components().collect::<PathBuf>();
         format!("{}/", p.display())
     }
 
@@ -639,12 +640,12 @@ mod tests {
         assert!(relative.global.contains(&Remapping {
             context: None,
             name: "shared/".to_string(),
-            path: format!("a/lib/shared/src{MAIN_SEPARATOR}"),
+            path: to_str(PathBuf::from("a/lib/shared/src")),
         }));
         assert!(relative.contextual.contains(&Remapping {
             context: Some(format!("a{MAIN_SEPARATOR}")),
             name: "shared/".to_string(),
-            path: format!("a/lib/shared/src{MAIN_SEPARATOR}"),
+            path: to_str(PathBuf::from("a/lib/shared/src")),
         }));
         assert_eq!(
             relative

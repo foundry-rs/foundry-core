@@ -1,5 +1,5 @@
 use self::input::VyperVersionedInput;
-use super::{Compiler, CompilerOutput, Language};
+use super::{Compiler, CompilerOutput, Language, compiler_path::resolve_and_approve};
 pub use crate::artifacts::vyper::{VyperCompilationError, VyperInput, VyperOutput, VyperSettings};
 use crate::parser::VyperParser;
 use core::fmt;
@@ -77,6 +77,14 @@ impl Vyper {
         let path = path.into();
         let version = Self::version(path.clone())?;
         Ok(Self { path, version })
+    }
+
+    /// Creates a new instance after resolving `path` to an exact executable and passing that path
+    /// to the process-wide approval handler. The resolved path is used for both the version probe
+    /// and later compilations.
+    pub fn new_with_approval(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = resolve_and_approve(path.into())?;
+        Self::new(path)
     }
 
     /// Convenience function for compiling all sources under the given path

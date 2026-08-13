@@ -29,6 +29,8 @@ use alloy_signer_turnkey::TurnkeySigner;
 
 pub type Result<T> = std::result::Result<T, WalletSignerError>;
 
+const BIP32_HARDEN: u32 = 0x8000_0000;
+
 /// Wrapper enum around different signers.
 #[derive(Debug)]
 pub enum WalletSigner {
@@ -264,8 +266,12 @@ impl WalletSigner {
         }
 
         builder = if let Some(hd_path) = derivation_path {
+            validate_bip32_path(hd_path)?;
             builder.derivation_path(hd_path)?
         } else {
+            if index >= BIP32_HARDEN {
+                return Err(WalletSignerError::InvalidBip32Index(index));
+            }
             builder.index(index)?
         };
 
@@ -357,9 +363,9 @@ impl PendingSigner {
         match self {
             Self::Keystore(path, expected_address) => {
                 // Falling back to the password prompt is reserved for recoverable
-                // environmental failures and is always announced on stderr.
-                // Cancellation, corruption, invalidation, and a password mismatch
-                // require an explicit re-enroll/remove decision.
+                // environmental failures. Cancellation, corruption, invalidation,
+                // and a password mismatch require an explicit re-enroll/remove
+                // decision.
                 #[cfg(all(target_os = "macos", feature = "touch-id"))]
                 if crate::touch_id::is_enrolled(&path) {
                     match crate::touch_id::unwrap_password(&path) {
@@ -378,9 +384,7 @@ impl PendingSigner {
                                 Err(e) => return Err(WalletSignerError::Local(e)),
                             }
                         }
-                        Err(e) if e.is_recoverable() => {
-                            eprintln!("Warning: {e}; falling back to the password prompt.")
-                        }
+                        Err(e) if e.is_recoverable() => {}
                         Err(e) => return Err(e.into()),
                     }
                 }
@@ -407,6 +411,21 @@ impl PendingSigner {
     }
 }
 
+fn validate_bip32_path(path: &str) -> Result<()> {
+    for component in path.split('/') {
+        let index = component
+            .strip_suffix('\'')
+            .or_else(|| component.strip_suffix('h'))
+            .unwrap_or(component);
+        if let Ok(index) = index.parse::<u32>()
+            && index >= BIP32_HARDEN
+        {
+            return Err(WalletSignerError::InvalidBip32Index(index));
+        }
+    }
+    Ok(())
+}
+
 fn checked_keystore_signer(
     signer: PrivateKeySigner,
     expected_address: Option<Address>,
@@ -423,6 +442,38 @@ fn checked_keystore_signer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
+
+    #[test]
+    fn rejects_mnemonic_indices_that_set_harden_bit() {
+        assert!(matches!(
+            WalletSigner::from_mnemonic(TEST_MNEMONIC, None, None, BIP32_HARDEN),
+            Err(WalletSignerError::InvalidBip32Index(BIP32_HARDEN))
+        ));
+
+        for path in [
+            "m/2147483648",
+            "m/2147483648'",
+            "m/2147483648h",
+            "m/+2147483648'",
+            "m/02147483648'",
+            "m/4294967295",
+        ] {
+            assert!(matches!(
+                WalletSigner::from_mnemonic(TEST_MNEMONIC, None, Some(path), 0),
+                Err(WalletSignerError::InvalidBip32Index(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn accepts_largest_unhardened_mnemonic_index() {
+        assert!(WalletSigner::from_mnemonic(TEST_MNEMONIC, None, None, BIP32_HARDEN - 1).is_ok());
+        assert!(
+            WalletSigner::from_mnemonic(TEST_MNEMONIC, None, Some("m/2147483647'"), 0,).is_ok()
+        );
+    }
 
     #[test]
     fn rejects_keystore_signer_with_unexpected_address() {
