@@ -52,7 +52,8 @@ supported. Please try to change your RPC url to an archive node if the issue per
 type AccountFuture<Err> =
     Pin<Box<dyn Future<Output = (Result<(U256, u64, Bytes), Err>, Address)> + Send>>;
 type StorageFuture<Err> = Pin<Box<dyn Future<Output = (Result<U256, Err>, Address, U256)> + Send>>;
-type BlockHashFuture<Err> = Pin<Box<dyn Future<Output = (Result<B256, Err>, u64)> + Send>>;
+type BlockHashFuture<Err> =
+    Pin<Box<dyn Future<Output = (Result<B256, Err>, u64, u64, BlockHashStrategy)> + Send>>;
 type FullBlockFuture<Err, N = AnyNetwork> = Pin<
     Box<
         dyn Future<
@@ -94,6 +95,13 @@ const ACCOUNT_FETCH_UNCHECKED: u8 = 0;
 const ACCOUNT_FETCH_SUPPORTS_ACC_INFO: u8 = 1;
 /// Use regular individual getCode, getNonce, getBalance calls
 const ACCOUNT_FETCH_SEPARATE_REQUESTS: u8 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockHashStrategy {
+    Unknown,
+    Rpc,
+    Evm,
+}
 
 struct AnyRequestFuture<T, Err> {
     sender: OneshotSender<Result<T, Err>>,
@@ -185,8 +193,10 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     account_requests: HashMap<Address, Vec<AccountInfoSender>>,
     /// Listeners that wait for a `get_storage_at` response
     storage_requests: HashMap<(Address, U256), Vec<StorageSender>>,
-    /// Listeners that wait for a `get_block` response
-    block_requests: HashMap<u64, Vec<BlockHashSender>>,
+    /// Listeners that wait for a `get_block` response, keyed by pin generation and block number.
+    block_requests: HashMap<(u64, u64), Vec<BlockHashSender>>,
+    /// Block hashes whose value depends on the pinned block.
+    pinned_block_hashes: HashMap<(u64, u64), B256>,
     /// Incoming commands.
     incoming: UnboundedReceiver<BackendRequest<N>>,
     /// unprocessed queued requests
@@ -194,6 +204,10 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     /// The block to fetch data from.
     // This is an `Option` so that we can have less code churn in the functions below
     block_id: Option<BlockId>,
+    /// Incremented whenever the pinned block changes.
+    block_generation: u64,
+    /// How block hashes are resolved for this chain.
+    block_hash_strategy: BlockHashStrategy,
     /// The mode for fetching account data
     account_fetch_mode: Arc<AtomicU8>,
 }
@@ -205,6 +219,16 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         rx: UnboundedReceiver<BackendRequest<N>>,
         block_id: Option<BlockId>,
     ) -> Self {
+        let block_hash_strategy =
+            db.meta().read().chain.map_or(BlockHashStrategy::Unknown, |chain| {
+                if chain.is_arbitrum() {
+                    BlockHashStrategy::Evm
+                } else if chain.is_named() {
+                    BlockHashStrategy::Rpc
+                } else {
+                    BlockHashStrategy::Unknown
+                }
+            });
         Self {
             provider,
             db,
@@ -212,9 +236,12 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             account_requests: Default::default(),
             storage_requests: Default::default(),
             block_requests: Default::default(),
+            pinned_block_hashes: Default::default(),
             queued_requests: Default::default(),
             incoming: rx,
             block_id,
+            block_generation: 0,
+            block_hash_strategy,
             account_fetch_mode: Arc::new(AtomicU8::new(ACCOUNT_FETCH_UNCHECKED)),
         }
     }
@@ -238,7 +265,12 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 }
             }
             BackendRequest::BlockHash(number, sender) => {
-                let hash = self.db.block_hashes().read().get(&U256::from(number)).copied();
+                let number_u256 = U256::from(number);
+                let hash = self
+                    .pinned_block_hashes
+                    .get(&(self.block_generation, number))
+                    .copied()
+                    .or_else(|| self.db.block_hashes().read().get(&number_u256).copied());
                 if let Some(hash) = hash {
                     self.db.cache().record_cache_hit();
                     let _ = sender.send(Ok(hash));
@@ -266,6 +298,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             }
             BackendRequest::SetPinnedBlock(block_id) => {
                 self.block_id = Some(block_id);
+                self.block_generation = self.block_generation.wrapping_add(1);
             }
             BackendRequest::UpdateAddress(address_data) => {
                 for (address, data) in address_data {
@@ -498,9 +531,29 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         Ok(B256::from_slice(&output))
     }
 
+    /// Returns whether the standard ArbSys precompile is available at the pinned block.
+    async fn has_arbsys(
+        provider: &DynProvider<N>,
+        block_id: Option<BlockId>,
+    ) -> eyre::Result<bool> {
+        let params = serde_json::json!([
+            {
+                "to": Address::with_last_byte(0x64),
+                "data": "0x051038f2", // arbOSVersion()
+            },
+            block_id.unwrap_or_else(BlockId::latest),
+        ]);
+        let output = provider
+            .raw_request::<_, Bytes>("eth_call".into(), params)
+            .await
+            .wrap_err("failed to detect ArbSys")?;
+        Ok(output.len() == 32 && U256::from_be_slice(&output) >= U256::from(56))
+    }
+
     /// process a request for a block hash
     fn request_hash(&mut self, number: u64, listener: BlockHashSender) {
-        match self.block_requests.entry(number) {
+        let generation = self.block_generation;
+        match self.block_requests.entry((generation, number)) {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().push(listener);
             }
@@ -511,8 +564,9 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 let provider = self.provider.clone();
                 let block_id = self.block_id;
                 let meta = Arc::clone(self.db.meta());
+                let known_strategy = self.block_hash_strategy;
                 let fut = Box::pin(async move {
-                    let block_hash: eyre::Result<B256> = async {
+                    let result: eyre::Result<(B256, BlockHashStrategy)> = async {
                         let cached_chain = meta.read().chain;
                         let chain = if let Some(chain) = cached_chain {
                             chain
@@ -523,12 +577,26 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                             meta.write().chain = Some(chain);
                             chain
                         };
-                        if chain.is_arbitrum() {
-                            return Self::get_arbitrum_block_hash(&provider, block_id, number)
-                                .await;
+                        let strategy = match known_strategy {
+                            BlockHashStrategy::Unknown => {
+                                if chain.is_arbitrum()
+                                    || (chain.is_id()
+                                        && Self::has_arbsys(&provider, block_id).await?)
+                                {
+                                    BlockHashStrategy::Evm
+                                } else {
+                                    BlockHashStrategy::Rpc
+                                }
+                            }
+                            strategy => strategy,
+                        };
+                        if strategy == BlockHashStrategy::Evm {
+                            let hash =
+                                Self::get_arbitrum_block_hash(&provider, block_id, number).await?;
+                            return Ok((hash, strategy));
                         }
 
-                        match provider
+                        let hash = match provider
                             .get_block_by_number(number.into())
                             .hashes()
                             .await
@@ -542,13 +610,18 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                                 Ok(KECCAK_EMPTY)
                             }
                             Err(err) => Err(err),
-                        }
+                        }?;
+                        Ok((hash, strategy))
                     }
                     .await;
+                    let strategy = result
+                        .as_ref()
+                        .map_or(BlockHashStrategy::Unknown, |(_, strategy)| *strategy);
+                    let block_hash = result.map(|(hash, _)| hash);
                     if let Err(err) = &block_hash {
                         error!(target: "backendhandler", %err, ?number, "failed to get block");
                     }
-                    (block_hash, number)
+                    (block_hash, number, generation, strategy)
                 });
                 self.pending_requests.push(ProviderRequest::BlockHash(fut));
             }
@@ -665,13 +738,17 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                         }
                     }
                     ProviderRequest::BlockHash(fut) => {
-                        if let Poll::Ready((block_hash, number)) = fut.poll_unpin(cx) {
+                        if let Poll::Ready((block_hash, number, generation, strategy)) =
+                            fut.poll_unpin(cx)
+                        {
+                            let request_key = (generation, number);
                             let value = match block_hash {
                                 Ok(value) => value,
                                 Err(err) => {
                                     let err = Arc::new(err);
                                     // notify all listeners
-                                    if let Some(listeners) = pin.block_requests.remove(&number) {
+                                    if let Some(listeners) = pin.block_requests.remove(&request_key)
+                                    {
                                         for l in listeners {
                                             let _ = l.send(Err(DatabaseError::GetBlockHash(
                                                 number,
@@ -684,10 +761,19 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                             };
 
                             // update the cache
-                            pin.db.block_hashes().write().insert(U256::from(number), value);
+                            match strategy {
+                                BlockHashStrategy::Evm => {
+                                    pin.pinned_block_hashes.insert(request_key, value);
+                                }
+                                BlockHashStrategy::Rpc => {
+                                    pin.db.block_hashes().write().insert(U256::from(number), value);
+                                }
+                                BlockHashStrategy::Unknown => unreachable!(),
+                            }
+                            pin.block_hash_strategy = strategy;
 
                             // notify all listeners
-                            if let Some(listeners) = pin.block_requests.remove(&number) {
+                            if let Some(listeners) = pin.block_requests.remove(&request_key) {
                                 for l in listeners {
                                     let _ = l.send(Ok(value));
                                 }
@@ -1252,6 +1338,68 @@ mod tests {
     async fn arbitrum_block_hash_uses_pinned_eth_call() {
         let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
         let endpoint = format!("http://{}", server.server_addr());
+        let first_hash = B256::with_last_byte(0x42);
+        let second_hash = B256::with_last_byte(0x43);
+
+        let server_handle = std::thread::spawn(move || {
+            #[derive(Debug, Deserialize)]
+            struct Request {
+                id: serde_json::Value,
+                method: String,
+                #[serde(default)]
+                params: serde_json::Value,
+            }
+
+            for (pin, hash) in [(100, first_hash), (200, second_hash)] {
+                let mut request = server.recv().unwrap();
+                let rpc_request: Request =
+                    serde_json::from_reader(request.as_reader()).expect("failed parsing request");
+                assert_eq!(rpc_request.method, "eth_call");
+                assert_eq!(rpc_request.params[1], format!("0x{pin:x}"));
+
+                let address = Address::with_last_byte(0xde);
+                assert_eq!(
+                    rpc_request.params[0]["to"].as_str().unwrap().parse::<Address>().unwrap(),
+                    address
+                );
+                let address = address.to_string();
+                assert_eq!(rpc_request.params[0]["data"], rpc_request.params[2][&address]["code"]);
+                assert_eq!(
+                    rpc_request.params[0]["data"],
+                    format!("0x7f{:064x}4060005260206000f3", U256::from(99))
+                );
+
+                request
+                    .respond(Response::from_string(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": rpc_request.id,
+                            "result": hash,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+            }
+        });
+
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint)
+            .set_chain(Chain::arbitrum_mainnet());
+        let db = BlockchainDb::new(meta, None);
+        let backend =
+            SharedBackend::spawn_backend(Arc::new(provider), db, Some(BlockId::from(100))).await;
+
+        assert_eq!(backend.block_hash_ref(99).unwrap(), first_hash);
+        assert_eq!(backend.block_hash_ref(99).unwrap(), first_hash);
+        backend.set_pinned_block(200).unwrap();
+        assert_eq!(backend.block_hash_ref(99).unwrap(), second_hash);
+        server_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn custom_orbit_chain_is_detected_through_arbsys() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
         let expected_hash = B256::with_last_byte(0x42);
 
         let server_handle = std::thread::spawn(move || {
@@ -1272,7 +1420,7 @@ mod tests {
                     serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": rpc_request.id,
-                        "result": "0xa4b1",
+                        "result": "0x123456",
                     })
                     .to_string(),
                 ))
@@ -1282,20 +1430,25 @@ mod tests {
             let rpc_request: Request =
                 serde_json::from_reader(request.as_reader()).expect("failed parsing request");
             assert_eq!(rpc_request.method, "eth_call");
+            assert_eq!(rpc_request.params[0]["to"], Address::with_last_byte(0x64).to_string());
+            assert_eq!(rpc_request.params[0]["data"], "0x051038f2");
             assert_eq!(rpc_request.params[1], "0x64");
+            request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": rpc_request.id,
+                        "result": format!("0x{:064x}", U256::from(56)),
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
 
-            let address = Address::with_last_byte(0xde);
-            assert_eq!(
-                rpc_request.params[0]["to"].as_str().unwrap().parse::<Address>().unwrap(),
-                address
-            );
-            let address = address.to_string();
-            assert_eq!(rpc_request.params[0]["data"], rpc_request.params[2][&address]["code"]);
-            assert_eq!(
-                rpc_request.params[0]["data"],
-                format!("0x7f{:064x}4060005260206000f3", U256::from(99))
-            );
-
+            let mut request = server.recv().unwrap();
+            let rpc_request: Request =
+                serde_json::from_reader(request.as_reader()).expect("failed parsing request");
+            assert_eq!(rpc_request.method, "eth_call");
+            assert_eq!(rpc_request.params.as_array().unwrap().len(), 3);
             request
                 .respond(Response::from_string(
                     serde_json::json!({
