@@ -53,7 +53,7 @@ type AccountFuture<Err> =
     Pin<Box<dyn Future<Output = (Result<(U256, u64, Bytes), Err>, Address)> + Send>>;
 type StorageFuture<Err> = Pin<Box<dyn Future<Output = (Result<U256, Err>, Address, U256)> + Send>>;
 type BlockHashFuture<Err> =
-    Pin<Box<dyn Future<Output = (Result<B256, Err>, u64, u64, BlockHashStrategy)> + Send>>;
+    Pin<Box<dyn Future<Output = (Result<B256, Err>, u64, u64, bool)> + Send>>;
 type FullBlockFuture<Err, N = AnyNetwork> = Pin<
     Box<
         dyn Future<
@@ -95,13 +95,6 @@ const ACCOUNT_FETCH_UNCHECKED: u8 = 0;
 const ACCOUNT_FETCH_SUPPORTS_ACC_INFO: u8 = 1;
 /// Use regular individual getCode, getNonce, getBalance calls
 const ACCOUNT_FETCH_SEPARATE_REQUESTS: u8 = 2;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BlockHashStrategy {
-    Unknown,
-    Rpc,
-    Evm,
-}
 
 struct AnyRequestFuture<T, Err> {
     sender: OneshotSender<Result<T, Err>>,
@@ -206,8 +199,8 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     block_id: Option<BlockId>,
     /// Incremented whenever the pinned block changes.
     block_generation: u64,
-    /// How block hashes are resolved for this chain.
-    block_hash_strategy: BlockHashStrategy,
+    /// Whether block hashes are resolved in the remote EVM.
+    block_hash_via_evm: Option<bool>,
     /// The mode for fetching account data
     account_fetch_mode: Arc<AtomicU8>,
 }
@@ -219,16 +212,15 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         rx: UnboundedReceiver<BackendRequest<N>>,
         block_id: Option<BlockId>,
     ) -> Self {
-        let block_hash_strategy =
-            db.meta().read().chain.map_or(BlockHashStrategy::Unknown, |chain| {
-                if chain.is_arbitrum() {
-                    BlockHashStrategy::Evm
-                } else if chain.is_named() {
-                    BlockHashStrategy::Rpc
-                } else {
-                    BlockHashStrategy::Unknown
-                }
-            });
+        let block_hash_via_evm = db.meta().read().chain.and_then(|chain| {
+            if chain.is_arbitrum() {
+                Some(true)
+            } else if chain.is_named() {
+                Some(false)
+            } else {
+                None
+            }
+        });
         Self {
             provider,
             db,
@@ -241,7 +233,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             incoming: rx,
             block_id,
             block_generation: 0,
-            block_hash_strategy,
+            block_hash_via_evm,
             account_fetch_mode: Arc::new(AtomicU8::new(ACCOUNT_FETCH_UNCHECKED)),
         }
     }
@@ -564,9 +556,9 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 let provider = self.provider.clone();
                 let block_id = self.block_id;
                 let meta = Arc::clone(self.db.meta());
-                let known_strategy = self.block_hash_strategy;
+                let known_block_hash_via_evm = self.block_hash_via_evm;
                 let fut = Box::pin(async move {
-                    let result: eyre::Result<(B256, BlockHashStrategy)> = async {
+                    let result: eyre::Result<(B256, bool)> = async {
                         let cached_chain = meta.read().chain;
                         let chain = if let Some(chain) = cached_chain {
                             chain
@@ -577,23 +569,18 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                             meta.write().chain = Some(chain);
                             chain
                         };
-                        let strategy = match known_strategy {
-                            BlockHashStrategy::Unknown => {
-                                if chain.is_arbitrum()
+                        let block_hash_via_evm = match known_block_hash_via_evm {
+                            Some(value) => value,
+                            None => {
+                                chain.is_arbitrum()
                                     || (chain.is_id()
                                         && Self::has_arbsys(&provider, block_id).await?)
-                                {
-                                    BlockHashStrategy::Evm
-                                } else {
-                                    BlockHashStrategy::Rpc
-                                }
                             }
-                            strategy => strategy,
                         };
-                        if strategy == BlockHashStrategy::Evm {
+                        if block_hash_via_evm {
                             let hash =
                                 Self::get_arbitrum_block_hash(&provider, block_id, number).await?;
-                            return Ok((hash, strategy));
+                            return Ok((hash, true));
                         }
 
                         let hash = match provider
@@ -611,17 +598,16 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                             }
                             Err(err) => Err(err),
                         }?;
-                        Ok((hash, strategy))
+                        Ok((hash, false))
                     }
                     .await;
-                    let strategy = result
-                        .as_ref()
-                        .map_or(BlockHashStrategy::Unknown, |(_, strategy)| *strategy);
+                    let block_hash_via_evm =
+                        result.as_ref().is_ok_and(|(_, block_hash_via_evm)| *block_hash_via_evm);
                     let block_hash = result.map(|(hash, _)| hash);
                     if let Err(err) = &block_hash {
                         error!(target: "backendhandler", %err, ?number, "failed to get block");
                     }
-                    (block_hash, number, generation, strategy)
+                    (block_hash, number, generation, block_hash_via_evm)
                 });
                 self.pending_requests.push(ProviderRequest::BlockHash(fut));
             }
@@ -738,7 +724,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                         }
                     }
                     ProviderRequest::BlockHash(fut) => {
-                        if let Poll::Ready((block_hash, number, generation, strategy)) =
+                        if let Poll::Ready((block_hash, number, generation, block_hash_via_evm)) =
                             fut.poll_unpin(cx)
                         {
                             let request_key = (generation, number);
@@ -761,16 +747,12 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                             };
 
                             // update the cache
-                            match strategy {
-                                BlockHashStrategy::Evm => {
-                                    pin.pinned_block_hashes.insert(request_key, value);
-                                }
-                                BlockHashStrategy::Rpc => {
-                                    pin.db.block_hashes().write().insert(U256::from(number), value);
-                                }
-                                BlockHashStrategy::Unknown => unreachable!(),
+                            if block_hash_via_evm {
+                                pin.pinned_block_hashes.insert(request_key, value);
+                            } else {
+                                pin.db.block_hashes().write().insert(U256::from(number), value);
                             }
-                            pin.block_hash_strategy = strategy;
+                            pin.block_hash_via_evm = Some(block_hash_via_evm);
 
                             // notify all listeners
                             if let Some(listeners) = pin.block_requests.remove(&request_key) {
