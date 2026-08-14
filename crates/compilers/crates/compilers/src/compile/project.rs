@@ -115,10 +115,12 @@ use crate::{
 use foundry_compilers_core::error::Result;
 use rayon::prelude::*;
 use semver::Version;
+#[cfg(windows)]
+use std::path::Path;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::Instant,
 };
 
@@ -235,7 +237,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
         // convert paths on windows to ensure consistency with the `CompilerOutput` `solc` emits,
         // which is unix style `/`
-        sources.slash_paths(&project.paths.root, &project.paths.remappings);
+        sources.slash_paths();
 
         let mut cache = ArtifactsCache::new(project, edges, preprocessor.is_some())?;
         // retain and compile only dirty sources and all their imports
@@ -431,33 +433,16 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
     /// This effectively ensures that `solc` can find imported files like `/src/Cheats.sol` in the
     /// VFS (the `CompilerInput` as json) under `src/Cheats.sol`.
     #[allow(clippy::missing_const_for_fn)]
-    fn slash_paths(
-        &mut self,
-        _root: &Path,
-        _remappings: &[foundry_compilers_artifacts::remappings::Remapping],
-    ) {
+    fn slash_paths(&mut self) {
         #[cfg(windows)]
         {
             use path_slash::PathBufExt;
 
-            let contexts = _remappings
-                .iter()
-                .filter_map(|remapping| remapping.context.as_deref())
-                .map(PathBuf::from_slash)
-                .filter_map(|context| {
-                    crate::utils::normalize_solidity_import_path(_root, &context).ok()
-                })
-                .collect::<Vec<_>>();
             self.sources.values_mut().for_each(|versioned_sources| {
                 versioned_sources.iter_mut().for_each(|(_, sources, _)| {
                     *sources = std::mem::take(sources)
                         .into_iter()
                         .map(|(path, source)| {
-                            let path = if contexts.iter().any(|context| path.starts_with(context)) {
-                                relative_path(&path, _root).unwrap_or(path)
-                            } else {
-                                path
-                            };
                             (PathBuf::from(path.to_slash_lossy().as_ref()), source)
                         })
                         .collect()
@@ -513,6 +498,22 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
         // accordingly, then set back in cache.
         let mut mocks = cache.mocks();
 
+        #[cfg(windows)]
+        let contextual_roots = {
+            use path_slash::PathBufExt as _;
+
+            project
+                .paths
+                .remappings
+                .iter()
+                .filter_map(|remapping| remapping.context.as_deref())
+                .map(PathBuf::from_slash)
+                .filter_map(|context| {
+                    crate::utils::normalize_solidity_import_path(&project.paths.root, &context).ok()
+                })
+                .collect::<Vec<_>>()
+        };
+
         let mut jobs = Vec::new();
         for (language, versioned_sources) in self.sources {
             for (version, sources, (profile, opt_settings)) in versioned_sources {
@@ -542,6 +543,23 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                     .with_allow_paths(&project.paths.allowed_paths)
                     .with_include_paths(&include_paths)
                     .with_remappings(&project.paths.remappings);
+
+                // Keep graph, cache, and sparse-output keys absolute. Contextual sources outside
+                // the project root only need root-relative names in the compiler input.
+                #[cfg(windows)]
+                let sources = sources
+                    .into_iter()
+                    .map(|(path, source)| {
+                        (
+                            compiler_source_unit_path(
+                                &path,
+                                &project.paths.root,
+                                &contextual_roots,
+                            ),
+                            source,
+                        )
+                    })
+                    .collect();
 
                 let mut input = C::Input::build(sources, settings, language, version.clone());
 
@@ -581,12 +599,51 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
 
             let build_info = RawBuildInfo::new(&input, &output, project.build_info)?;
 
-            output.retain_files(
-                actually_dirty
+            #[cfg(windows)]
+            {
+                let internal_paths = actually_dirty
                     .iter()
-                    .map(|f| f.strip_prefix(project.paths.root.as_path()).unwrap_or(f)),
-            );
-            output.join_all(project.paths.root.as_path());
+                    .map(|path| {
+                        let source_unit =
+                            compiler_source_unit_path(path, &project.paths.root, &contextual_roots);
+                        let source_unit = source_unit
+                            .strip_prefix(project.paths.root.as_path())
+                            .unwrap_or(&source_unit);
+                        (source_unit.to_string_lossy().to_lowercase(), path.clone())
+                    })
+                    .collect::<HashMap<_, _>>();
+
+                output.retain_files(internal_paths.keys());
+                output.contracts = std::mem::take(&mut output.contracts)
+                    .into_iter()
+                    .map(|(path, contracts)| {
+                        let internal = internal_paths
+                            .get(&path.to_string_lossy().to_lowercase())
+                            .cloned()
+                            .unwrap_or_else(|| project.paths.root.join(path));
+                        (internal, contracts)
+                    })
+                    .collect();
+                output.sources = std::mem::take(&mut output.sources)
+                    .into_iter()
+                    .map(|(path, source)| {
+                        let internal = internal_paths
+                            .get(&path.to_string_lossy().to_lowercase())
+                            .cloned()
+                            .unwrap_or_else(|| project.paths.root.join(path));
+                        (internal, source)
+                    })
+                    .collect();
+            }
+            #[cfg(not(windows))]
+            {
+                output.retain_files(
+                    actually_dirty
+                        .iter()
+                        .map(|f| f.strip_prefix(project.paths.root.as_path()).unwrap_or(f)),
+                );
+                output.join_all(project.paths.root.as_path());
+            }
 
             aggregated.extend(version.clone(), build_info, profile, output);
         }
@@ -618,6 +675,18 @@ fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
     }
     relative.extend(path);
     Some(relative)
+}
+
+#[cfg(windows)]
+fn compiler_source_unit_path(path: &Path, root: &Path, contextual_roots: &[PathBuf]) -> PathBuf {
+    use path_slash::PathExt;
+
+    let path = if contextual_roots.iter().any(|context| path.starts_with(context)) {
+        relative_path(path, root).unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    PathBuf::from(path.to_slash_lossy().as_ref())
 }
 
 type CompilationResult<'a, I, E, C> = Result<Vec<(I, CompilerOutput<E, C>, &'a str, Vec<PathBuf>)>>;
@@ -685,6 +754,8 @@ fn compile_parallel<'a, C: Compiler>(
 #[cfg(test)]
 #[cfg(all(feature = "project-util", feature = "svm-solc"))]
 mod tests {
+    use std::path::Path;
+
     use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
 
     use crate::{
@@ -706,10 +777,11 @@ mod tests {
     fn external_source_unit_is_relative_to_project_root() {
         let root = Path::new(r"C:\workspace\utils");
         let source = Path::new(r"C:\workspace\node_modules\dependency\src\Core.sol");
+        let contexts = [PathBuf::from(r"C:\workspace\node_modules\dependency")];
 
         assert_eq!(
-            relative_path(source, root).unwrap(),
-            Path::new(r"..\node_modules\dependency\src\Core.sol")
+            compiler_source_unit_path(source, root, &contexts),
+            Path::new("../node_modules/dependency/src/Core.sol")
         );
     }
 
@@ -717,14 +789,13 @@ mod tests {
     #[test]
     fn project_source_unit_remains_absolute() {
         let root = Path::new(r"C:\workspace\utils");
-        let source = PathBuf::from(r"C:\workspace\utils\src\Contract.sol");
-        let path = if source.starts_with(root) {
-            source.clone()
-        } else {
-            relative_path(&source, root).unwrap_or_else(|| source.clone())
-        };
+        let source = Path::new(r"C:\workspace\utils\src\Contract.sol");
+        let contexts = [PathBuf::from(r"C:\workspace\node_modules\dependency")];
 
-        assert_eq!(path, source);
+        assert_eq!(
+            compiler_source_unit_path(source, root, &contexts),
+            Path::new("C:/workspace/utils/src/Contract.sol")
+        );
     }
 
     #[test]
