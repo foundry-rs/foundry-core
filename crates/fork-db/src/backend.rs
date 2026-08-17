@@ -1729,6 +1729,54 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn exact_arbitrum_anchor_uses_pinned_eth_call() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
+        let anchor_hash = B256::with_last_byte(0x41);
+        let expected_hash = B256::with_last_byte(0x42);
+
+        let server_handle = std::thread::spawn(move || {
+            #[derive(Debug, Deserialize)]
+            struct Request {
+                id: serde_json::Value,
+                method: String,
+                params: serde_json::Value,
+            }
+
+            let mut request = server.recv().unwrap();
+            let rpc_request: Request = serde_json::from_reader(request.as_reader()).unwrap();
+            assert_eq!(rpc_request.method, "eth_call");
+            assert_eq!(rpc_request.params[1]["blockHash"], anchor_hash.to_string());
+            assert_eq!(rpc_request.params[1]["requireCanonical"], false);
+            assert_eq!(
+                rpc_request.params[0]["data"],
+                format!("0x7f{:064x}4060005260206000f3", U256::from(99))
+            );
+            request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": rpc_request.id,
+                        "result": expected_hash,
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        });
+
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint)
+            .set_chain(Chain::arbitrum_mainnet());
+        let db = BlockchainDb::new(meta, None);
+        let (backend, handler) =
+            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(100, anchor_hash));
+        tokio::spawn(handler);
+
+        assert_eq!(backend.block_hash_ref(99).unwrap(), expected_hash);
+        server_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn custom_orbit_chain_is_detected_through_arbsys() {
         let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
         let endpoint = format!("http://{}", server.server_addr());
