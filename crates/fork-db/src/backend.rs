@@ -1033,14 +1033,23 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
         provider: P,
         db: BlockchainDb<B>,
         anchor: ForkBlock,
-    ) -> (Self, BackendHandler<N, B>) {
+    ) -> eyre::Result<(Self, BackendHandler<N, B>)> {
+        let meta = db.meta().read();
+        eyre::ensure!(
+            meta.fork_hash == Some(anchor.hash),
+            "exact fork database is not anchored at {}",
+            anchor.hash
+        );
+        eyre::ensure!(meta.source_id.is_some(), "exact fork database has no RPC source identity");
+        drop(meta);
+
         let (backend, backend_rx) = unbounded();
         let cache = Arc::new(FlushJsonBlockCacheDB(Arc::clone(db.cache())));
         db.block_hashes().write().insert(U256::from(anchor.number), anchor.hash);
         let block_id = BlockId::from((anchor.hash, Some(false)));
         let handler =
             BackendHandler::new(provider.erased(), db, backend_rx, Some(block_id), Some(anchor));
-        (Self { backend, cache, blocking_mode: Default::default(), exact: true }, handler)
+        Ok((Self { backend, cache, blocking_mode: Default::default(), exact: true }, handler))
     }
 
     /// Returns a new `SharedBackend` and the `BackendHandler` with a specific blocking mode
@@ -1270,6 +1279,11 @@ mod tests {
             .connect_client(ClientBuilder::default().http(endpoint.parse().unwrap()))
     }
 
+    fn exact_meta(endpoint: &str, anchor_hash: B256) -> BlockchainDbMeta<BlockEnv> {
+        BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string())
+            .with_fork_identity(anchor_hash, B256::with_last_byte(1))
+    }
+
     const ENDPOINT: Option<&str> = option_env!("ETH_RPC_URL");
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1496,10 +1510,10 @@ mod tests {
         });
 
         let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint).set_chain(Chain::mainnet());
+        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::mainnet());
         let db = BlockchainDb::new(meta, None);
         let (backend, handler) =
-            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, anchor_hash));
+            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, anchor_hash)).unwrap();
         tokio::spawn(handler);
 
         assert_eq!(backend.storage_ref(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
@@ -1564,13 +1578,14 @@ mod tests {
         });
 
         let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint).set_chain(Chain::mainnet());
+        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::mainnet());
         let db = BlockchainDb::new(meta, None);
         let (backend, handler) = SharedBackend::new_with_anchor(
             provider,
             db,
             ForkBlock::new(anchor_number, anchor_hash),
-        );
+        )
+        .unwrap();
         tokio::spawn(handler);
 
         assert_eq!(backend.block_hash_ref(requested_number).unwrap(), expected_hash);
@@ -1628,13 +1643,15 @@ mod tests {
         });
 
         let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint).set_chain(Chain::mainnet());
+        let anchor_hash = B256::with_last_byte(1);
+        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::mainnet());
         let db = BlockchainDb::new(meta, None);
         let (backend, handler) = SharedBackend::new_with_anchor(
             provider,
             db,
-            ForkBlock::with_rpc_number(100, 10, B256::with_last_byte(1)),
-        );
+            ForkBlock::with_rpc_number(100, 10, anchor_hash),
+        )
+        .unwrap();
         tokio::spawn(handler);
 
         assert_eq!(backend.block_hash_ref(99).unwrap(), block_hash);
@@ -1645,13 +1662,11 @@ mod tests {
     async fn exact_anchor_returns_zero_for_post_anchor_block() {
         let endpoint = "http://127.0.0.1:1";
         let provider = get_http_provider(endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string());
+        let anchor_hash = B256::with_last_byte(1);
+        let meta = exact_meta(endpoint, anchor_hash);
         let db = BlockchainDb::new(meta, None);
-        let (backend, handler) = SharedBackend::new_with_anchor(
-            provider,
-            db,
-            ForkBlock::new(10, B256::with_last_byte(1)),
-        );
+        let (backend, handler) =
+            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, anchor_hash)).unwrap();
         tokio::spawn(handler);
 
         assert_eq!(backend.block_hash_ref(11).unwrap(), B256::ZERO);
@@ -1660,16 +1675,49 @@ mod tests {
     #[test]
     fn exact_backend_cannot_be_repinned() {
         let provider = get_http_provider("http://127.0.0.1:1");
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), "http://127.0.0.1:1".to_string());
+        let anchor_hash = B256::with_last_byte(1);
+        let meta = exact_meta("http://127.0.0.1:1", anchor_hash);
         let db = BlockchainDb::new(meta, None);
-        let (backend, _handler) = SharedBackend::new_with_anchor(
-            provider,
-            db,
-            ForkBlock::new(1, B256::with_last_byte(1)),
-        );
+        let (backend, _handler) =
+            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(1, anchor_hash)).unwrap();
 
         let err = backend.set_pinned_block(2).unwrap_err().to_string();
         assert_eq!(err, "exact fork backends must be replaced instead of re-pinned");
+    }
+
+    #[test]
+    fn exact_backend_requires_matching_fork_identity() {
+        let anchor_hash = B256::with_last_byte(1);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), "http://127.0.0.1:1".to_string())
+            .with_fork_identity(B256::with_last_byte(2), B256::with_last_byte(3));
+        let db = BlockchainDb::new(meta, None);
+
+        let err = SharedBackend::new_with_anchor(
+            get_http_provider("http://127.0.0.1:1"),
+            db,
+            ForkBlock::new(1, anchor_hash),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("not anchored"));
+    }
+
+    #[test]
+    fn exact_backend_requires_source_identity() {
+        let anchor_hash = B256::with_last_byte(1);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), "http://127.0.0.1:1".to_string())
+            .set_chain(Chain::mainnet());
+        let meta = BlockchainDbMeta { fork_hash: Some(anchor_hash), ..meta };
+        let db = BlockchainDb::new(meta, None);
+
+        let err = SharedBackend::new_with_anchor(
+            get_http_provider("http://127.0.0.1:1"),
+            db,
+            ForkBlock::new(1, anchor_hash),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("no RPC source identity"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1765,11 +1813,10 @@ mod tests {
         });
 
         let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint)
-            .set_chain(Chain::arbitrum_mainnet());
+        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::arbitrum_mainnet());
         let db = BlockchainDb::new(meta, None);
         let (backend, handler) =
-            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(100, anchor_hash));
+            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(100, anchor_hash)).unwrap();
         tokio::spawn(handler);
 
         assert_eq!(backend.block_hash_ref(99).unwrap(), expected_hash);
