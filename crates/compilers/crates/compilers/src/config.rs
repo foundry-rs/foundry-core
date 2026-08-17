@@ -1044,21 +1044,58 @@ impl SolcConfigBuilder {
 
 /// Returns true if `a` starts with `b` after resolving either path against `root` when needed.
 fn path_starts_with_rooted(a: &Path, b: &Path, root: &Path) -> bool {
-    if a.starts_with(b) {
+    #[cfg(windows)]
+    {
+        use path_slash::PathBufExt as _;
+
+        let a = PathBuf::from_slash(a.to_string_lossy());
+        let b = PathBuf::from_slash(b.to_string_lossy());
+        let root = PathBuf::from_slash(root.to_string_lossy());
+        return path_starts_with_rooted_native(&a, &b, &root);
+    }
+    #[cfg(not(windows))]
+    path_starts_with_rooted_native(a, b, root)
+}
+
+fn path_starts_with_rooted_native(a: &Path, b: &Path, root: &Path) -> bool {
+    if path_starts_with(a, b) {
         return true;
     }
     if let Ok(b) = b.strip_prefix(root)
-        && a.starts_with(b)
+        && path_starts_with(a, b)
     {
         return true;
     }
     let Ok(a) = utils::normalize_solidity_import_path(root, a) else { return false };
-    utils::normalize_solidity_import_path(root, b).is_ok_and(|b| a.starts_with(b))
+    utils::normalize_solidity_import_path(root, b).is_ok_and(|b| path_starts_with(&a, &b))
+}
+
+fn path_starts_with(path: &Path, base: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use path_slash::PathBufExt as _;
+
+        let path = PathBuf::from_slash(path.to_string_lossy());
+        let base = PathBuf::from_slash(base.to_string_lossy());
+        path.starts_with(base)
+    }
+    #[cfg(not(windows))]
+    path.starts_with(base)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn rooted_path_prefix_accepts_mixed_windows_separators() {
+        let root = Path::new("C:/workspace/utils");
+        let source = Path::new(r"..\node_modules\dependency\src\internal");
+        let context = Path::new(r"C:/workspace/node_modules/dependency\");
+
+        assert!(path_starts_with_rooted(source, context, root));
+    }
 
     #[test]
     fn can_autodetect_dirs() {
