@@ -540,21 +540,24 @@ impl<B: Serialize + Clone> JsonBlockCacheDB<B> {
 /// The Data the [JsonBlockCacheDB] can read and flush
 ///
 /// This will be deserialized in a JSON object with the keys:
-/// `["meta", "accounts", "storage", "block_hashes"]`
+/// `["meta", "accounts", "storage", "block_hashes", "block_hash_cache_version"]`
 #[derive(Debug)]
 pub struct JsonBlockCacheData<B> {
     pub meta: Arc<RwLock<BlockchainDbMeta<B>>>,
     pub data: Arc<MemDb>,
 }
 
+const BLOCK_HASH_CACHE_VERSION: u8 = 1;
+
 impl<B: Serialize + Clone> Serialize for JsonBlockCacheData<B> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(4))?;
+        let mut map = serializer.serialize_map(Some(5))?;
 
         map.serialize_entry("meta", &self.meta.read().clone())?;
         map.serialize_entry("accounts", &self.data.accounts.read().clone())?;
         map.serialize_entry("storage", &self.data.storage.read().clone())?;
         map.serialize_entry("block_hashes", &self.data.block_hashes.read().clone())?;
+        map.serialize_entry("block_hash_cache_version", &BLOCK_HASH_CACHE_VERSION)?;
 
         map.end()
     }
@@ -568,10 +571,15 @@ impl<'de, B: DeserializeOwned + Default + Serialize> Deserialize<'de> for JsonBl
             accounts: AddressHashMap<AccountInfo>,
             storage: AddressHashMap<StorageInfo>,
             block_hashes: U256Map<B256>,
+            #[serde(default)]
+            block_hash_cache_version: u8,
         }
 
-        let Data { meta, accounts, storage, block_hashes } =
+        let Data { meta, accounts, storage, mut block_hashes, block_hash_cache_version } =
             Data::<BlockchainDbMeta<B>>::deserialize(deserializer)?;
+        if block_hash_cache_version != BLOCK_HASH_CACHE_VERSION {
+            block_hashes.clear();
+        }
 
         Ok(Self {
             meta: Arc::new(RwLock::new(meta)),
@@ -675,7 +683,7 @@ mod tests {
         let cache: JsonBlockCacheData<BlockEnv> = serde_json::from_str(s).unwrap();
         assert_eq!(cache.data.accounts.read().len(), 1);
         assert_eq!(cache.data.storage.read().len(), 1);
-        assert_eq!(cache.data.block_hashes.read().len(), 5);
+        assert!(cache.data.block_hashes.read().is_empty());
 
         let _s = serde_json::to_string(&cache).unwrap();
     }
@@ -798,6 +806,7 @@ mod tests {
             Address::ZERO,
             AccountInfo { balance: U256::from(42u64), nonce: 1, ..Default::default() },
         );
+        db.block_hashes().write().insert(U256::from(1), B256::with_last_byte(1));
 
         db.cache().flush();
         assert!(path.exists());
@@ -815,6 +824,7 @@ mod tests {
         let loaded = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
         assert_eq!(loaded.db().accounts.read().len(), 1);
         assert_eq!(loaded.db().accounts.read()[&Address::ZERO].balance, U256::from(42u64));
+        assert_eq!(loaded.db().block_hashes.read().len(), 1);
     }
 
     #[cfg(not(feature = "zstd"))]
