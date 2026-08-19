@@ -152,6 +152,10 @@ pub struct BlockchainDbMeta<B> {
     pub block_env: B,
     /// All the hosts used to connect to
     pub hosts: BTreeSet<String>,
+    /// Hash of the exact block anchoring the cached state.
+    pub fork_hash: Option<B256>,
+    /// Opaque identity of the RPC source and its authentication context.
+    pub source_id: Option<B256>,
 }
 
 impl<B> BlockchainDbMeta<B> {
@@ -162,7 +166,13 @@ impl<B> BlockchainDbMeta<B> {
             .and_then(|url| url.host().map(|host| host.to_string()))
             .unwrap_or(url);
 
-        Self { chain: None, block_env, hosts: BTreeSet::from([host]) }
+        Self {
+            chain: None,
+            block_env,
+            hosts: BTreeSet::from([host]),
+            fork_hash: None,
+            source_id: None,
+        }
     }
 
     /// Infers the host from the provided url and adds it to the set of hosts
@@ -186,6 +196,13 @@ impl<B> BlockchainDbMeta<B> {
         self.block_env = block_env;
         self
     }
+
+    /// Binds cached data to an exact fork block and opaque RPC source identity.
+    pub const fn with_fork_identity(mut self, fork_hash: B256, source_id: B256) -> Self {
+        self.fork_hash = Some(fork_hash);
+        self.source_id = Some(source_id);
+        self
+    }
 }
 
 // ignore hosts to not invalidate the cache when different endpoints are used, as it's commonly the
@@ -193,6 +210,8 @@ impl<B> BlockchainDbMeta<B> {
 impl<B: PartialEq> PartialEq for BlockchainDbMeta<B> {
     fn eq(&self, other: &Self) -> bool {
         self.block_env == other.block_env
+            && self.fork_hash == other.fork_hash
+            && self.source_id == other.source_id
     }
 }
 
@@ -200,13 +219,22 @@ impl<B: Serialize> Serialize for BlockchainDbMeta<B> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
 
-        let field_count = if self.chain.is_some() { 3 } else { 2 };
+        let field_count = 2
+            + usize::from(self.chain.is_some())
+            + usize::from(self.fork_hash.is_some())
+            + usize::from(self.source_id.is_some());
         let mut s = serializer.serialize_struct("BlockchainDbMeta", field_count)?;
         if let Some(chain) = &self.chain {
             s.serialize_field("chain", chain)?;
         }
         s.serialize_field("block_env", &self.block_env)?;
         s.serialize_field("hosts", &self.hosts)?;
+        if let Some(fork_hash) = self.fork_hash {
+            s.serialize_field("fork_hash", &fork_hash)?;
+        }
+        if let Some(source_id) = self.source_id {
+            s.serialize_field("source_id", &source_id)?;
+        }
         s.end()
     }
 }
@@ -266,10 +294,15 @@ impl<'de, B: DeserializeOwned + Default + Serialize> Deserialize<'de> for Blockc
             block_env: BlockEnvBackwardsCompat<B>,
             #[serde(alias = "host")]
             hosts: Hosts,
+            #[serde(default)]
+            fork_hash: Option<B256>,
+            #[serde(default)]
+            source_id: Option<B256>,
         }
 
-        let Meta { chain, block_env, hosts } = Meta::deserialize(deserializer)?;
-        Ok(Self { chain, block_env: block_env.inner, hosts: hosts.into() })
+        let Meta { chain, block_env, hosts, fork_hash, source_id } =
+            Meta::deserialize(deserializer)?;
+        Ok(Self { chain, block_env: block_env.inner, hosts: hosts.into(), fork_hash, source_id })
     }
 }
 
@@ -758,10 +791,28 @@ mod tests {
             chain: Some(Chain::mainnet()),
             block_env: BlockEnv { number: U256::from(1u64), ..Default::default() },
             hosts: BTreeSet::from(["eth-mainnet.alchemyapi.io".to_string()]),
+            fork_hash: Some(B256::with_last_byte(1)),
+            source_id: Some(B256::with_last_byte(2)),
         };
         let json = serde_json::to_string(&meta).unwrap();
         let recovered: BlockchainDbMeta<BlockEnv> = serde_json::from_str(&json).unwrap();
         assert_eq!(meta, recovered);
+    }
+
+    #[test]
+    fn exact_fork_identity_invalidates_cache_metadata() {
+        let meta = BlockchainDbMeta::<BlockEnv>::default()
+            .with_fork_identity(B256::with_last_byte(1), B256::with_last_byte(2));
+        assert_ne!(
+            meta,
+            BlockchainDbMeta::<BlockEnv>::default()
+                .with_fork_identity(B256::with_last_byte(3), B256::with_last_byte(2))
+        );
+        assert_ne!(
+            meta,
+            BlockchainDbMeta::<BlockEnv>::default()
+                .with_fork_identity(B256::with_last_byte(1), B256::with_last_byte(4))
+        );
     }
 
     #[test]
