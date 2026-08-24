@@ -1,4 +1,4 @@
-use crate::{compilers::compiler_path::resolve_and_approve, resolver::parse::SolData};
+use crate::resolver::parse::SolData;
 use foundry_compilers_artifacts::{CompilerOutput, SolcInput, sources::Source};
 use foundry_compilers_core::{
     error::{Result, SolcError},
@@ -94,13 +94,6 @@ impl Solc {
         Self::new_with_args(path, Vec::<String>::new())
     }
 
-    /// Creates a new instance after resolving `path` to an exact executable and passing that path
-    /// to the process-wide approval handler. The resolved path is used for both the version probe
-    /// and later compilations.
-    pub fn new_with_approval(path: impl Into<PathBuf>) -> Result<Self> {
-        Self::new_with_args_and_approval(path, Vec::<String>::new())
-    }
-
     /// A new instance which points to `solc` with additional cli arguments. Invokes `solc
     /// --version` to determine the version.
     ///
@@ -113,16 +106,6 @@ impl Solc {
         let extra_args = extra_args.into_iter().map(Into::into).collect::<Vec<_>>();
         let version = Self::version_with_args(path.clone(), &extra_args)?;
         Ok(Self::_new(path, version, extra_args))
-    }
-
-    /// Creates a new instance with additional CLI arguments after resolving and approving its
-    /// exact executable path with the process-wide approval handler.
-    pub fn new_with_args_and_approval(
-        path: impl Into<PathBuf>,
-        extra_args: impl IntoIterator<Item: Into<String>>,
-    ) -> Result<Self> {
-        let path = resolve_and_approve(path.into())?;
-        Self::new_with_args(path, extra_args)
     }
 
     /// A new instance which points to `solc` with the given version
@@ -738,51 +721,6 @@ fn version_from_output(output: Output) -> Result<Version> {
 impl AsRef<Path> for Solc {
     fn as_ref(&self) -> &Path {
         &self.solc
-    }
-}
-
-#[cfg(all(test, unix))]
-mod approval_tests {
-    use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
-
-    #[test]
-    fn approved_symlink_target_is_used_for_compilation() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first");
-        let second = dir.path().join("second");
-        let alias = dir.path().join("solc");
-        let first_invoked = dir.path().join("first.invoked");
-        let second_invoked = dir.path().join("second.invoked");
-        for path in [&first, &second] {
-            std::fs::write(
-                path,
-                r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-    echo "solc, the solidity compiler commandline interface"
-    echo "Version: 0.8.35+commit.69074fbd"
-else
-    touch "$0.invoked"
-    echo '{}'
-fi
-"#,
-            )
-            .unwrap();
-            let mut permissions = std::fs::metadata(path).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(path, permissions).unwrap();
-        }
-        symlink(&first, &alias).unwrap();
-
-        crate::set_compiler_approval_handler(|_| Ok(()));
-        let solc = Solc::new_with_approval(&alias).unwrap();
-        assert_eq!(solc.solc, foundry_compilers_core::utils::canonicalize(&first).unwrap());
-        std::fs::remove_file(&alias).unwrap();
-        symlink(&second, &alias).unwrap();
-
-        solc.compile_output(&serde_json::json!({})).unwrap();
-        assert!(first_invoked.exists());
-        assert!(!second_invoked.exists());
     }
 }
 
