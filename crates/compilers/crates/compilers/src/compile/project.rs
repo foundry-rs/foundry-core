@@ -702,7 +702,6 @@ fn compile_sequential<'a, C: Compiler>(
             report::compiler_spawn(
                 &input.compiler_name(),
                 input.version(),
-                profile,
                 input.settings_summary().as_deref(),
                 actually_dirty.as_slice(),
             );
@@ -738,7 +737,6 @@ fn compile_parallel<'a, C: Compiler>(
                 report::compiler_spawn(
                     &input.compiler_name(),
                     input.version(),
-                    profile,
                     input.settings_summary().as_deref(),
                     actually_dirty.as_slice(),
                 );
