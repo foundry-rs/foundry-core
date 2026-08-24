@@ -111,6 +111,24 @@ pub trait Reporter: 'static + std::fmt::Debug {
     ) {
     }
 
+    /// Callback invoked right before [`Compiler::compile`] is called with the resolved profile and
+    /// selected settings in the compiler input.
+    ///
+    /// The default implementation forwards to [`Self::on_compiler_spawn`] for backwards
+    /// compatibility.
+    ///
+    /// [`Compiler::compile`]: crate::compilers::Compiler::compile
+    fn on_compiler_spawn_with_settings(
+        &self,
+        compiler_name: &str,
+        version: &Version,
+        _profile: &str,
+        _settings: &str,
+        dirty_files: &[PathBuf],
+    ) {
+        self.on_compiler_spawn(compiler_name, version, dirty_files);
+    }
+
     /// Invoked with the `CompilerOutput` if [`Compiler::compile()`] was successful
     ///
     /// [`Compiler::compile()`]: crate::compilers::Compiler::compile
@@ -168,8 +186,26 @@ impl dyn Reporter {
     }
 }
 
-pub(crate) fn compiler_spawn(compiler_name: &str, version: &Version, dirty_files: &[PathBuf]) {
-    get_default(|r| r.reporter.on_compiler_spawn(compiler_name, version, dirty_files));
+pub(crate) fn compiler_spawn(
+    compiler_name: &str,
+    version: &Version,
+    profile: &str,
+    settings: Option<&str>,
+    dirty_files: &[PathBuf],
+) {
+    get_default(|r| {
+        if let Some(settings) = settings {
+            r.reporter.on_compiler_spawn_with_settings(
+                compiler_name,
+                version,
+                profile,
+                settings,
+                dirty_files,
+            );
+        } else {
+            r.reporter.on_compiler_spawn(compiler_name, version, dirty_files);
+        }
+    });
 }
 
 pub(crate) fn compiler_success(compiler_name: &str, version: &Version, duration: &Duration) {
@@ -307,14 +343,23 @@ pub struct NoReporter(());
 
 impl Reporter for NoReporter {}
 
-/// A [`Reporter`] that emits some general information to `stdout`.
+/// A [`Reporter`] that emits general information to `stdout` and optional compiler settings to
+/// `stderr`.
 ///
 /// `BrokenPipe` errors are silently ignored so that piping compiler output
 /// through consumers that may close the pipe early (e.g. `tee`, `head`) does
 /// not cause a panic.
 #[derive(Clone, Debug, Default)]
 pub struct BasicStdoutReporter {
-    _priv: (),
+    show_compiler_settings: bool,
+}
+
+impl BasicStdoutReporter {
+    /// Sets whether resolved compiler settings are printed when a compiler is invoked.
+    pub const fn with_compiler_settings(mut self, yes: bool) -> Self {
+        self.show_compiler_settings = yes;
+        self
+    }
 }
 
 impl Reporter for BasicStdoutReporter {
@@ -333,6 +378,26 @@ impl Reporter for BasicStdoutReporter {
                 version.patch
             ),
         );
+    }
+
+    fn on_compiler_spawn_with_settings(
+        &self,
+        compiler_name: &str,
+        version: &Version,
+        profile: &str,
+        settings: &str,
+        dirty_files: &[PathBuf],
+    ) {
+        self.on_compiler_spawn(compiler_name, version, dirty_files);
+        if self.show_compiler_settings {
+            write_line(
+                io::stderr().lock(),
+                format_args!(
+                    "Compiler settings for {compiler_name} {}.{}.{} (profile: {profile}): {settings}",
+                    version.major, version.minor, version.patch
+                ),
+            );
+        }
     }
 
     fn on_compiler_success(&self, compiler_name: &str, version: &Version, duration: &Duration) {
@@ -471,7 +536,7 @@ fn set_global_reporter(report: Report) -> Result<(), SetGlobalReporterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
+    use std::{cell::Cell, str::FromStr};
 
     #[test]
     fn scoped_reporter_works() {
@@ -482,6 +547,34 @@ mod tests {
         with_scoped(&Report::new(TestReporter), || {
             get_default(|reporter| assert!(reporter.is::<TestReporter>()))
         });
+    }
+
+    #[test]
+    fn settings_callback_forwards_to_legacy_callback() {
+        #[derive(Debug)]
+        struct LegacyReporter(Cell<bool>);
+
+        impl Reporter for LegacyReporter {
+            fn on_compiler_spawn(
+                &self,
+                _compiler_name: &str,
+                _version: &Version,
+                _dirty_files: &[PathBuf],
+            ) {
+                self.0.set(true);
+            }
+        }
+
+        let reporter = LegacyReporter(Cell::new(false));
+        reporter.on_compiler_spawn_with_settings(
+            "Solc",
+            &Version::new(0, 8, 30),
+            "default",
+            "optimizer=false",
+            &[],
+        );
+
+        assert!(reporter.0.get());
     }
 
     #[test]

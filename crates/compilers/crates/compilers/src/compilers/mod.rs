@@ -138,6 +138,11 @@ pub trait CompilerInput: Serialize + Send + Sync + Sized + Debug {
     /// Returns compiler name used by reporters to display output during compilation.
     fn compiler_name(&self) -> Cow<'static, str>;
 
+    /// Returns a user-facing summary of selected settings in this input.
+    fn settings_summary(&self) -> Option<String> {
+        None
+    }
+
     /// Strips given prefix from all paths.
     fn strip_prefix(&mut self, base: &Path);
 }
