@@ -111,6 +111,12 @@ pub trait Reporter: 'static + std::fmt::Debug {
     ) {
     }
 
+    /// Callback invoked after [`Self::on_compiler_spawn`] with a user-facing summary of the
+    /// selected compiler settings.
+    ///
+    /// [`Compiler::compile`]: crate::compilers::Compiler::compile
+    fn on_compiler_settings(&self, _compiler_name: &str, _version: &Version, _settings: &str) {}
+
     /// Invoked with the `CompilerOutput` if [`Compiler::compile()`] was successful
     ///
     /// [`Compiler::compile()`]: crate::compilers::Compiler::compile
@@ -168,8 +174,18 @@ impl dyn Reporter {
     }
 }
 
-pub(crate) fn compiler_spawn(compiler_name: &str, version: &Version, dirty_files: &[PathBuf]) {
-    get_default(|r| r.reporter.on_compiler_spawn(compiler_name, version, dirty_files));
+pub(crate) fn compiler_spawn(
+    compiler_name: &str,
+    version: &Version,
+    settings: Option<&str>,
+    dirty_files: &[PathBuf],
+) {
+    get_default(|r| {
+        r.reporter.on_compiler_spawn(compiler_name, version, dirty_files);
+        if let Some(settings) = settings {
+            r.reporter.on_compiler_settings(compiler_name, version, settings);
+        }
+    });
 }
 
 pub(crate) fn compiler_success(compiler_name: &str, version: &Version, duration: &Duration) {
@@ -307,14 +323,23 @@ pub struct NoReporter(());
 
 impl Reporter for NoReporter {}
 
-/// A [`Reporter`] that emits some general information to `stdout`.
+/// A [`Reporter`] that emits general information to `stdout` and optional compiler settings to
+/// `stderr`.
 ///
 /// `BrokenPipe` errors are silently ignored so that piping compiler output
 /// through consumers that may close the pipe early (e.g. `tee`, `head`) does
 /// not cause a panic.
 #[derive(Clone, Debug, Default)]
 pub struct BasicStdoutReporter {
-    _priv: (),
+    show_compiler_settings: bool,
+}
+
+impl BasicStdoutReporter {
+    /// Sets whether resolved compiler settings are printed when a compiler is invoked.
+    pub const fn with_compiler_settings(mut self, yes: bool) -> Self {
+        self.show_compiler_settings = yes;
+        self
+    }
 }
 
 impl Reporter for BasicStdoutReporter {
@@ -333,6 +358,18 @@ impl Reporter for BasicStdoutReporter {
                 version.patch
             ),
         );
+    }
+
+    fn on_compiler_settings(&self, compiler_name: &str, version: &Version, settings: &str) {
+        if self.show_compiler_settings {
+            write_line(
+                io::stderr().lock(),
+                format_args!(
+                    "Compiler settings for {compiler_name} {}.{}.{}: {settings}",
+                    version.major, version.minor, version.patch
+                ),
+            );
+        }
     }
 
     fn on_compiler_success(&self, compiler_name: &str, version: &Version, duration: &Duration) {

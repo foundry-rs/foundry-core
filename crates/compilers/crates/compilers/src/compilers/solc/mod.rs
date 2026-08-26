@@ -244,6 +244,20 @@ impl CompilerInput for SolcVersionedInput {
         if self.version.build.as_str().contains("solar") { "Solar".into() } else { "Solc".into() }
     }
 
+    fn settings_summary(&self) -> Option<String> {
+        let settings = &self.input.settings;
+        let optimizer_runs =
+            settings.optimizer.runs.map_or_else(|| "default".to_owned(), |runs| runs.to_string());
+        let evm_version = settings
+            .evm_version
+            .map_or_else(|| "default".to_owned(), |version| version.to_string());
+        Some(format!(
+            "optimizer={}, optimizer_runs={optimizer_runs}, via_ir={}, evm_version={evm_version}",
+            settings.optimizer.enabled.unwrap_or(false),
+            settings.via_ir.unwrap_or(false)
+        ))
+    }
+
     fn strip_prefix(&mut self, base: &Path) {
         self.input.strip_prefix(base);
     }
@@ -616,7 +630,7 @@ impl CompilationError for Error {
 #[cfg(test)]
 mod tests {
     use foundry_compilers_artifacts::{
-        CompilerOutput, Contract, SolcLanguage, SourceFile,
+        CompilerOutput, Contract, EvmVersion, Optimizer, Settings, SolcLanguage, SourceFile,
         sources::{Source, Sources},
     };
     use semver::Version;
@@ -630,7 +644,7 @@ mod tests {
         buildinfo::RawBuildInfo,
         compilers::{
             CompilerInput,
-            solc::{SolcCompiler, SolcVersionedInput},
+            solc::{SolcCompiler, SolcSettings, SolcVersionedInput},
         },
     };
 
@@ -790,5 +804,29 @@ mod tests {
             solar_version,
         );
         assert_eq!(input.compiler_name().as_ref(), "Solar");
+    }
+
+    #[test]
+    fn summarizes_sanitized_compiler_settings() {
+        let settings = SolcSettings {
+            settings: Settings {
+                optimizer: Optimizer { enabled: Some(true), runs: Some(777), details: None },
+                via_ir: Some(true),
+                evm_version: Some(EvmVersion::Cancun),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let input = SolcVersionedInput::build(
+            Default::default(),
+            settings,
+            SolcLanguage::Solidity,
+            Version::new(0, 7, 4),
+        );
+
+        assert_eq!(
+            input.settings_summary().as_deref(),
+            Some("optimizer=true, optimizer_runs=777, via_ir=false, evm_version=istanbul")
+        );
     }
 }

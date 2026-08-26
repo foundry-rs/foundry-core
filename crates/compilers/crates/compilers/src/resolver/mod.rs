@@ -827,8 +827,8 @@ impl<P: SourceParser> Graph<P> {
     fn input_nodes_by_language(&self) -> HashMap<L<P>, Vec<usize>> {
         let mut nodes = HashMap::new();
 
-        for idx in 0..self.edges.num_input_files {
-            nodes.entry(self.nodes[idx].data.language()).or_insert_with(Vec::new).push(idx);
+        for (idx, node) in self.input_nodes().enumerate() {
+            nodes.entry(node.data.language()).or_insert_with(Vec::new).push(idx);
         }
 
         nodes

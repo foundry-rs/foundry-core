@@ -302,6 +302,13 @@ impl CompilerInput for MultiCompilerInput {
         }
     }
 
+    fn settings_summary(&self) -> Option<String> {
+        match self {
+            Self::Solc(input) => input.settings_summary(),
+            Self::Vyper(input) => input.settings_summary(),
+        }
+    }
+
     fn language(&self) -> Self::Language {
         match self {
             Self::Solc(input) => MultiCompilerLanguage::Solc(input.language()),
