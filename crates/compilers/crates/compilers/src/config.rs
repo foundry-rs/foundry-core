@@ -880,6 +880,17 @@ impl ProjectPathsConfigBuilder {
         self
     }
 
+    /// Specifically disallow remappings, including auto-detected ones.
+    ///
+    /// When no remappings are configured, [`Self::build`] and [`Self::build_with_root`] auto-detect
+    /// them, which recursively walks every directory under every library path. That is the dominant
+    /// cost of building the config for a project with a large dependency tree, so callers that only
+    /// need the directory layout should opt out of it.
+    pub fn no_remappings(mut self) -> Self {
+        self.remappings = Some(Vec::new());
+        self
+    }
+
     /// Adds an allowed-path to the solc executable
     pub fn allowed_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
         self.allowed_paths.insert(path.into());
@@ -916,6 +927,11 @@ impl ProjectPathsConfigBuilder {
         self
     }
 
+    /// Builds the config, resolving anything that was not set explicitly from `root`.
+    ///
+    /// If no remappings were configured this auto-detects them, which recursively walks every
+    /// directory under every library path. Use [`Self::no_remappings`] to skip that scan when the
+    /// remappings are not needed.
     pub fn build_with_root<C>(self, root: impl Into<PathBuf>) -> ProjectPathsConfig<C> {
         let root = utils::canonicalized(root);
 
@@ -947,6 +963,10 @@ impl ProjectPathsConfigBuilder {
         }
     }
 
+    /// Builds the config, resolving anything that was not set explicitly from the current
+    /// directory.
+    ///
+    /// See [`Self::build_with_root`] for the remapping auto-detection this performs.
     pub fn build<C>(self) -> std::result::Result<ProjectPathsConfig<C>, SolcIoError> {
         let root = self
             .root
@@ -1449,5 +1469,37 @@ mod tests {
 
         // The resolved path should be the local override, not the external file
         assert_eq!(resolved, local_dir.join("LibMem.sol"));
+    }
+
+    #[test]
+    fn no_remappings_skips_auto_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dep_src = root.join("lib").join("dep").join("src");
+        std::fs::create_dir_all(&dep_src).unwrap();
+        std::fs::write(dep_src.join("Dep.sol"), "").unwrap();
+
+        // The default builder auto-detects the dependency.
+        let detected = ProjectPathsConfig::builder().build_with_root::<()>(root);
+        assert!(
+            detected.remappings.iter().any(|remapping| remapping.name == "dep/"),
+            "expected auto-detected remappings, got {:?}",
+            detected.remappings
+        );
+
+        // Opting out leaves them empty without walking the tree.
+        let skipped = ProjectPathsConfig::builder().no_remappings().build_with_root::<()>(root);
+        assert!(
+            skipped.remappings.is_empty(),
+            "expected no remappings, got {:?}",
+            skipped.remappings
+        );
+
+        // Explicit remappings are still honored.
+        let explicit = ProjectPathsConfig::builder()
+            .no_remappings()
+            .remapping(Remapping { context: None, name: "a/".into(), path: "b/".into() })
+            .build_with_root::<()>(root);
+        assert_eq!(explicit.remappings.len(), 1);
     }
 }
