@@ -26,7 +26,7 @@ use std::{
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
-        Arc,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -111,11 +111,18 @@ pub trait Reporter: 'static + std::fmt::Debug {
     ) {
     }
 
-    /// Callback invoked after [`Self::on_compiler_spawn`] with a user-facing summary of the
-    /// selected compiler settings.
+    /// Callback invoked after [`Self::on_compiler_spawn`] with the selected compiler profile and a
+    /// user-facing summary of its settings.
     ///
     /// [`Compiler::compile`]: crate::compilers::Compiler::compile
-    fn on_compiler_settings(&self, _compiler_name: &str, _version: &Version, _settings: &str) {}
+    fn on_compiler_settings(
+        &self,
+        _compiler_name: &str,
+        _version: &Version,
+        _profile: &str,
+        _settings: &str,
+    ) {
+    }
 
     /// Invoked with the `CompilerOutput` if [`Compiler::compile()`] was successful
     ///
@@ -177,13 +184,14 @@ impl dyn Reporter {
 pub(crate) fn compiler_spawn(
     compiler_name: &str,
     version: &Version,
+    profile: &str,
     settings: Option<&str>,
     dirty_files: &[PathBuf],
 ) {
     get_default(|r| {
         r.reporter.on_compiler_spawn(compiler_name, version, dirty_files);
         if let Some(settings) = settings {
-            r.reporter.on_compiler_settings(compiler_name, version, settings);
+            r.reporter.on_compiler_settings(compiler_name, version, profile, settings);
         }
     });
 }
@@ -332,6 +340,7 @@ impl Reporter for NoReporter {}
 #[derive(Clone, Debug, Default)]
 pub struct BasicStdoutReporter {
     show_compiler_settings: bool,
+    output_lock: Arc<Mutex<()>>,
 }
 
 impl BasicStdoutReporter {
@@ -340,6 +349,10 @@ impl BasicStdoutReporter {
         self.show_compiler_settings = yes;
         self
     }
+
+    fn lock_output(&self) -> MutexGuard<'_, ()> {
+        self.output_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 impl Reporter for BasicStdoutReporter {
@@ -347,6 +360,7 @@ impl Reporter for BasicStdoutReporter {
     ///
     /// [`Compiler::compile()`]: crate::compilers::Compiler::compile
     fn on_compiler_spawn(&self, compiler_name: &str, version: &Version, dirty_files: &[PathBuf]) {
+        let _guard = self.lock_output();
         write_line(
             io::stdout().lock(),
             format_args!(
@@ -360,12 +374,19 @@ impl Reporter for BasicStdoutReporter {
         );
     }
 
-    fn on_compiler_settings(&self, compiler_name: &str, version: &Version, settings: &str) {
+    fn on_compiler_settings(
+        &self,
+        compiler_name: &str,
+        version: &Version,
+        profile: &str,
+        settings: &str,
+    ) {
         if self.show_compiler_settings {
+            let _guard = self.lock_output();
             write_line(
                 io::stderr().lock(),
                 format_args!(
-                    "Compiler settings for {compiler_name} {}.{}.{}: {settings}",
+                    "Compiler settings for {compiler_name} {}.{}.{} (profile: {profile}): {settings}",
                     version.major, version.minor, version.patch
                 ),
             );
@@ -373,6 +394,7 @@ impl Reporter for BasicStdoutReporter {
     }
 
     fn on_compiler_success(&self, compiler_name: &str, version: &Version, duration: &Duration) {
+        let _guard = self.lock_output();
         write_line(
             io::stdout().lock(),
             format_args!(
@@ -384,15 +406,18 @@ impl Reporter for BasicStdoutReporter {
 
     /// Invoked before a new compiler is installed
     fn on_solc_installation_start(&self, version: &Version) {
+        let _guard = self.lock_output();
         write_line(io::stdout().lock(), format_args!("installing solc version \"{version}\""));
     }
 
     /// Invoked before a new compiler was successfully installed
     fn on_solc_installation_success(&self, version: &Version) {
+        let _guard = self.lock_output();
         write_line(io::stdout().lock(), format_args!("Successfully installed solc {version}"));
     }
 
     fn on_solc_installation_error(&self, version: &Version, error: &str) {
+        let _guard = self.lock_output();
         write_line(io::stderr().lock(), format_args!("Failed to install solc {version}: {error}"));
     }
 
@@ -400,6 +425,7 @@ impl Reporter for BasicStdoutReporter {
         if imports.is_empty() {
             return;
         }
+        let _guard = self.lock_output();
         write_line(
             io::stdout().lock(),
             format_args!("{}", format_unresolved_imports(imports, remappings)),
