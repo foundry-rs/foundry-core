@@ -1110,11 +1110,15 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn rooted_path_prefix_accepts_mixed_windows_separators() {
-        let root = Path::new("C:/workspace/utils");
-        let source = Path::new(r"..\node_modules\dependency\src\internal");
-        let context = Path::new(r"C:/workspace/node_modules/dependency\");
+        let temp = utils::tempdir("rooted-path-prefix").unwrap();
+        let root = temp.path().join("workspace/utils");
+        let dependency = temp.path().join("workspace/node_modules/dependency");
+        fs::create_dir_all(dependency.join("src/internal")).unwrap();
 
-        assert!(path_starts_with_rooted(source, context, root));
+        let source = Path::new(r"..\node_modules\dependency\src\internal");
+        let context = format!("{}\\", dependency.to_string_lossy().replace('\\', "/"));
+
+        assert!(path_starts_with_rooted(source, Path::new(&context), &root));
     }
 
     #[test]
