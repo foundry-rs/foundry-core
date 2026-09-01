@@ -6,6 +6,7 @@ use alloy_signer_trezor::HDPath as TrezorHDPath;
 use eyre::{Context, Result};
 use std::{
     fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -105,19 +106,29 @@ pub fn maybe_get_keystore_path(
         .or_else(|| maybe_name.map(|name| default_keystore_dir.join(name))))
 }
 
-/// Whether `path` can be read more than once.
+/// Whether `path` resolves to a regular file.
 ///
-/// Keystores are commonly streamed in rather than named, e.g. `--keystore /dev/stdin` with the
-/// JSON piped on stdin, or `--keystore <(...)`. Those paths resolve to a stream that the first
-/// reader drains, so only a regular file survives being read twice.
-fn is_rereadable(path: &Path) -> bool {
+/// This is checked before opening the path because opening a named pipe may block until a writer
+/// connects.
+fn is_regular_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
-/// Extracts the address from a keystore JSON file without decrypting it.
+/// Extracts the address from a seekable keystore JSON file without decrypting or consuming it.
 fn extract_keystore_address(path: &Path) -> Result<Address> {
-    let content = fs::read_to_string(path)
-        .wrap_err_with(|| format!("Failed to read keystore file at {path:?}"))?;
+    let mut file = fs::File::open(path)
+        .wrap_err_with(|| format!("Failed to open keystore file at {path:?}"))?;
+    // `PendingSigner::unlock` opens this path again to decrypt it. File descriptor paths such as
+    // `/dev/stdin` can share their cursor even when they point to a regular file, so save and
+    // restore the cursor rather than relying on file type. For streams, this fails before reading.
+    let position = file
+        .stream_position()
+        .wrap_err_with(|| format!("Keystore file at {path:?} is not seekable"))?;
+    let mut content = String::new();
+    let read_result = file.read_to_string(&mut content);
+    file.seek(SeekFrom::Start(position))
+        .wrap_err_with(|| format!("Failed to restore keystore file position at {path:?}"))?;
+    read_result.wrap_err_with(|| format!("Failed to read keystore file at {path:?}"))?;
     let json: serde_json::Value = serde_json::from_str(&content)
         .wrap_err_with(|| format!("Failed to parse keystore JSON at {path:?}"))?;
     let address = json
@@ -177,9 +188,7 @@ pub fn create_keystore_signer(
             .wrap_err_with(|| format!("Failed to decrypt keystore {path:?}"))?;
         Ok((Some(WalletSigner::Local(wallet)), None))
     } else {
-        // `PendingSigner::unlock` reopens the keystore to decrypt it, so reading it here as well
-        // is only safe when the path can be read twice.
-        let address = is_rereadable(path).then(|| extract_keystore_address(path).ok()).flatten();
+        let address = is_regular_file(path).then(|| extract_keystore_address(path).ok()).flatten();
         Ok((None, Some(PendingSigner::Keystore(path.clone(), address))))
     }
 }
@@ -188,6 +197,8 @@ pub fn create_keystore_signer(
 mod tests {
     use super::*;
     use alloy_primitives::address;
+    #[cfg(unix)]
+    use std::{os::fd::AsRawFd, process::Stdio};
 
     /// Test vector from the Web3 Secret Storage Definition, with the `address` field that
     /// `extract_keystore_address` looks for. Unlocks to `KEYSTORE_ADDRESS` with
@@ -253,13 +264,34 @@ mod tests {
         );
     }
 
+    /// Redirecting a regular file to stdin still exposes it through a shared file descriptor. The
+    /// address pre-read must restore that descriptor's cursor for the eventual decrypting read.
+    #[cfg(unix)]
+    #[test]
+    fn pending_keystore_signer_restores_a_regular_file_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let keystore = dir.path().join("keystore.json");
+        fs::write(&keystore, KEYSTORE).unwrap();
+
+        let file = fs::File::open(&keystore).unwrap();
+        let path = PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
+
+        let (signer, pending) = create_keystore_signer(&path, None, None).unwrap();
+        assert!(signer.is_none());
+        assert!(matches!(
+            pending,
+            Some(PendingSigner::Keystore(_, Some(address))) if address == KEYSTORE_ADDRESS
+        ));
+
+        let unlocked = PrivateKeySigner::decrypt_keystore(&path, KEYSTORE_PASSWORD).unwrap();
+        assert_eq!(unlocked.address(), KEYSTORE_ADDRESS);
+    }
+
     /// `cat keystore.json | cast wallet address --keystore /dev/stdin`: the keystore arrives on a
     /// pipe that only survives a single read, and that read belongs to `PendingSigner::unlock`.
     #[cfg(unix)]
     #[test]
     fn pending_keystore_signer_leaves_a_streamed_keystore_readable() {
-        use std::{os::fd::AsRawFd, process::Stdio};
-
         let dir = tempfile::tempdir().unwrap();
         let keystore = dir.path().join("keystore.json");
         fs::write(&keystore, KEYSTORE).unwrap();
