@@ -106,21 +106,14 @@ pub fn maybe_get_keystore_path(
         .or_else(|| maybe_name.map(|name| default_keystore_dir.join(name))))
 }
 
-/// Whether `path` resolves to a regular file.
-///
-/// This is checked before opening the path because opening a named pipe may block until a writer
-/// connects.
-fn is_regular_file(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
-}
-
-/// Extracts the address from a seekable keystore JSON file without decrypting or consuming it.
+/// Extracts the address without consuming a regular keystore file.
 fn extract_keystore_address(path: &Path) -> Result<Address> {
+    if !path.is_file() {
+        eyre::bail!("Keystore path at {path:?} is not a regular file");
+    }
     let mut file = fs::File::open(path)
         .wrap_err_with(|| format!("Failed to open keystore file at {path:?}"))?;
-    // `PendingSigner::unlock` opens this path again to decrypt it. File descriptor paths such as
-    // `/dev/stdin` can share their cursor even when they point to a regular file, so save and
-    // restore the cursor rather than relying on file type. For streams, this fails before reading.
+    // File descriptor paths can share their cursor, so restore it before later decryption.
     let position = file
         .stream_position()
         .wrap_err_with(|| format!("Keystore file at {path:?} is not seekable"))?;
@@ -188,7 +181,7 @@ pub fn create_keystore_signer(
             .wrap_err_with(|| format!("Failed to decrypt keystore {path:?}"))?;
         Ok((Some(WalletSigner::Local(wallet)), None))
     } else {
-        let address = is_regular_file(path).then(|| extract_keystore_address(path).ok()).flatten();
+        let address = extract_keystore_address(path).ok();
         Ok((None, Some(PendingSigner::Keystore(path.clone(), address))))
     }
 }
@@ -198,35 +191,17 @@ mod tests {
     use super::*;
     use alloy_primitives::address;
     #[cfg(unix)]
-    use std::{os::fd::AsRawFd, process::Stdio};
+    use std::{
+        os::fd::AsRawFd,
+        process::{Command, Stdio},
+    };
 
-    /// Test vector from the Web3 Secret Storage Definition, with the `address` field that
-    /// `extract_keystore_address` looks for. Unlocks to `KEYSTORE_ADDRESS` with
-    /// `KEYSTORE_PASSWORD`.
-    const KEYSTORE: &str = r#"{
-      "address": "008aeeda4d805471df9b2a5b0f38a0c3bcba786b",
-      "crypto": {
-        "cipher": "aes-128-ctr",
-        "cipherparams": { "iv": "6087dab2f9fdbbfaddc31a909735c1e6" },
-        "ciphertext": "5318b4d5bcd28de64ee5559e671353e16f075ecae9f99c7a79a38af5f869aa46",
-        "kdf": "pbkdf2",
-        "kdfparams": {
-          "c": 262144,
-          "dklen": 32,
-          "prf": "hmac-sha256",
-          "salt": "ae3cd4e7013836a3df6bd7241b12db061dbe2c6785853cce422d148a624ce0bd"
-        },
-        "mac": "517ead924a9d0dc3124507e3393d175ce3ff7c1e96529c6c555ce9e51205e9b2"
-      },
-      "id": "3198bc9c-6672-5ab3-d995-4942343ae5b6",
-      "version": 3
-    }"#;
-    const KEYSTORE_PASSWORD: &str = "testpassword";
-    const KEYSTORE_ADDRESS: Address = address!("0x008AeEda4D805471dF9b2A5B0f38A0C3bCBA786b");
-
-    fn keystore_json(address: Address) -> String {
-        format!(r#"{{"address":"{}","version":3}}"#, alloy_primitives::hex::encode(address))
-    }
+    const KEYSTORE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test-data/keystore/UTC--2022-12-20T10-30-43.591916000Z--ec554aeafe75601aaab43bd4621a22284db566c2"
+    );
+    const KEYSTORE_PASSWORD: &str = "keystorepassword";
+    const KEYSTORE_ADDRESS: Address = address!("0xeC554aeAFE75601AaAb43Bd4621A22284dB566C2");
 
     #[test]
     fn parse_private_key_signer() {
@@ -241,39 +216,25 @@ mod tests {
 
     #[test]
     fn extracts_keystore_address() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("keystore.json");
-        let address = Address::random();
-        fs::write(&path, keystore_json(address)).unwrap();
-
-        assert_eq!(extract_keystore_address(&path).unwrap(), address);
+        assert_eq!(extract_keystore_address(Path::new(KEYSTORE)).unwrap(), KEYSTORE_ADDRESS);
     }
 
     #[test]
     fn pending_keystore_signer_exposes_address_of_a_regular_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("keystore.json");
-        let address = Address::random();
-        fs::write(&path, keystore_json(address)).unwrap();
+        let path = PathBuf::from(KEYSTORE);
 
         let (signer, pending) = create_keystore_signer(&path, None, None).unwrap();
 
         assert!(signer.is_none());
         assert!(
-            matches!(pending, Some(PendingSigner::Keystore(_, Some(found))) if found == address)
+            matches!(pending, Some(PendingSigner::Keystore(_, Some(address))) if address == KEYSTORE_ADDRESS)
         );
     }
 
-    /// Redirecting a regular file to stdin still exposes it through a shared file descriptor. The
-    /// address pre-read must restore that descriptor's cursor for the eventual decrypting read.
     #[cfg(unix)]
     #[test]
     fn pending_keystore_signer_restores_a_regular_file_descriptor() {
-        let dir = tempfile::tempdir().unwrap();
-        let keystore = dir.path().join("keystore.json");
-        fs::write(&keystore, KEYSTORE).unwrap();
-
-        let file = fs::File::open(&keystore).unwrap();
+        let file = fs::File::open(KEYSTORE).unwrap();
         let path = PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
 
         let (signer, pending) = create_keystore_signer(&path, None, None).unwrap();
@@ -287,31 +248,18 @@ mod tests {
         assert_eq!(unlocked.address(), KEYSTORE_ADDRESS);
     }
 
-    /// `cat keystore.json | cast wallet address --keystore /dev/stdin`: the keystore arrives on a
-    /// pipe that only survives a single read, and that read belongs to `PendingSigner::unlock`.
     #[cfg(unix)]
     #[test]
     fn pending_keystore_signer_leaves_a_streamed_keystore_readable() {
-        let dir = tempfile::tempdir().unwrap();
-        let keystore = dir.path().join("keystore.json");
-        fs::write(&keystore, KEYSTORE).unwrap();
-
-        let mut cat = std::process::Command::new("cat")
-            .arg(&keystore)
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut cat = Command::new("cat").arg(KEYSTORE).stdout(Stdio::piped()).spawn().unwrap();
         let stdout = cat.stdout.take().unwrap();
-        // What `/dev/stdin` resolves to for the process reading the pipe. The payload fits in the
-        // pipe buffer, so `cat` is already gone and only the buffered copy is left to read.
         let path = PathBuf::from(format!("/dev/fd/{}", stdout.as_raw_fd()));
         assert!(cat.wait().unwrap().success());
 
         let (signer, pending) = create_keystore_signer(&path, None, None).unwrap();
         assert!(signer.is_none());
-        assert!(matches!(pending, Some(PendingSigner::Keystore(..))));
+        assert!(matches!(pending, Some(PendingSigner::Keystore(_, None))));
 
-        // The read `PendingSigner::unlock` performs once the password is entered.
         let unlocked = PrivateKeySigner::decrypt_keystore(&path, KEYSTORE_PASSWORD).unwrap();
         assert_eq!(unlocked.address(), KEYSTORE_ADDRESS);
     }
