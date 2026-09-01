@@ -151,9 +151,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Keep PR feedback fast by running the test matrix on Linux only.
+        # Keep PR feedback fast by running the test matrix on Linux and Windows.
         # Pushes to main retain cross-platform coverage.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest", "windows-latest"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest", "macos-latest", "windows-latest"]') }}
         rust: ["stable", "1.95"]
         flags: ["", "--all-features"]
         exclude:
