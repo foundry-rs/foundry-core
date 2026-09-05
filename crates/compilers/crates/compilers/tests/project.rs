@@ -34,9 +34,7 @@ use semver::Version;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    env,
-    fs::{self},
-    io,
+    env, fs, io,
     path::{MAIN_SEPARATOR, Path, PathBuf},
     str::FromStr,
     sync::LazyLock,
