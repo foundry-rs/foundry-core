@@ -49,6 +49,9 @@ pub struct CompilerCache<S = Settings> {
     pub builds: BTreeSet<String>,
     pub profiles: BTreeMap<String, S>,
     pub preprocessed: bool,
+    /// Stable identity for artifact-transforming preprocessors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preprocessor_cache_key: Option<String>,
     pub mocks: HashSet<PathBuf>,
 }
 
@@ -62,6 +65,7 @@ impl<S> CompilerCache<S> {
             builds: Default::default(),
             profiles: Default::default(),
             preprocessed,
+            preprocessor_cache_key: None,
             mocks: Default::default(),
         }
     }
@@ -401,6 +405,7 @@ impl<S> Default for CompilerCache<S> {
             paths: Default::default(),
             profiles: Default::default(),
             preprocessed: false,
+            preprocessor_cache_key: None,
             mocks: Default::default(),
         }
     }
@@ -1085,6 +1090,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         project: &'a Project<C, T>,
         edges: GraphEdges<C::Parser>,
         preprocessed: bool,
+        preprocessor_cache_key: Option<String>,
     ) -> Result<Self> {
         /// Returns the [CompilerCache] to use
         ///
@@ -1093,6 +1099,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             project: &Project<C, T>,
             invalidate_cache: bool,
             preprocessed: bool,
+            preprocessor_cache_key: Option<String>,
         ) -> CompilerCache<C::Settings> {
             // the currently configured paths
             let paths = project.paths.paths_relative();
@@ -1102,6 +1109,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 && let Ok(cache) = CompilerCache::read_joined(&project.paths)
                 && cache.paths == paths
                 && preprocessed == cache.preprocessed
+                && preprocessor_cache_key == cache.preprocessor_cache_key
             {
                 // unchanged project paths and same preprocess cache option
                 return cache;
@@ -1110,7 +1118,9 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             trace!(invalidate_cache, "cache invalidated");
 
             // new empty cache
-            CompilerCache::new(Default::default(), paths, preprocessed)
+            let mut cache = CompilerCache::new(Default::default(), paths, preprocessed);
+            cache.preprocessor_cache_key = preprocessor_cache_key;
+            cache
         }
 
         let cache = if project.cached {
@@ -1120,7 +1130,8 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             let invalidate_cache = !edges.unresolved_imports().is_empty();
 
             // read the cache file if it already exists
-            let mut cache = get_cache(project, invalidate_cache, preprocessed);
+            let mut cache =
+                get_cache(project, invalidate_cache, preprocessed, preprocessor_cache_key);
 
             cache.remove_missing_files();
 

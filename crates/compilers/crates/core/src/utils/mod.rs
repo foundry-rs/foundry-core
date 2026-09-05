@@ -60,7 +60,7 @@ pub fn find_yul_imports(source: &str) -> Vec<YulImport<'_>> {
                 }
                 index = (index + 2).min(bytes.len());
             }
-            b'"' | b'\'' => index = skip_quoted(bytes, index),
+            b'"' | b'\'' => index = skip_quoted(bytes, index).unwrap_or(bytes.len()),
             b'{' => {
                 depth += 1;
                 index += 1;
@@ -83,12 +83,10 @@ pub fn find_yul_imports(source: &str) -> Vec<YulImport<'_>> {
                 while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
                     cursor += 1;
                 }
-                let Some(&quote @ (b'"' | b'\'')) = bytes.get(cursor) else { continue };
+                let Some(b'"' | b'\'') = bytes.get(cursor) else { continue };
                 let path_start = cursor + 1;
-                cursor = skip_quoted(bytes, cursor);
-                if cursor == bytes.len() || bytes[cursor - 1] != quote {
-                    continue;
-                }
+                let Some(end) = skip_quoted(bytes, cursor) else { continue };
+                cursor = end;
                 let path_end = cursor - 1;
                 while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\r')) {
                     cursor += 1;
@@ -117,17 +115,17 @@ const fn is_ident_continue(byte: u8) -> bool {
     is_ident_start(byte) || byte.is_ascii_digit()
 }
 
-fn skip_quoted(bytes: &[u8], start: usize) -> usize {
+fn skip_quoted(bytes: &[u8], start: usize) -> Option<usize> {
     let quote = bytes[start];
     let mut index = start + 1;
     while index < bytes.len() {
         match bytes[index] {
             b'\\' => index = (index + 2).min(bytes.len()),
-            byte if byte == quote => return index + 1,
+            byte if byte == quote => return Some(index + 1),
             _ => index += 1,
         }
     }
-    index
+    None
 }
 
 /// Support for configuring the EVM version
@@ -640,6 +638,15 @@ function helper() {
         );
         assert_eq!(&source[imports[0].statement.clone()], "import \"src/One.yul\"");
         assert_eq!(&source[imports[1].statement.clone()], "import 'src/Two.yul';");
+    }
+
+    #[test]
+    fn finds_yul_import_at_end_of_file() {
+        let source = "import \"src/One.yul\"";
+        let imports = find_yul_imports(source);
+        assert_eq!(imports, [YulImport { statement: 0..source.len(), path: "src/One.yul" }]);
+
+        assert!(find_yul_imports("import \"unterminated.yul").is_empty());
     }
 
     #[test]

@@ -134,11 +134,27 @@ pub(crate) type VersionedSources<'a, L, S> = HashMap<L, Vec<(Version, Sources, (
 pub trait Preprocessor<C: Compiler>: Debug {
     fn preprocess(
         &self,
-        compiler: &C,
-        input: &mut C::Input,
-        paths: &ProjectPathsConfig<C::Language>,
-        mocks: &mut HashSet<PathBuf>,
-    ) -> Result<()>;
+        _compiler: &C,
+        _input: &mut C::Input,
+        _paths: &ProjectPathsConfig<C::Language>,
+        _mocks: &mut HashSet<PathBuf>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether this preprocessor supports interface-only cache invalidation.
+    ///
+    /// This preserves the historical behavior for preprocessors that only override
+    /// [`Self::preprocess`]. Preprocessors that split inputs or otherwise transform complete
+    /// compilation units should opt out.
+    fn supports_interface_only_invalidation(&self) -> bool {
+        true
+    }
+
+    /// Stable identity for transformations whose artifacts must not be reused without them.
+    fn cache_key(&self) -> Option<&'static str> {
+        None
+    }
 
     /// Preprocesses a compiler input and optionally splits it into multiple compiler invocations.
     fn preprocess_inputs(
@@ -215,6 +231,16 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     }
 
     pub fn with_preprocessor(mut self, preprocessor: impl Preprocessor<C> + 'static) -> Self {
+        self.preprocessors.clear();
+        self.preprocessors.push(Box::new(preprocessor));
+        self
+    }
+
+    /// Adds a preprocessor without replacing an already configured preprocessor.
+    pub fn with_additional_preprocessor(
+        mut self,
+        preprocessor: impl Preprocessor<C> + 'static,
+    ) -> Self {
         self.preprocessors.push(Box::new(preprocessor));
         self
     }
@@ -261,7 +287,16 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         // which is unix style `/`
         sources.slash_paths();
 
-        let mut cache = ArtifactsCache::new(project, edges, !preprocessors.is_empty())?;
+        let preprocessed = preprocessors
+            .iter()
+            .any(|preprocessor| preprocessor.supports_interface_only_invalidation());
+        let cache_key = preprocessors
+            .iter()
+            .filter_map(|preprocessor| preprocessor.cache_key())
+            .collect::<Vec<_>>()
+            .join("\0");
+        let cache_key = (!cache_key.is_empty()).then_some(cache_key);
+        let mut cache = ArtifactsCache::new(project, edges, preprocessed, cache_key)?;
         // retain and compile only dirty sources and all their imports
         sources.filter(&mut cache);
 
@@ -583,7 +618,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                     })
                     .collect();
 
-                let mut input = C::Input::build(sources, settings, language, version.clone());
+                let mut input = C::Input::build(sources, settings, language, version);
 
                 input.strip_prefix(project.paths.root.as_path());
 
