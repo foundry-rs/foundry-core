@@ -561,7 +561,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                     })
                     .collect();
 
-                let mut input = C::Input::build(sources, settings, language, version.clone());
+                let mut input = C::Input::build(sources, settings, language, version);
 
                 input.strip_prefix(project.paths.root.as_path());
 
