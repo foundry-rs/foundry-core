@@ -287,9 +287,10 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         // which is unix style `/`
         sources.slash_paths();
 
-        let preprocessed = preprocessors
-            .iter()
-            .any(|preprocessor| preprocessor.supports_interface_only_invalidation());
+        let preprocessed = !preprocessors.is_empty()
+            && preprocessors
+                .iter()
+                .all(|preprocessor| preprocessor.supports_interface_only_invalidation());
         let cache_key = preprocessors
             .iter()
             .filter_map(|preprocessor| preprocessor.cache_key())
