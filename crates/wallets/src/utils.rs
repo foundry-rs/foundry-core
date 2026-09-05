@@ -6,6 +6,7 @@ use alloy_signer_trezor::HDPath as TrezorHDPath;
 use eyre::{Context, Result};
 use std::{
     fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -105,10 +106,22 @@ pub fn maybe_get_keystore_path(
         .or_else(|| maybe_name.map(|name| default_keystore_dir.join(name))))
 }
 
-/// Extracts the address from a keystore JSON file without decrypting it.
+/// Extracts the address without consuming a regular keystore file.
 fn extract_keystore_address(path: &Path) -> Result<Address> {
-    let content = fs::read_to_string(path)
-        .wrap_err_with(|| format!("Failed to read keystore file at {path:?}"))?;
+    if !path.is_file() {
+        eyre::bail!("Keystore path at {path:?} is not a regular file");
+    }
+    let mut file = fs::File::open(path)
+        .wrap_err_with(|| format!("Failed to open keystore file at {path:?}"))?;
+    // File descriptor paths can share their cursor, so restore it before later decryption.
+    let position = file
+        .stream_position()
+        .wrap_err_with(|| format!("Keystore file at {path:?} is not seekable"))?;
+    let mut content = String::new();
+    let read_result = file.read_to_string(&mut content);
+    file.seek(SeekFrom::Start(position))
+        .wrap_err_with(|| format!("Failed to restore keystore file position at {path:?}"))?;
+    read_result.wrap_err_with(|| format!("Failed to read keystore file at {path:?}"))?;
     let json: serde_json::Value = serde_json::from_str(&content)
         .wrap_err_with(|| format!("Failed to parse keystore JSON at {path:?}"))?;
     let address = json
@@ -176,6 +189,19 @@ pub fn create_keystore_signer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::address;
+    #[cfg(unix)]
+    use std::{
+        os::fd::AsRawFd,
+        process::{Command, Stdio},
+    };
+
+    const KEYSTORE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/test-data/keystore/UTC--2022-12-20T10-30-43.591916000Z--ec554aeafe75601aaab43bd4621a22284db566c2"
+    );
+    const KEYSTORE_PASSWORD: &str = "keystorepassword";
+    const KEYSTORE_ADDRESS: Address = address!("0xeC554aeAFE75601AaAb43Bd4621A22284dB566C2");
 
     #[test]
     fn parse_private_key_signer() {
@@ -190,15 +216,51 @@ mod tests {
 
     #[test]
     fn extracts_keystore_address() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("keystore.json");
-        let address = Address::random();
-        fs::write(
-            &path,
-            format!(r#"{{"address":"{}","version":3}}"#, alloy_primitives::hex::encode(address)),
-        )
-        .unwrap();
+        assert_eq!(extract_keystore_address(Path::new(KEYSTORE)).unwrap(), KEYSTORE_ADDRESS);
+    }
 
-        assert_eq!(extract_keystore_address(&path).unwrap(), address);
+    #[test]
+    fn pending_keystore_signer_exposes_address_of_a_regular_file() {
+        let path = PathBuf::from(KEYSTORE);
+
+        let (signer, pending) = create_keystore_signer(&path, None, None).unwrap();
+
+        assert!(signer.is_none());
+        assert!(
+            matches!(pending, Some(PendingSigner::Keystore(_, Some(address))) if address == KEYSTORE_ADDRESS)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_keystore_signer_restores_a_regular_file_descriptor() {
+        let file = fs::File::open(KEYSTORE).unwrap();
+        let path = PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()));
+
+        let (signer, pending) = create_keystore_signer(&path, None, None).unwrap();
+        assert!(signer.is_none());
+        assert!(matches!(
+            pending,
+            Some(PendingSigner::Keystore(_, Some(address))) if address == KEYSTORE_ADDRESS
+        ));
+
+        let unlocked = PrivateKeySigner::decrypt_keystore(&path, KEYSTORE_PASSWORD).unwrap();
+        assert_eq!(unlocked.address(), KEYSTORE_ADDRESS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_keystore_signer_leaves_a_streamed_keystore_readable() {
+        let mut cat = Command::new("cat").arg(KEYSTORE).stdout(Stdio::piped()).spawn().unwrap();
+        let stdout = cat.stdout.take().unwrap();
+        let path = PathBuf::from(format!("/dev/fd/{}", stdout.as_raw_fd()));
+        assert!(cat.wait().unwrap().success());
+
+        let (signer, pending) = create_keystore_signer(&path, None, None).unwrap();
+        assert!(signer.is_none());
+        assert!(matches!(pending, Some(PendingSigner::Keystore(_, None))));
+
+        let unlocked = PrivateKeySigner::decrypt_keystore(&path, KEYSTORE_PASSWORD).unwrap();
+        assert_eq!(unlocked.address(), KEYSTORE_ADDRESS);
     }
 }
