@@ -195,7 +195,7 @@ impl SolDataBuilder {
         match ast {
             Ok((sess, ast)) => builder.parse_from_ast(sess, ast),
             Err(err) => {
-                builder.parse_from_regex(content);
+                builder.parse_from_regex(content, file);
                 if let Some(err) = err {
                     builder.parse_err = Some(err);
                 }
@@ -261,7 +261,7 @@ impl SolDataBuilder {
         }
     }
 
-    fn parse_from_regex(&mut self, content: &str) {
+    fn parse_from_regex(&mut self, content: &str, file: &Path) {
         if self.version.is_none() {
             self.version = utils::capture_outer_and_inner(
                 content,
@@ -272,7 +272,16 @@ impl SolDataBuilder {
             .map(|(cap, name)| Spanned::new(name.as_str().to_owned(), cap.range()));
         }
         if self.imports.is_empty() {
-            self.imports = capture_imports(content);
+            self.imports = if file.extension().is_some_and(|extension| extension == "yul") {
+                utils::find_yul_imports(content)
+                    .into_iter()
+                    .map(|import| {
+                        Spanned::new(SolImport::new(PathBuf::from(import.path)), import.statement)
+                    })
+                    .collect()
+            } else {
+                capture_imports(content)
+            };
         }
         if self.contract_names.is_empty() {
             utils::RE_CONTRACT_NAMES.captures_iter(content).for_each(|cap| {

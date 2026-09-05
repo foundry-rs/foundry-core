@@ -25,6 +25,111 @@ pub use wd::*;
 /// Extensions acceptable by solc compiler.
 pub const SOLC_EXTENSIONS: &[&str] = &["sol", "yul"];
 
+/// A top-level import in a Yul module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YulImport<'a> {
+    /// Range of the complete import declaration.
+    pub statement: Range<usize>,
+    /// Imported path without quotes.
+    pub path: &'a str,
+}
+
+/// Finds top-level `import "path"` declarations in a Yul module.
+///
+/// Both semicolon-free and semicolon-terminated declarations are accepted. Comments and strings
+/// are skipped so their contents cannot create dependency edges.
+pub fn find_yul_imports(source: &str) -> Vec<YulImport<'_>> {
+    let bytes = source.as_bytes();
+    let mut imports = Vec::new();
+    let mut index = 0;
+    let mut depth = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while bytes.get(index).is_some_and(|byte| *byte != b'\n') {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            b'"' | b'\'' => index = skip_quoted(bytes, index),
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            byte if depth == 0 && is_ident_start(byte) => {
+                let start = index;
+                index += 1;
+                while bytes.get(index).is_some_and(|byte| is_ident_continue(*byte)) {
+                    index += 1;
+                }
+                if &source[start..index] != "import" {
+                    continue;
+                }
+
+                let mut cursor = index;
+                while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                    cursor += 1;
+                }
+                let Some(&quote @ (b'"' | b'\'')) = bytes.get(cursor) else { continue };
+                let path_start = cursor + 1;
+                cursor = skip_quoted(bytes, cursor);
+                if cursor == bytes.len() || bytes[cursor - 1] != quote {
+                    continue;
+                }
+                let path_end = cursor - 1;
+                while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\r')) {
+                    cursor += 1;
+                }
+                if bytes.get(cursor) == Some(&b';') {
+                    cursor += 1;
+                }
+                imports.push(YulImport {
+                    statement: start..cursor,
+                    path: &source[path_start..path_end],
+                });
+                index = cursor;
+            }
+            _ => index += 1,
+        }
+    }
+
+    imports
+}
+
+const fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+const fn is_ident_continue(byte: u8) -> bool {
+    is_ident_start(byte) || byte.is_ascii_digit()
+}
+
+fn skip_quoted(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index = (index + 2).min(bytes.len()),
+            byte if byte == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    index
+}
+
 /// Support for configuring the EVM version
 /// <https://blog.soliditylang.org/2018/03/08/solidity-0.4.21-release-announcement/>
 pub const BYZANTIUM_SOLC: Version = Version::new(0, 4, 21);
@@ -513,6 +618,29 @@ pub fn mkdir_or_touch(tmp: &std::path::Path, paths: &[&str]) {
 mod tests {
     pub use super::*;
     pub use std::fs::{File, create_dir_all};
+
+    #[test]
+    fn finds_yul_imports() {
+        let source = r#"
+// import "ignored-line.yul"
+/*
+import "ignored-block.yul"
+*/
+import "src/One.yul"
+import 'src/Two.yul';
+function helper() {
+    let value := "import \"ignored-string.yul\""
+}
+"#;
+
+        let imports = find_yul_imports(source);
+        assert_eq!(
+            imports.iter().map(|import| import.path).collect::<Vec<_>>(),
+            ["src/One.yul", "src/Two.yul"]
+        );
+        assert_eq!(&source[imports[0].statement.clone()], "import \"src/One.yul\"");
+        assert_eq!(&source[imports[1].statement.clone()], "import 'src/Two.yul';");
+    }
 
     #[test]
     fn can_create_parent_dirs_with_ext() {

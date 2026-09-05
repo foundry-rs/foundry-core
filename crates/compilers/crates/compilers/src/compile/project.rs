@@ -139,6 +139,27 @@ pub trait Preprocessor<C: Compiler>: Debug {
         paths: &ProjectPathsConfig<C::Language>,
         mocks: &mut HashSet<PathBuf>,
     ) -> Result<()>;
+
+    /// Preprocesses a compiler input and optionally splits it into multiple compiler invocations.
+    fn preprocess_inputs(
+        &self,
+        compiler: &C,
+        mut input: C::Input,
+        paths: &ProjectPathsConfig<C::Language>,
+        mocks: &mut HashSet<PathBuf>,
+    ) -> Result<Vec<C::Input>> {
+        self.preprocess(compiler, &mut input, paths, mocks)?;
+        Ok(vec![input])
+    }
+
+    /// Updates a compiler output before build info and artifacts are generated.
+    fn postprocess(
+        &self,
+        _input: &C::Input,
+        _output: &mut CompilerOutput<C::CompilationError, C::CompilerContract>,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -154,8 +175,8 @@ pub struct ProjectCompiler<
     primary_profiles: HashMap<PathBuf, &'a str>,
     /// how to compile all the sources
     sources: CompilerSources<'a, C::Language, C::Settings>,
-    /// Optional preprocessor
-    preprocessor: Option<Box<dyn Preprocessor<C>>>,
+    /// Compiler input preprocessors.
+    preprocessors: Vec<Box<dyn Preprocessor<C>>>,
 }
 
 impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
@@ -190,11 +211,12 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             sources,
         };
 
-        Ok(Self { edges, primary_profiles, project, sources, preprocessor: None })
+        Ok(Self { edges, primary_profiles, project, sources, preprocessors: Vec::new() })
     }
 
-    pub fn with_preprocessor(self, preprocessor: impl Preprocessor<C> + 'static) -> Self {
-        Self { preprocessor: Some(Box::new(preprocessor)), ..self }
+    pub fn with_preprocessor(mut self, preprocessor: impl Preprocessor<C> + 'static) -> Self {
+        self.preprocessors.push(Box::new(preprocessor));
+        self
     }
 
     /// Compiles all the sources of the `Project` in the appropriate mode
@@ -233,17 +255,17 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     #[instrument(skip_all)]
     fn preprocess(self) -> Result<PreprocessedState<'a, T, C>> {
         trace!("preprocessing");
-        let Self { edges, project, mut sources, primary_profiles, preprocessor } = self;
+        let Self { edges, project, mut sources, primary_profiles, preprocessors } = self;
 
         // convert paths on windows to ensure consistency with the `CompilerOutput` `solc` emits,
         // which is unix style `/`
         sources.slash_paths();
 
-        let mut cache = ArtifactsCache::new(project, edges, preprocessor.is_some())?;
+        let mut cache = ArtifactsCache::new(project, edges, !preprocessors.is_empty())?;
         // retain and compile only dirty sources and all their imports
         sources.filter(&mut cache);
 
-        Ok(PreprocessedState { sources, cache, primary_profiles, preprocessor })
+        Ok(PreprocessedState { sources, cache, primary_profiles, preprocessors })
     }
 }
 
@@ -262,8 +284,8 @@ struct PreprocessedState<'a, T: ArtifactOutput<CompilerContract = C::CompilerCon
     /// A mapping from a source file path to the primary profile name selected for it.
     primary_profiles: HashMap<PathBuf, &'a str>,
 
-    /// Optional preprocessor
-    preprocessor: Option<Box<dyn Preprocessor<C>>>,
+    /// Compiler input preprocessors.
+    preprocessors: Vec<Box<dyn Preprocessor<C>>>,
 }
 
 impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
@@ -273,9 +295,9 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     #[instrument(skip_all)]
     fn compile(self) -> Result<CompiledState<'a, T, C>> {
         trace!("compiling");
-        let PreprocessedState { sources, mut cache, primary_profiles, preprocessor } = self;
+        let PreprocessedState { sources, mut cache, primary_profiles, preprocessors } = self;
 
-        let mut output = sources.compile(&mut cache, preprocessor)?;
+        let mut output = sources.compile(&mut cache, preprocessors)?;
 
         // source paths get stripped before handing them over to solc, so solc never uses absolute
         // paths, instead `--base-path <root dir>` is set. this way any metadata that's derived from
@@ -481,7 +503,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
     >(
         self,
         cache: &mut ArtifactsCache<'_, T, C>,
-        preprocessor: Option<Box<dyn Preprocessor<C>>>,
+        preprocessors: Vec<Box<dyn Preprocessor<C>>>,
     ) -> Result<AggregatedCompilerOutput<C>> {
         let project = cache.project();
         let graph = cache.graph();
@@ -565,16 +587,22 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
 
                 input.strip_prefix(project.paths.root.as_path());
 
-                if let Some(preprocessor) = preprocessor.as_ref() {
-                    preprocessor.preprocess(
-                        &project.compiler,
-                        &mut input,
-                        &project.paths,
-                        &mut mocks,
-                    )?;
+                let mut inputs = vec![input];
+                for preprocessor in &preprocessors {
+                    let mut next = Vec::new();
+                    for input in inputs {
+                        next.extend(preprocessor.preprocess_inputs(
+                            &project.compiler,
+                            input,
+                            &project.paths,
+                            &mut mocks,
+                        )?);
+                    }
+                    inputs = next;
                 }
-
-                jobs.push((input, profile, actually_dirty));
+                jobs.extend(
+                    inputs.into_iter().map(|input| (input, profile, actually_dirty.clone())),
+                );
             }
         }
 
@@ -591,6 +619,10 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
 
         for (input, mut output, profile, actually_dirty) in results {
             let version = input.version();
+
+            for preprocessor in &preprocessors {
+                preprocessor.postprocess(&input, &mut output)?;
+            }
 
             // Mark all files as seen by the compiler
             for file in &actually_dirty {
