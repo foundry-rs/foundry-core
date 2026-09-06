@@ -101,8 +101,8 @@
 //! solc with only these dirty files instead of the entire source set.
 
 use crate::{
-    ArtifactOutput, CompilerSettings, Graph, Project, ProjectCompileOutput, ProjectPathsConfig,
-    Sources,
+    ArtifactOutput, CompilerSettings, ConfigurableArtifacts, Graph, Project, ProjectCompileOutput,
+    ProjectPathsConfig, Sources,
     artifact_output::Artifacts,
     buildinfo::RawBuildInfo,
     cache::ArtifactsCache,
@@ -112,7 +112,8 @@ use crate::{
     report,
     resolver::{GraphEdges, ResolvedSources},
 };
-use foundry_compilers_core::error::Result;
+use foundry_compilers_artifacts::{Contract, sources::SourceCompilationKind};
+use foundry_compilers_core::error::{Result, SolcError};
 use rayon::prelude::*;
 use semver::Version;
 #[cfg(windows)]
@@ -247,6 +248,121 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     }
 }
 
+impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, ConfigurableArtifacts, C> {
+    /// Acquires ABI artifacts, reusing normal artifacts before consulting a separate cache.
+    ///
+    /// The project must request ABI output. Normal artifacts and their manifest are never
+    /// modified by this operation. Additional output files and full build info retain ordinary
+    /// compilation behavior. Secondary persistence requires caching and artifact writes enabled.
+    pub fn compile_abi_cached(self) -> Result<ProjectCompileOutput<C>> {
+        let project = self.project;
+        if project.build_info || project.artifacts.additional_files != Default::default() {
+            return self.compile();
+        }
+        let slash_paths = project.slash_paths;
+        let preprocessed = self.preprocessor.is_some();
+        let state = self.preprocess()?;
+        let mut output = if !project.cached
+            || state.sources.sources.values().flatten().all(|(_, sources, _)| sources.is_empty())
+        {
+            state.compile()?.write_artifacts_if(false)?.write_cache_if(false)?
+        } else {
+            let PreprocessedState { mut sources, cache, primary_profiles, preprocessor } = state;
+            let normal_mocks = cache.mocks();
+            let (normal_artifacts, normal_builds, edges) =
+                cache.consume(&Artifacts::default(), &Vec::new(), false)?;
+            let mut storage = Box::new(project.paths.clone());
+            let mut directory = project.abi_cache_path();
+            if preprocessed {
+                // Preprocessors can depend on the complete compiler job, including its source
+                // units. Separate storage keeps alternating filtered requests independent.
+                let mut jobs = sources
+                    .sources
+                    .iter()
+                    .flat_map(|(language, jobs)| {
+                        jobs.iter().map(|(version, sources, (profile, _))| {
+                            let files = sources
+                                .iter()
+                                .map(|(path, source)| {
+                                    (
+                                        path.strip_prefix(project.root()).unwrap_or(path),
+                                        source.kind == SourceCompilationKind::Complete,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            (language.to_string(), version, profile, files)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                jobs.sort_unstable();
+                let mut mocks = normal_mocks.iter().collect::<Vec<_>>();
+                mocks.sort_unstable();
+                let identity = serde_json::to_vec(&(jobs, mocks))?;
+                directory.push(foundry_compilers_core::utils::unique_hash(identity));
+            }
+            storage.cache = directory.join("cache.json");
+            storage.artifacts = directory.join("artifacts");
+            storage.build_infos = directory.join("build-info");
+            let mut cache =
+                ArtifactsCache::with_storage(project, edges, preprocessed, Some(storage))?;
+            let mut mocks = cache.mocks();
+            mocks.extend(normal_mocks.iter().cloned());
+            cache.update_mocks(mocks);
+            // A preprocessor can depend on other source units in its compiler job. Reuse a
+            // fully cached request, but preserve the original input on any secondary miss.
+            let original_sources = preprocessed.then(|| sources.clone());
+            let mut preserved_mocks = HashSet::new();
+            sources.filter(&mut cache);
+            if let Some(original_sources) = original_sources
+                && sources.sources.values().flatten().any(|(_, sources, _)| !sources.is_empty())
+            {
+                preserved_mocks = cache.mocks();
+                for (version, sources, (profile, _)) in original_sources.sources.values().flatten()
+                {
+                    for (file, source) in sources {
+                        preserved_mocks.remove(file);
+                        if source.kind == SourceCompilationKind::Complete {
+                            cache.invalidate_artifacts(file, version, profile);
+                        }
+                    }
+                }
+                sources = original_sources;
+                cache.update_mocks(normal_mocks);
+            }
+            let write = !project.no_artifacts;
+            let mut state =
+                PreprocessedState { sources, cache, primary_profiles, preprocessor }.compile()?;
+            // Keep classifications for secondary artifacts outside the preprocessed jobs.
+            if !preserved_mocks.is_empty() {
+                let mut mocks = state.cache.mocks();
+                mocks.extend(preserved_mocks);
+                state.cache.update_mocks(mocks);
+            }
+            let mut output = state.write_artifacts_if(write)?.write_cache_if(write)?;
+            for (file, contracts) in normal_artifacts {
+                let cached = output.cached_artifacts.0.entry(file).or_default();
+                for (name, artifacts) in contracts {
+                    let existing = cached.entry(name).or_default();
+                    existing.retain(|artifact| {
+                        !artifacts.iter().any(|normal| {
+                            normal.version == artifact.version && normal.profile == artifact.profile
+                        })
+                    });
+                    existing.extend(artifacts);
+                }
+            }
+            output.builds.0.extend(normal_builds.into_iter().map(|(id, context)| {
+                (id, context.with_joined_paths(project.paths.root.as_path()))
+            }));
+            output
+        };
+        if slash_paths {
+            output.slash_paths();
+        }
+        Ok(output)
+    }
+}
+
 /// A series of states that comprise the [`ProjectCompiler::compile()`] state machine
 ///
 /// The main reason is to debug all states individually
@@ -305,18 +421,25 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     /// successful
     #[instrument(skip_all)]
     fn write_artifacts(self) -> Result<ArtifactsState<'a, T, C>> {
+        let write = !self.cache.project().no_artifacts;
+        self.write_artifacts_if(write)
+    }
+
+    fn write_artifacts_if(self, write: bool) -> Result<ArtifactsState<'a, T, C>> {
         let CompiledState { output, cache, primary_profiles } = self;
+        let optional_storage =
+            matches!(&cache, ArtifactsCache::Cached(inner) if inner.storage_paths.is_some());
 
         let project = cache.project();
         let ctx = cache.output_ctx();
         // write all artifacts via the handler but only if the build succeeded and project wasn't
         // configured with `no_artifacts == true`
-        let compiled_artifacts = if project.no_artifacts {
+        let compiled_artifacts = if !write {
             project.artifacts_handler().output_to_artifacts(
                 &output.contracts,
                 &output.sources,
                 ctx,
-                &project.paths,
+                cache.storage_paths(),
                 &primary_profiles,
             )
         } else if output.has_error(
@@ -330,7 +453,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 &output.contracts,
                 &output.sources,
                 ctx,
-                &project.paths,
+                cache.storage_paths(),
                 &primary_profiles,
             )
         } else {
@@ -340,21 +463,51 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 output.sources.len()
             );
             // this emits the artifacts via the project's artifacts handler
-            let artifacts = project.artifacts_handler().on_output(
+            let artifacts = match project.artifacts_handler().on_output(
                 &output.contracts,
                 &output.sources,
-                &project.paths,
+                cache.storage_paths(),
                 ctx,
                 &primary_profiles,
-            )?;
+            ) {
+                Ok(artifacts) => artifacts,
+                Err(err) if optional_storage && matches!(err, SolcError::Io(_)) => {
+                    debug!(%err, "ABI cache unavailable; returning in-memory artifacts");
+                    let compiled_artifacts = project.artifacts_handler().output_to_artifacts(
+                        &output.contracts,
+                        &output.sources,
+                        cache.output_ctx(),
+                        cache.storage_paths(),
+                        &primary_profiles,
+                    );
+                    return Ok(ArtifactsState {
+                        output,
+                        cache,
+                        compiled_artifacts,
+                        persist: false,
+                    });
+                }
+                Err(err) => return Err(err),
+            };
 
             // emits all the build infos, if they exist
-            output.write_build_infos(project.build_info_path())?;
+            if let Err(err) = output.write_build_infos(&cache.storage_paths().build_infos) {
+                if optional_storage && matches!(err, SolcError::Io(_)) {
+                    debug!(%err, "ABI build context cache unavailable");
+                    return Ok(ArtifactsState {
+                        output,
+                        cache,
+                        compiled_artifacts: artifacts,
+                        persist: false,
+                    });
+                }
+                return Err(err);
+            }
 
             artifacts
         };
 
-        Ok(ArtifactsState { output, cache, compiled_artifacts })
+        Ok(ArtifactsState { output, cache, compiled_artifacts, persist: true })
     }
 }
 
@@ -364,6 +517,7 @@ struct ArtifactsState<'a, T: ArtifactOutput<CompilerContract = C::CompilerContra
     output: AggregatedCompilerOutput<C>,
     cache: ArtifactsCache<'a, T, C>,
     compiled_artifacts: Artifacts<T::Artifact>,
+    persist: bool,
 }
 
 impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
@@ -374,7 +528,12 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     /// this concludes the [`Project::compile()`] statemachine
     #[instrument(skip_all)]
     fn write_cache(self) -> Result<ProjectCompileOutput<C, T>> {
-        let ArtifactsState { output, cache, compiled_artifacts } = self;
+        let write = !self.cache.project().no_artifacts;
+        self.write_cache_if(write)
+    }
+
+    fn write_cache_if(self, write: bool) -> Result<ProjectCompileOutput<C, T>> {
+        let ArtifactsState { output, cache, compiled_artifacts, persist } = self;
         let project = cache.project();
         let ignored_error_codes = project.ignored_error_codes.clone();
         let ignored_error_codes_from = project.ignored_error_codes_from.clone();
@@ -386,7 +545,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             &ignored_file_paths,
             &compiler_severity_filter,
         );
-        let skip_write_to_disk = project.no_artifacts || has_error;
+        let skip_write_to_disk = !write || !persist || has_error;
         trace!(has_error, project.no_artifacts, skip_write_to_disk, cache_path=?project.cache_path(),"prepare writing cache file");
 
         let (cached_artifacts, cached_builds, edges) =
@@ -763,8 +922,7 @@ mod tests {
     use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
 
     use crate::{
-        ConfigurableArtifacts, MinimalCombinedArtifacts, compilers::multi::MultiCompiler,
-        project_util::TempProject,
+        MinimalCombinedArtifacts, compilers::multi::MultiCompiler, project_util::TempProject,
     };
 
     use super::*;

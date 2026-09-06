@@ -161,6 +161,10 @@ impl<S: CompilerSettings> CompilerCache<S> {
     /// Removes build infos which don't have any artifacts linked to them.
     #[instrument(skip_all)]
     pub fn remove_outdated_builds(&mut self) {
+        self.remove_outdated_builds_at(&self.paths.build_infos.clone());
+    }
+
+    fn remove_outdated_builds_at(&mut self, build_infos: &Path) {
         let mut outdated = Vec::new();
         for build_id in &self.builds {
             if !self
@@ -176,7 +180,7 @@ impl<S: CompilerSettings> CompilerCache<S> {
 
         for build_id in outdated {
             self.builds.remove(&build_id);
-            let path = self.paths.build_infos.join(build_id).with_extension("json");
+            let path = build_infos.join(build_id).with_extension("json");
             let _ = std::fs::remove_file(path);
         }
     }
@@ -672,6 +676,9 @@ pub(crate) struct ArtifactsCacheInner<
     /// The project.
     pub project: &'a Project<C, T>,
 
+    /// Optional physical storage paths; compilation keeps using the project paths.
+    pub storage_paths: Option<Box<ProjectPathsConfig<C::Language>>>,
+
     /// Files that were invalidated and removed from cache.
     /// Those are not grouped by version and purged completely.
     pub dirty_sources: HashSet<PathBuf>,
@@ -785,7 +792,9 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             self.sources_in_scope.insert(file.clone(), version.clone());
 
             // If we are missing artifact for file, compile it.
-            if self.is_missing_artifacts(file, version, profile) {
+            if (self.storage_paths.is_none() || source.kind == SourceCompilationKind::Complete)
+                && self.is_missing_artifacts(file, version, profile)
+            {
                 compile_complete.insert(file.clone());
             }
 
@@ -1086,11 +1095,22 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         edges: GraphEdges<C::Parser>,
         preprocessed: bool,
     ) -> Result<Self> {
+        Self::with_storage(project, edges, preprocessed, None)
+    }
+
+    pub fn with_storage(
+        project: &'a Project<C, T>,
+        edges: GraphEdges<C::Parser>,
+        preprocessed: bool,
+        storage_paths: Option<Box<ProjectPathsConfig<C::Language>>>,
+    ) -> Result<Self> {
+        let storage = storage_paths.as_deref().unwrap_or(&project.paths);
         /// Returns the [CompilerCache] to use
         ///
         /// Returns a new empty cache if the cache does not exist or `invalidate_cache` is set.
         fn get_cache<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>(
             project: &Project<C, T>,
+            storage: &ProjectPathsConfig<C::Language>,
             invalidate_cache: bool,
             preprocessed: bool,
         ) -> CompilerCache<C::Settings> {
@@ -1098,8 +1118,8 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             let paths = project.paths.paths_relative();
 
             if !invalidate_cache
-                && project.cache_path().exists()
-                && let Ok(cache) = CompilerCache::read_joined(&project.paths)
+                && storage.cache.exists()
+                && let Ok(cache) = CompilerCache::read_joined(storage)
                 && cache.paths == paths
                 && preprocessed == cache.preprocessed
             {
@@ -1120,12 +1140,12 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             let invalidate_cache = !edges.unresolved_imports().is_empty();
 
             // read the cache file if it already exists
-            let mut cache = get_cache(project, invalidate_cache, preprocessed);
+            let mut cache = get_cache(project, storage, invalidate_cache, preprocessed);
 
             cache.remove_missing_files();
 
             // read all artifacts
-            let mut cached_artifacts = if project.paths.artifacts.exists() {
+            let mut cached_artifacts = if storage.artifacts.exists() {
                 trace!("reading artifacts from cache...");
                 // if we failed to read the whole set of artifacts we use an empty set
                 // Only artifacts in the current source graph can be returned by this compilation.
@@ -1146,7 +1166,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             };
 
             trace!("reading build infos from cache...");
-            let cached_builds = cache.read_builds(&project.paths.build_infos).unwrap_or_default();
+            let cached_builds = cache.read_builds(&storage.build_infos).unwrap_or_default();
 
             // Remove artifacts for which we are missing a build info.
             cached_artifacts.0.retain(|_, artifacts| {
@@ -1163,6 +1183,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 cached_builds,
                 edges,
                 project,
+                storage_paths,
                 dirty_sources: Default::default(),
                 content_hashes: Default::default(),
                 sources_in_scope: Default::default(),
@@ -1176,6 +1197,13 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         };
 
         Ok(cache)
+    }
+
+    pub fn storage_paths(&self) -> &ProjectPathsConfig<C::Language> {
+        match self {
+            Self::Ephemeral(_, project) => &project.paths,
+            Self::Cached(cache) => cache.storage_paths.as_deref().unwrap_or(&cache.project.paths),
+        }
     }
 
     /// Returns the graph data for this project
@@ -1247,6 +1275,23 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         }
     }
 
+    /// Invalidates the artifact set for a source that will be compiled again.
+    pub fn invalidate_artifacts(&mut self, file: &Path, version: &Version, profile: &str) {
+        if let Self::Cached(cache) = self
+            && let Some(entry) = cache.cache.files.get_mut(file)
+        {
+            entry.artifacts.retain(|_, versions| {
+                versions.retain(|cached_version, profiles| {
+                    if cached_version == version {
+                        profiles.remove(profile);
+                    }
+                    !profiles.is_empty()
+                });
+                !versions.is_empty()
+            });
+        }
+    }
+
     /// Consumes the `Cache`, rebuilds the `SolFileCache` by merging all artifacts that were
     /// filtered out in the previous step (`Cache::filtered`) and the artifacts that were just
     /// compiled and written to disk `written_artifacts`.
@@ -1281,6 +1326,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             edges,
             content_hashes: _,
             interface_repr_hashes: _,
+            storage_paths,
         } = cache;
 
         // Remove cached artifacts which are out of scope, dirty or appear in `written_artifacts`.
@@ -1296,10 +1342,21 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                     if dirty_sources.contains(file) {
                         return false;
                     }
-                    if written_artifacts.find_artifact(file, name, version).is_some() {
+                    if written_artifacts
+                        .find_artifact_with_profile(file, name, version, &artifact.profile)
+                        .is_some()
+                    {
                         return false;
                     }
-                    true
+                    cache
+                        .files
+                        .get(file)
+                        .and_then(|entry| entry.artifacts.get(name))
+                        .and_then(|versions| versions.get(version))
+                        .and_then(|profiles| profiles.get(&artifact.profile))
+                        .is_some_and(|CachedArtifact { path, build_id }| {
+                            path == &artifact.file && build_id == &artifact.build_id
+                        })
                 });
                 !artifacts.is_empty()
             });
@@ -1323,13 +1380,20 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
         // write to disk
         if write_to_disk {
-            cache.remove_outdated_builds();
+            let storage = storage_paths.as_deref().unwrap_or(&project.paths);
+            cache.remove_outdated_builds_at(&storage.build_infos);
             // make all `CacheEntry` paths relative to the project root and all artifact
             // paths relative to the artifact's directory
             cache
                 .strip_entries_prefix(project.root())
-                .strip_artifact_files_prefixes(project.artifacts_path());
-            cache.write(project.cache_path())?;
+                .strip_artifact_files_prefixes(&storage.artifacts);
+            if let Err(err) = cache.write(&storage.cache) {
+                if storage_paths.is_some() && matches!(err, SolcError::Io(_)) {
+                    debug!(%err, "ABI cache manifest unavailable");
+                } else {
+                    return Err(err);
+                }
+            }
         }
 
         Ok((cached_artifacts, cached_builds, edges))
