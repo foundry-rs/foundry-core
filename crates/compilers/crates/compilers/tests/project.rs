@@ -23,7 +23,7 @@ use foundry_compilers::{
 };
 use foundry_compilers_artifacts::{
     BytecodeHash, Contract, DevDoc, Error, ErrorDoc, EventDoc, EvmVersion, Libraries, MethodDoc,
-    ModelCheckerEngine::CHC, ModelCheckerSettings, Settings, Severity, SolcInput, UserDoc,
+    ModelCheckerEngine::CHC, ModelCheckerSettings, Settings, Severity, SolcInput, Source, UserDoc,
     UserDocNotice, output_selection::OutputSelection, remappings::Remapping,
 };
 use foundry_compilers_core::{
@@ -141,6 +141,474 @@ fn can_compile_hardhat_sample() {
     assert!(compiled.find_first("Greeter").is_some());
     assert!(compiled.find_first("console").is_some());
     assert!(!compiled.is_unchanged());
+}
+
+#[test]
+fn abi_cache_reuses_normal_and_missing_artifacts() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::default_output_selection();
+    });
+    project.add_source("Built", "pragma solidity ^0.8.0; contract Built {}").unwrap();
+    let normal_output = project.compile().unwrap();
+    normal_output.assert_success();
+    let normal_cache = fs::read(project.cache_path()).unwrap();
+    let normal_artifacts = project.artifacts_snapshot().unwrap();
+    let mut abi_project = project.project().clone();
+    abi_project.update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+
+    let output = ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap();
+    output.assert_success();
+    assert!(output.is_unchanged());
+    assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
+    assert!(!project.paths().cache.with_file_name("solidity-files-cache.json.abi").exists());
+
+    project
+        .add_source(
+            "Discovered",
+            "pragma solidity ^0.8.0; import './Built.sol'; contract Discovered is Built {}",
+        )
+        .unwrap();
+    let output = ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap();
+    output.assert_success();
+    assert!(output.find_first("Built").is_some());
+    assert!(output.find_first("Discovered").is_some());
+    for (id, context) in normal_output.builds() {
+        assert_eq!(output.builds().find(|(build, _)| *build == id).unwrap().1, context);
+        assert!(context.source_id_to_path.values().all(|path| path.is_absolute()));
+    }
+    assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
+    assert_eq!(project.artifacts_snapshot().unwrap().artifacts, normal_artifacts.artifacts);
+
+    let output = ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap();
+    output.assert_success();
+    assert!(output.is_unchanged());
+    assert!(output.find_first("Built").is_some());
+    assert!(output.find_first("Discovered").is_some());
+    assert_eq!(output.graph().files().count(), 2);
+    assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
+
+    let abi_cache = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
+    assert!(!abi_cache.join("artifacts/Built.sol").exists());
+    let retired =
+        output.artifact_ids().find(|(id, _)| id.name == "Discovered").unwrap().0.build_id.clone();
+    for path in [
+        abi_cache.join("artifacts/Discovered.sol/Discovered.json"),
+        abi_cache.join("build-info").join(format!("{retired}.json")),
+        abi_cache.join("cache.json"),
+    ] {
+        fs::write(path, "invalid json").unwrap();
+        let output = ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap();
+        output.assert_success();
+        assert!(!output.is_unchanged());
+        assert!(output.find_first("Discovered").unwrap().abi.is_some());
+        assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
+    }
+    let mut read_only = abi_project.clone();
+    read_only.no_artifacts = true;
+    let manifest = fs::read(abi_cache.join("cache.json")).unwrap();
+    let output = ProjectCompiler::new(&read_only).unwrap().compile_abi_cached().unwrap();
+    output.assert_success();
+    assert!(output.is_unchanged());
+    assert_eq!(fs::read(abi_cache.join("cache.json")).unwrap(), manifest);
+    let sentinel = project.paths().build_infos.join(format!("{retired}.json"));
+    fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    fs::write(&sentinel, "primary sentinel").unwrap();
+    project
+        .add_source(
+            "Built",
+            "pragma solidity ^0.8.0; contract Built { function added() public {} }",
+        )
+        .unwrap();
+    let output = ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap();
+    output.assert_success();
+    assert!(!output.is_unchanged());
+    assert!(
+        output
+            .find_first("Discovered")
+            .unwrap()
+            .abi
+            .as_ref()
+            .unwrap()
+            .functions
+            .contains_key("added")
+    );
+    assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
+
+    assert!(!abi_cache.join("build-info").join(format!("{retired}.json")).exists());
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "primary sentinel");
+    fs::remove_file(sentinel).unwrap();
+    let output = project.compile().unwrap();
+    output.assert_success();
+    assert!(!output.is_unchanged());
+    assert!(output.find_first("Discovered").unwrap().get_bytecode_bytes().is_some());
+    fs::remove_file(project.cache_path()).unwrap();
+    project.project().cleanup().unwrap();
+    assert!(!abi_cache.exists());
+}
+
+#[test]
+fn abi_cache_rejects_normal_artifacts_without_abi() {
+    for named in [false, true] {
+        let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.set_solc("0.8.30");
+        let source = project
+            .add_source(
+                "Contract",
+                "pragma solidity ^0.8.0; contract Contract { function foo() public {} }",
+            )
+            .unwrap();
+        project.project_mut().update_output_selection(|selection| {
+            *selection = OutputSelection::common_output_selection(["evm.bytecode".to_string()]);
+        });
+        if named {
+            let mut settings = project.project().settings.clone();
+            settings.solc.optimizer.enabled = Some(true);
+            settings.solc.optimizer.runs = Some(10000);
+            project.project_mut().additional_settings.insert("optimized".to_string(), settings);
+            project.project_mut().restrictions.insert(
+                source,
+                RestrictionsWithVersion {
+                    restrictions: MultiCompilerRestrictions {
+                        solc: SolcRestrictions {
+                            optimizer_runs: Restriction { min: Some(10000), ..Default::default() },
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    version: None,
+                },
+            );
+        }
+        let normal = project.compile().unwrap();
+        normal.assert_success();
+        assert!(normal.find_first("Contract").unwrap().abi.is_none());
+        let normal_cache = fs::read(project.cache_path()).unwrap();
+        let normal_artifacts = project.artifacts_snapshot().unwrap();
+        project.project_mut().update_output_selection(|selection| {
+            *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+        });
+        for cached in [false, true] {
+            let output =
+                ProjectCompiler::new(project.project()).unwrap().compile_abi_cached().unwrap();
+            output.assert_success();
+            assert_eq!(output.is_unchanged(), cached);
+            assert_eq!(output.artifact_ids().count(), 1);
+            assert!(
+                output
+                    .find_first("Contract")
+                    .unwrap()
+                    .abi
+                    .as_ref()
+                    .unwrap()
+                    .functions
+                    .contains_key("foo")
+            );
+            assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
+            assert_eq!(project.artifacts_snapshot().unwrap().artifacts, normal_artifacts.artifacts);
+        }
+
+        if named {
+            project.project_mut().additional_settings.clear();
+            project.project_mut().restrictions.clear();
+            let output =
+                ProjectCompiler::new(project.project()).unwrap().compile_abi_cached().unwrap();
+            output.assert_success();
+            assert_eq!(output.artifact_ids().count(), 1);
+            assert_eq!(output.artifact_ids().next().unwrap().0.profile, "default");
+            assert!(output.find_first("Contract").unwrap().abi.is_some());
+            assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
+        }
+    }
+}
+
+#[test]
+fn abi_cache_preserves_preprocessor_input_on_partial_miss() {
+    #[derive(Debug)]
+    struct SourceAwarePreprocessor(bool);
+
+    impl Preprocessor<MultiCompiler> for SourceAwarePreprocessor {
+        fn preprocess(
+            &self,
+            _compiler: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            mocks: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            assert!(input.input.sources.contains_key(Path::new("src/First.sol")));
+            if self.0 {
+                assert!(input.input.sources.contains_key(Path::new("src/Second.sol")));
+            }
+            if input.input.sources.contains_key(Path::new("src/Second.sol")) {
+                let source = input.input.sources.get_mut(Path::new("src/First.sol")).unwrap();
+                source.content =
+                    source.content.replace("contract First", "contract Renamed").into();
+            }
+            mocks.insert(paths.root.join("src/First.sol"));
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("First", "pragma solidity ^0.8.0; contract First { function foo() public pure returns(uint) { return 1; } }").unwrap();
+    project.add_source("Second", "pragma solidity ^0.8.0; contract Second {}").unwrap();
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    let first = project.paths().sources.join("First.sol");
+    let output =
+        ProjectCompiler::with_sources(project.project(), Source::read_all([first]).unwrap())
+            .unwrap()
+            .with_preprocessor(SourceAwarePreprocessor(false))
+            .compile_abi_cached()
+            .unwrap();
+    output.assert_success();
+    assert!(output.find_first("First").is_some());
+    for changed in [false, true] {
+        if changed {
+            project.add_source("First", "pragma solidity ^0.8.0; contract First { function foo() public pure returns(uint) { return 2; } }").unwrap();
+        }
+        for cached in [false, true] {
+            let output = ProjectCompiler::new(project.project())
+                .unwrap()
+                .with_preprocessor(SourceAwarePreprocessor(true))
+                .compile_abi_cached()
+                .unwrap();
+            output.assert_success();
+            assert_eq!(output.is_unchanged(), cached);
+            assert_eq!(output.artifact_ids().count(), 2);
+            assert!(output.find_first("First").is_none());
+            assert!(output.find_first("Renamed").is_some());
+        }
+    }
+    let first = project.paths().sources.join("First.sol");
+    let output =
+        ProjectCompiler::with_sources(project.project(), Source::read_all([first]).unwrap())
+            .unwrap()
+            .with_preprocessor(SourceAwarePreprocessor(false))
+            .compile_abi_cached()
+            .unwrap();
+    output.assert_success();
+    assert!(output.find_first("First").is_some());
+    assert!(output.find_first("Renamed").is_none());
+}
+
+#[test]
+fn abi_cache_preserves_out_of_scope_mocks() {
+    #[derive(Debug)]
+    struct MockPreprocessor;
+
+    impl Preprocessor<MultiCompiler> for MockPreprocessor {
+        fn preprocess(
+            &self,
+            _compiler: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            mocks: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            if let MultiCompilerInput::Solc(input) = input
+                && input.input.sources.contains_key(Path::new("test/Mock.sol"))
+            {
+                mocks.insert(paths.root.join("test/Mock.sol"));
+            }
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::default_output_selection();
+    });
+    let base = project.add_source("Base", "pragma solidity ^0.8.0; contract Base { function foo() public pure returns(uint) { return 1; } }").unwrap();
+    let mock = project
+        .add_test(
+            "Mock",
+            "pragma solidity ^0.8.0; import '../src/Base.sol'; contract Mock is Base {}",
+        )
+        .unwrap();
+    let importer = project
+        .add_test(
+            "Importer",
+            "pragma solidity ^0.8.0; import './Mock.sol'; contract Importer is Mock {}",
+        )
+        .unwrap();
+    let mut abi_project = project.project().clone();
+    abi_project.update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    let output =
+        ProjectCompiler::with_sources(&abi_project, Source::read_all([&importer]).unwrap())
+            .unwrap()
+            .with_preprocessor(MockPreprocessor)
+            .compile_abi_cached()
+            .unwrap();
+    output.assert_success();
+    let cache_path = output
+        .compiled_artifacts()
+        .artifact_files()
+        .find(|artifact| artifact.file.ends_with("Mock.sol/Mock.json"))
+        .unwrap()
+        .file
+        .ancestors()
+        .nth(3)
+        .unwrap()
+        .join("cache.json");
+
+    let unrelated =
+        project.add_test("Unrelated", "pragma solidity ^0.8.0; contract Unrelated {}").unwrap();
+    ProjectCompiler::with_sources(&abi_project, Source::read_all([unrelated]).unwrap())
+        .unwrap()
+        .with_preprocessor(MockPreprocessor)
+        .compile_abi_cached()
+        .unwrap()
+        .assert_success();
+    let cache = CompilerCache::<MultiCompilerSettings>::read(&cache_path).unwrap();
+    assert!(cache.mocks.contains(&mock));
+
+    project.add_source("Base", "pragma solidity ^0.8.0; contract Base { function foo() public pure returns(uint) { return 2; } }").unwrap();
+    ProjectCompiler::with_sources(project.project(), Source::read_all([base]).unwrap())
+        .unwrap()
+        .with_preprocessor(MockPreprocessor)
+        .compile()
+        .unwrap()
+        .assert_success();
+    let output = ProjectCompiler::with_sources(&abi_project, Source::read_all([importer]).unwrap())
+        .unwrap()
+        .with_preprocessor(MockPreprocessor)
+        .compile_abi_cached()
+        .unwrap();
+    output.assert_success();
+    assert!(!output.is_unchanged());
+    assert!(
+        output
+            .compiled_artifacts()
+            .artifact_files()
+            .any(|artifact| artifact.file.ends_with("Importer.sol/Importer.json"))
+    );
+}
+
+#[test]
+fn abi_cache_preserves_cached_profiles_during_partial_compilation() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    let mut optimized = project.project().settings.clone();
+    optimized.solc.optimizer.enabled = Some(true);
+    optimized.solc.optimizer.runs = Some(10000);
+    project.project_mut().additional_settings.insert("optimized".to_string(), optimized);
+    project.add_source("Common", "pragma solidity ^0.8.0; contract Common {}").unwrap();
+    let simple = project
+        .add_source(
+            "Simple",
+            "pragma solidity ^0.8.0; import './Common.sol'; contract Simple is Common {}",
+        )
+        .unwrap();
+    let optimized = project
+        .add_source(
+            "Optimized",
+            "pragma solidity ^0.8.0; import './Common.sol'; contract Optimized is Common {}",
+        )
+        .unwrap();
+    project.project_mut().restrictions.insert(
+        optimized.clone(),
+        RestrictionsWithVersion {
+            restrictions: MultiCompilerRestrictions {
+                solc: SolcRestrictions {
+                    optimizer_runs: Restriction { min: Some(10000), ..Default::default() },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            version: None,
+        },
+    );
+    ProjectCompiler::with_sources(project.project(), Source::read_all([&simple]).unwrap())
+        .unwrap()
+        .compile_abi_cached()
+        .unwrap()
+        .assert_success();
+    let mut previous = None;
+    let mut default_build = None;
+    for runs in [10000, 20000] {
+        project
+            .project_mut()
+            .additional_settings
+            .get_mut("optimized")
+            .unwrap()
+            .solc
+            .optimizer
+            .runs = Some(runs);
+        for cached in [false, true] {
+            let output = ProjectCompiler::with_sources(
+                project.project(),
+                Source::read_all([&simple, &optimized]).unwrap(),
+            )
+            .unwrap()
+            .compile_abi_cached()
+            .unwrap();
+            output.assert_success();
+            assert_eq!(output.is_unchanged(), cached);
+            let build = output
+                .artifact_ids()
+                .find(|(id, _)| id.name == "Common" && id.profile == "default")
+                .unwrap()
+                .0
+                .build_id;
+            if let Some(default_build) = &default_build {
+                assert_eq!(&build, default_build);
+            } else {
+                default_build = Some(build);
+            }
+            let ids = output
+                .artifact_ids()
+                .map(|(id, _)| (id.source, id.name, id.version, id.profile))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(ids.len(), 4);
+            if let Some(previous) = &previous {
+                assert_eq!(&ids, previous);
+            }
+            previous = Some(ids);
+        }
+    }
+}
+
+#[test]
+fn abi_cache_respects_disabled_and_read_only_requests() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Contract", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    let abi_cache = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
+    project.project_mut().cached = false;
+    ProjectCompiler::new(project.project()).unwrap().compile_abi_cached().unwrap().assert_success();
+    assert!(!abi_cache.exists());
+    assert!(fs::read_dir(&project.paths().artifacts).unwrap().next().is_none());
+
+    project.project_mut().cached = true;
+    project.project_mut().no_artifacts = true;
+    ProjectCompiler::new(project.project()).unwrap().compile_abi_cached().unwrap().assert_success();
+    assert!(!abi_cache.exists());
+    assert!(fs::read_dir(&project.paths().artifacts).unwrap().next().is_none());
+
+    // A non-directory cache namespace makes persistence unavailable on every platform.
+    fs::create_dir_all(abi_cache.parent().unwrap()).unwrap();
+    fs::write(&abi_cache, "unavailable").unwrap();
+    project.project_mut().no_artifacts = false;
+    ProjectCompiler::new(project.project()).unwrap().compile_abi_cached().unwrap().assert_success();
+    assert_eq!(fs::read_to_string(&abi_cache).unwrap(), "unavailable");
+    assert!(fs::read_dir(&project.paths().artifacts).unwrap().next().is_none());
+    project.project().cleanup().unwrap();
+    assert!(!abi_cache.exists());
 }
 
 #[test]
