@@ -82,6 +82,73 @@ async fn async_compile_recovers_from_busy_executable() {
     assert_eq!(result.unwrap(), serde_json::to_vec(&input).unwrap());
 }
 
+#[cfg(feature = "async")]
+#[test]
+fn async_version_recovers_without_timer_driver() {
+    let BusySolc { _dir, solc, writer } = BusySolc::new();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    runtime.block_on(async {
+        // On a single-threaded runtime this task can release the writer only if the
+        // compiler yields while retrying. No timer driver is enabled or required.
+        let release = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            drop(writer);
+        });
+        let result = Solc::async_version(&solc.solc).await;
+        release.await.unwrap();
+        assert_eq!(result.unwrap(), "0.8.18+commit.87f61d96.Linux.gcc".parse().unwrap());
+    });
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_compile_recovers_without_timer_driver() {
+    let BusySolc { _dir, solc, writer } = BusySolc::new();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_io().build().unwrap();
+    runtime.block_on(async {
+        let release = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            drop(writer);
+        });
+        let input = serde_json::json!({"large_input": "x".repeat(256 * 1024)});
+        let result = solc.async_compile_output(&input).await;
+        release.await.unwrap();
+        assert_eq!(result.unwrap(), serde_json::to_vec(&input).unwrap());
+    });
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_version_recovers_with_saturated_blocking_pool() {
+    let BusySolc { _dir, solc, writer } = BusySolc::new();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_io()
+        .build()
+        .unwrap();
+    let handle = runtime.handle().clone();
+    let (completed, result) = std::sync::mpsc::channel();
+    runtime.spawn_blocking(move || {
+        let result = handle.block_on(async {
+            let version = Solc::async_version(&solc.solc);
+            tokio::pin!(version);
+            // Keep the file busy until the first spawn has entered its backoff.
+            assert!(futures_util::poll!(&mut version).is_pending());
+            drop(writer);
+            version.await
+        });
+        let _ = completed.send(result);
+    });
+    let result = result.recv_timeout(Duration::from_secs(3));
+    // A regression must fail instead of hanging while dropping the runtime.
+    runtime.shutdown_timeout(Duration::from_millis(100));
+    assert_eq!(
+        result.expect("compiler retry deadlocked on the blocking pool").unwrap(),
+        "0.8.18+commit.87f61d96.Linux.gcc".parse().unwrap()
+    );
+}
+
 #[test]
 fn compiler_failure_is_not_retried() {
     let BusySolc { _dir, solc, writer } = BusySolc::with_contents(

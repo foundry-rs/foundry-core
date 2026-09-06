@@ -31,7 +31,9 @@ pub(super) async fn async_retry_spawn<T>(
     for delay in RETRY_DELAYS {
         match spawn() {
             Err(err) if err.kind() == io::ErrorKind::ExecutableFileBusy => {
-                tokio::time::sleep(delay).await;
+                // Do not require a Tokio timer driver or a free blocking-pool thread:
+                // callers may be driving this future from a blocking task themselves.
+                futures_timer::Delay::new(delay).await;
             }
             result => return result,
         }

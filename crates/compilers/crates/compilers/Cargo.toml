@@ -32,6 +32,7 @@ path-slash.workspace = true
 yansi.workspace = true
 solar.workspace = true
 futures-util = { workspace = true, optional = true }
+futures-timer = { version = "3.0.4", optional = true }
 tokio = { workspace = true, optional = true }
 
 auto_impl = "1.3.0"
@@ -53,7 +54,7 @@ sha2 = { version = "0.11.0", default-features = false, optional = true }
 [dev-dependencies]
 tracing-subscriber.workspace = true
 fd-lock = "4.0.4"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 reqwest.workspace = true
 tempfile.workspace = true
 snapbox.workspace = true
@@ -68,11 +69,11 @@ full = ["async", "svm-solc"]
 # Adds extra `async` methods using `tokio` to some types.
 async = [
     "dep:futures-util",
+    "dep:futures-timer",
     "dep:tokio",
     "tokio/fs",
     "tokio/process",
     "tokio/io-util",
-    "tokio/time",
     "foundry-compilers-artifacts/async",
 ]
 # Enables `svm` to auto-detect and manage `solc` builds.
