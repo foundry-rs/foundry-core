@@ -4,3 +4,8 @@
 retries = { backoff = "exponential", count = 2, delay = "5s", jitter = true }
 slow-timeout = { period = "30s", terminate-after = 3 }
 default-filter = "not test(/external_/)"
+
+# Retry regressions must pass on their first attempt, not be hidden by test-runner retries.
+[[profile.default.overrides]]
+filter = "test(compilers::solc::compiler::spawn_tests::) | test(compilers::solc::command::tests::)"
+retries = 0
