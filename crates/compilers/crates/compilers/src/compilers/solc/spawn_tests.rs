@@ -173,13 +173,39 @@ async fn async_compiler_failure_is_not_retried() {
 }
 
 #[test]
+fn persistent_busy_executable_returns_io_error() {
+    let BusySolc { _dir, solc, writer: _writer } = BusySolc::new();
+    for result in [
+        Solc::version(&solc.solc).map(|_| ()),
+        solc.compile_output(&serde_json::json!({})).map(|_| ()),
+    ] {
+        let SolcError::Io(error) = result.unwrap_err() else {
+            panic!("expected a compiler spawn I/O error");
+        };
+        assert_eq!(error.source().kind(), io::ErrorKind::ExecutableFileBusy);
+        assert_eq!(error.path(), solc.solc);
+    }
+}
+
+#[test]
 fn concurrent_publish_and_spawn() {
+    fn assert_output_or_busy<T: std::fmt::Debug + PartialEq>(result: Result<T>, expected: &T) {
+        match result {
+            Ok(output) => assert_eq!(&output, expected),
+            Err(SolcError::Io(error)) => {
+                assert_eq!(error.source().kind(), io::ErrorKind::ExecutableFileBusy);
+            }
+            Err(error) => panic!("unexpected compiler error: {error}"),
+        }
+    }
+
     let BusySolc { _dir, solc, writer } = BusySolc::new();
     drop(writer);
     let bytes = fs::read(&solc.solc).unwrap();
     let barrier = Barrier::new(5);
     let input = serde_json::json!({"input": 42});
     let expected = serde_json::to_vec(&input).unwrap();
+    let version = "0.8.18+commit.87f61d96.Linux.gcc".parse().unwrap();
     thread::scope(|scope| {
         scope.spawn(|| {
             barrier.wait();
@@ -201,15 +227,19 @@ fn concurrent_publish_and_spawn() {
             scope.spawn(|| {
                 barrier.wait();
                 for _ in 0..250 {
-                    assert_eq!(
-                        Solc::version_impl(&solc.solc, &[]).unwrap(),
-                        "0.8.18+commit.87f61d96.Linux.gcc".parse().unwrap()
-                    );
-                    assert_eq!(solc.compile_output(&input).unwrap(), expected);
+                    // Continuous replacement can outlast all bounded retries. Only an
+                    // executable-file-busy error is valid during this adversarial phase;
+                    // successful launches must still produce the exact expected output.
+                    assert_output_or_busy(Solc::version_impl(&solc.solc, &[]), &version);
+                    assert_output_or_busy(solc.compile_output(&input), &expected);
                 }
             });
         }
     });
+    // Join readers as well as the publisher: a reader's concurrent fork can inherit a
+    // writable descriptor. Once all threads/children finish, no busy error is acceptable.
+    assert_eq!(Solc::version_impl(&solc.solc, &[]).unwrap(), version);
+    assert_eq!(solc.compile_output(&input).unwrap(), expected);
 }
 
 #[cfg(feature = "async")]
