@@ -1,3 +1,6 @@
+#[cfg(feature = "async")]
+use super::command::async_retry_spawn;
+use super::command::retry_spawn;
 use crate::resolver::parse::SolData;
 use foundry_compilers_artifacts::{CompilerOutput, SolcInput, sources::Source};
 use foundry_compilers_core::{
@@ -17,6 +20,10 @@ use std::{
 
 /// Extensions acceptable by solc compiler.
 pub const SOLC_EXTENSIONS: &[&str] = &["sol", "yul"];
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "spawn_tests.rs"]
+mod spawn_tests;
 
 /// take the lock in tests, we use this to enforce that
 /// a test does not run while a compiler version is being installed
@@ -441,7 +448,7 @@ impl Solc {
         trace!(input=%serde_json::to_string(input).unwrap_or_else(|e| e.to_string()));
         debug!(?cmd, "compiling");
 
-        let mut child = cmd.spawn().map_err(self.map_io_err())?;
+        let mut child = retry_spawn(|| cmd.spawn()).map_err(self.map_io_err())?;
         debug!("spawned");
 
         {
@@ -483,7 +490,8 @@ impl Solc {
             .stderr(Stdio::piped())
             .stdout(Stdio::piped());
         debug!(?cmd, "getting Solc version");
-        let output = cmd.output().map_err(|e| SolcError::io(e, solc))?;
+        let child = retry_spawn(|| cmd.spawn()).map_err(|e| SolcError::io(e, solc))?;
+        let output = child.wait_with_output().map_err(|e| SolcError::io(e, solc))?;
         trace!(?output);
         let version = version_from_output(output)?;
         debug!(%version);
@@ -649,7 +657,7 @@ impl Solc {
         use tokio::{io::AsyncWriteExt, process::Command};
 
         let mut cmd: Command = self.configure_cmd().into();
-        let mut child = cmd.spawn().map_err(self.map_io_err())?;
+        let mut child = async_retry_spawn(|| cmd.spawn()).await.map_err(self.map_io_err())?;
         let stdin = child.stdin.as_mut().unwrap();
 
         let content = serde_json::to_vec(input)?;
@@ -667,7 +675,8 @@ impl Solc {
         }
         cmd.arg("--version").stdin(Stdio::piped()).stderr(Stdio::piped()).stdout(Stdio::piped());
         debug!(?cmd, "getting version");
-        let output = cmd.output().await.map_err(|e| SolcError::io(e, solc))?;
+        let child = async_retry_spawn(|| cmd.spawn()).await.map_err(|e| SolcError::io(e, solc))?;
+        let output = child.wait_with_output().await.map_err(|e| SolcError::io(e, solc))?;
         let version = version_from_output(output)?;
         debug!(%version);
         Ok(version)
