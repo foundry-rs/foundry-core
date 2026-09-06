@@ -193,8 +193,7 @@ fn abi_cache_reuses_normal_and_missing_artifacts() {
 
     let abi_cache = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
     assert!(!abi_cache.join("artifacts/Built.sol").exists());
-    let retired =
-        output.artifact_ids().find(|(id, _)| id.name == "Discovered").unwrap().0.build_id.clone();
+    let retired = output.artifact_ids().find(|(id, _)| id.name == "Discovered").unwrap().0.build_id;
     for path in [
         abi_cache.join("artifacts/Discovered.sol/Discovered.json"),
         abi_cache.join("build-info").join(format!("{retired}.json")),
