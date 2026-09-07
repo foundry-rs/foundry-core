@@ -25,6 +25,8 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+pub(crate) mod abi;
+
 mod iface;
 use iface::{interface_repr_hash, interface_repr_hash_compiler};
 
@@ -1387,7 +1389,20 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             cache
                 .strip_entries_prefix(project.root())
                 .strip_artifact_files_prefixes(&storage.artifacts);
-            if let Err(err) = cache.write(&storage.cache) {
+            let result = if storage_paths.is_some() {
+                // The generation is unpublished; expose its manifest only after a complete write.
+                (|| -> Result<()> {
+                    let file = tempfile::NamedTempFile::new_in(storage.cache.parent().unwrap())
+                        .map_err(|err| SolcError::io(err, &storage.cache))?;
+                    cache.write(file.path())?;
+                    file.persist(&storage.cache)
+                        .map_err(|err| SolcError::io(err.error, &storage.cache))?;
+                    Ok(())
+                })()
+            } else {
+                cache.write(&storage.cache)
+            };
+            if let Err(err) = result {
                 if storage_paths.is_some() && matches!(err, SolcError::Io(_)) {
                     debug!(%err, "ABI cache manifest unavailable");
                 } else {

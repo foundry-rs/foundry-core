@@ -105,7 +105,7 @@ use crate::{
     ProjectPathsConfig, Sources,
     artifact_output::Artifacts,
     buildinfo::RawBuildInfo,
-    cache::ArtifactsCache,
+    cache::{ArtifactsCache, abi::AbiCache},
     compilers::{Compiler, CompilerInput, CompilerOutput, Language},
     filter::SparseOutputFilter,
     output::{AggregatedCompilerOutput, Builds},
@@ -254,6 +254,9 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
     /// The project must request ABI output. Normal artifacts and their manifest are never
     /// modified by this operation. Additional output files and full build info retain ordinary
     /// compilation behavior. Secondary persistence requires caching and artifact writes enabled.
+    /// Refreshes publish immutable generations atomically; contention or unavailable storage uses
+    /// in-memory output. Persistence prunes retired generations and invalid contexts. Distinct,
+    /// still-valid preprocessor contexts remain reusable until invalidated or explicitly cleaned.
     pub fn compile_abi_cached(self) -> Result<ProjectCompileOutput<C>> {
         let project = self.project;
         if project.build_info || project.artifacts.additional_files != Default::default() {
@@ -269,11 +272,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
         } else {
             let PreprocessedState { mut sources, cache, primary_profiles, preprocessor } = state;
             let normal_mocks = cache.mocks();
-            let (normal_artifacts, normal_builds, edges) =
-                cache.consume(&Artifacts::default(), &Vec::new(), false)?;
-            let mut storage = Box::new(project.paths.clone());
-            let mut directory = project.abi_cache_path();
-            if preprocessed {
+            let directory = if preprocessed {
                 // Preprocessors can depend on the complete compiler job, including its source
                 // units. Separate storage keeps alternating filtered requests independent.
                 let mut jobs = sources
@@ -298,13 +297,34 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 let mut mocks = normal_mocks.iter().collect::<Vec<_>>();
                 mocks.sort_unstable();
                 let identity = serde_json::to_vec(&(jobs, mocks))?;
-                directory.push(foundry_compilers_core::utils::unique_hash(identity));
-            }
-            storage.cache = directory.join("cache.json");
-            storage.artifacts = directory.join("artifacts");
-            storage.build_infos = directory.join("build-info");
-            let mut cache =
-                ArtifactsCache::with_storage(project, edges, preprocessed, Some(storage))?;
+                project.abi_cache_path().join(foundry_compilers_core::utils::unique_hash(identity))
+            } else {
+                project.abi_cache_path().join("default")
+            };
+            let store =
+                match AbiCache::open(project.abi_cache_path(), directory, !project.no_artifacts) {
+                    Ok(store) => store,
+                    Err(err) => {
+                        debug!(%err, "ABI cache unavailable; compiling without persistence");
+                        let mut output =
+                            PreprocessedState { sources, cache, primary_profiles, preprocessor }
+                                .compile()?
+                                .write_artifacts_if(false)?
+                                .write_cache_if(false)?;
+                        if slash_paths {
+                            output.slash_paths();
+                        }
+                        return Ok(output);
+                    }
+                };
+            let (normal_artifacts, normal_builds, edges) =
+                cache.consume(&Artifacts::default(), &Vec::new(), false)?;
+            let mut cache = ArtifactsCache::with_storage(
+                project,
+                edges,
+                preprocessed,
+                Some(store.paths(&project.paths)),
+            )?;
             let mut mocks = cache.mocks();
             mocks.extend(normal_mocks.iter().cloned());
             cache.update_mocks(mocks);
@@ -329,7 +349,21 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 sources = original_sources;
                 cache.update_mocks(normal_mocks);
             }
-            let write = !project.no_artifacts;
+            let generation = if !project.no_artifacts
+                && sources.sources.values().flatten().any(|(_, sources, _)| !sources.is_empty())
+            {
+                match store.stage(&mut cache) {
+                    Ok(generation) => Some(generation),
+                    Err(SolcError::Io(err)) => {
+                        debug!(%err, "ABI cache staging unavailable");
+                        None
+                    }
+                    Err(err) => return Err(err),
+                }
+            } else {
+                None
+            };
+            let write = generation.is_some();
             let mut state =
                 PreprocessedState { sources, cache, primary_profiles, preprocessor }.compile()?;
             // Keep classifications for secondary artifacts outside the preprocessed jobs.
@@ -339,6 +373,11 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 state.cache.update_mocks(mocks);
             }
             let mut output = state.write_artifacts_if(write)?.write_cache_if(write)?;
+            if let Some(generation) = generation
+                && let Err(err) = store.publish(generation, project)
+            {
+                debug!(%err, "ABI cache publication unavailable");
+            }
             for (file, contracts) in normal_artifacts {
                 let cached = output.cached_artifacts.0.entry(file).or_default();
                 for (name, artifacts) in contracts {

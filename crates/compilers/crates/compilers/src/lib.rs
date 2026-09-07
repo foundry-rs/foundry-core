@@ -351,14 +351,16 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler> Pro
     /// ```
     pub fn cleanup(&self) -> std::result::Result<(), SolcIoError> {
         let abi_cache = self.abi_cache_path();
-        if abi_cache.exists() {
+        let abi_cleanup = if abi_cache.exists() {
             if abi_cache.is_dir() {
                 std::fs::remove_dir_all(&abi_cache)
             } else {
                 std::fs::remove_file(&abi_cache)
             }
-            .map_err(|err| SolcIoError::new(err, &abi_cache))?;
-        }
+            .map_err(|err| SolcIoError::new(err, &abi_cache))
+        } else {
+            Ok(())
+        };
         trace!("clean up project");
         if self.cache_path().exists() {
             std::fs::remove_file(self.cache_path())
@@ -394,7 +396,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler> Pro
             tracing::trace!("removed build-info dir \"{}\"", self.build_info_path().display());
         }
 
-        Ok(())
+        abi_cleanup
     }
 
     pub(crate) fn abi_cache_path(&self) -> PathBuf {

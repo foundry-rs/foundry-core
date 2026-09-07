@@ -31,6 +31,8 @@ use foundry_compilers_core::{
     utils::{self, RuntimeOrHandle, canonicalize},
 };
 use semver::Version;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -46,7 +48,7 @@ use svm::{Platform, platform};
 pub static VYPER: LazyLock<Vyper> = LazyLock::new(|| {
     RuntimeOrHandle::new().block_on(async {
         #[cfg(target_family = "unix")]
-        use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+        use std::fs::Permissions;
 
         if let Ok(vyper) = Vyper::new("vyper") {
             return vyper;
@@ -192,14 +194,17 @@ fn abi_cache_reuses_normal_and_missing_artifacts() {
     assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
 
     let abi_cache = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
-    assert!(!abi_cache.join("artifacts/Built.sol").exists());
+    let directory = abi_cache.join("default");
+    let generation = directory.join(fs::read_to_string(directory.join("current")).unwrap());
+    assert!(!generation.join("artifacts/Built.sol").exists());
     let retired = output.artifact_ids().find(|(id, _)| id.name == "Discovered").unwrap().0.build_id;
-    for path in [
-        abi_cache.join("artifacts/Discovered.sol/Discovered.json"),
-        abi_cache.join("build-info").join(format!("{retired}.json")),
-        abi_cache.join("cache.json"),
+    for relative in [
+        PathBuf::from("artifacts/Discovered.sol/Discovered.json"),
+        PathBuf::from("build-info").join(format!("{retired}.json")),
+        PathBuf::from("cache.json"),
     ] {
-        fs::write(path, "invalid json").unwrap();
+        let generation = directory.join(fs::read_to_string(directory.join("current")).unwrap());
+        fs::write(generation.join(relative), "invalid json").unwrap();
         let output = ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap();
         output.assert_success();
         assert!(!output.is_unchanged());
@@ -208,11 +213,12 @@ fn abi_cache_reuses_normal_and_missing_artifacts() {
     }
     let mut read_only = abi_project.clone();
     read_only.no_artifacts = true;
-    let manifest = fs::read(abi_cache.join("cache.json")).unwrap();
+    let generation = directory.join(fs::read_to_string(directory.join("current")).unwrap());
+    let manifest = fs::read(generation.join("cache.json")).unwrap();
     let output = ProjectCompiler::new(&read_only).unwrap().compile_abi_cached().unwrap();
     output.assert_success();
     assert!(output.is_unchanged());
-    assert_eq!(fs::read(abi_cache.join("cache.json")).unwrap(), manifest);
+    assert_eq!(fs::read(generation.join("cache.json")).unwrap(), manifest);
     let sentinel = project.paths().build_infos.join(format!("{retired}.json"));
     fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
     fs::write(&sentinel, "primary sentinel").unwrap();
@@ -237,7 +243,8 @@ fn abi_cache_reuses_normal_and_missing_artifacts() {
     );
     assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
 
-    assert!(!abi_cache.join("build-info").join(format!("{retired}.json")).exists());
+    let generation = directory.join(fs::read_to_string(directory.join("current")).unwrap());
+    assert!(!generation.join("build-info").join(format!("{retired}.json")).exists());
     assert_eq!(fs::read_to_string(&sentinel).unwrap(), "primary sentinel");
     fs::remove_file(sentinel).unwrap();
     let output = project.compile().unwrap();
@@ -577,6 +584,282 @@ fn abi_cache_preserves_cached_profiles_during_partial_compilation() {
             previous = Some(ids);
         }
     }
+}
+
+#[test]
+fn abi_cache_prunes_obsolete_contexts_and_preserves_valid_filters() {
+    #[derive(Debug)]
+    struct Noop;
+    impl Preprocessor<MultiCompiler> for Noop {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+    }
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    for name in ["First", "Second", "Third"] {
+        project
+            .add_source(name, &format!("pragma solidity ^0.8.0; contract {name} {{}} "))
+            .unwrap();
+    }
+    let compile = |name: &str| {
+        let output = ProjectCompiler::with_sources(
+            project.project(),
+            Source::read_all([project.paths().sources.join(format!("{name}.sol"))]).unwrap(),
+        )
+        .unwrap()
+        .with_preprocessor(Noop)
+        .compile_abi_cached()
+        .unwrap();
+        output.assert_success();
+        output
+    };
+    for cached in [false, true] {
+        for name in ["First", "Second"] {
+            assert_eq!(compile(name).is_unchanged(), cached);
+        }
+    }
+    let root = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+    for entry in fs::read_dir(&root).unwrap() {
+        let directory = entry.unwrap().path();
+        fs::create_dir(directory.join("generation-abandoned")).unwrap();
+        fs::write(directory.join(".current-abandoned"), "interrupted publication").unwrap();
+    }
+    fs::create_dir_all(root.join("abandoned/generation-interrupted")).unwrap();
+    let second = project.paths().sources.join("Second.sol");
+    fs::write(second, "pragma solidity ^0.8.0; contract Second { function added() public {} }")
+        .unwrap();
+    assert!(!compile("Third").is_unchanged());
+    // The changed Second context is obsolete; First is absent from this graph but still valid.
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+    assert!(compile("First").is_unchanged());
+    assert!(compile("Third").is_unchanged());
+    for entry in fs::read_dir(&root).unwrap() {
+        let directory = entry.unwrap().path();
+        assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn abi_cache_concurrent_refresh_keeps_snapshots_coherent() {
+    #[derive(Debug)]
+    struct Paused(std::sync::mpsc::Sender<()>, std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+    impl Preprocessor<MultiCompiler> for Paused {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            self.0.send(()).unwrap();
+            self.1.lock().unwrap().recv().unwrap();
+            Ok(())
+        }
+    }
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    project.add_source("Contract", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
+    ProjectCompiler::new(project.project()).unwrap().compile_abi_cached().unwrap().assert_success();
+    let root = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
+    let directory = root.join("default");
+    let current = fs::read(directory.join("current")).unwrap();
+    project
+        .add_source(
+            "Contract",
+            "pragma solidity ^0.8.0; contract Contract { function added() public {} }",
+        )
+        .unwrap();
+    let (staged_tx, staged_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let writer_project = project.project().clone();
+    let writer = std::thread::spawn(move || {
+        ProjectCompiler::new(&writer_project)
+            .unwrap()
+            .with_preprocessor(Paused(staged_tx, std::sync::Mutex::new(resume_rx)))
+            .compile_abi_cached()
+            .unwrap()
+    });
+    staged_rx.recv().unwrap();
+    // While the writer holds the store lock, another caller compiles in memory without
+    // observing or modifying staging files. It must not wait for the writer to finish.
+    let concurrent = ProjectCompiler::new(project.project()).unwrap().compile_abi_cached().unwrap();
+    concurrent.assert_success();
+    assert!(!concurrent.is_unchanged());
+    assert_eq!(fs::read(directory.join("current")).unwrap(), current);
+    resume_tx.send(()).unwrap();
+    let published = writer.join().unwrap();
+    published.assert_success();
+    assert_eq!(
+        concurrent.find_first("Contract").unwrap().abi,
+        published.find_first("Contract").unwrap().abi
+    );
+    // Publishing the changed dependency also retires the now-invalid default context.
+    assert!(!directory.exists());
+    assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+}
+
+#[test]
+fn abi_cache_failed_generation_preserves_published_artifacts() {
+    #[derive(Clone, Copy, Debug)]
+    enum Failure {
+        None,
+        ArtifactParent,
+        BuildInfo,
+        Manifest,
+        Publication,
+    }
+
+    #[derive(Debug)]
+    struct FailingStorage(Failure);
+
+    impl Preprocessor<MultiCompiler> for FailingStorage {
+        fn preprocess(
+            &self,
+            _compiler: &MultiCompiler,
+            _input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _mocks: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            if matches!(self.0, Failure::None) {
+                return Ok(());
+            }
+            let root = paths.cache.with_file_name("solidity-files-cache.json.abi");
+            let directory = fs::read_dir(root).unwrap().next().unwrap().unwrap().path();
+            let current = fs::read_to_string(directory.join("current")).unwrap();
+            let generation = fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.is_dir() && path.file_name().unwrap() != current.as_str())
+                .unwrap();
+            let blocked = match self.0 {
+                Failure::ArtifactParent => generation.join("artifacts/Contract.sol"),
+                Failure::BuildInfo => generation.join("build-info"),
+                Failure::Manifest => generation.join("cache.json"),
+                Failure::Publication => directory.join("current"),
+                Failure::None => unreachable!(),
+            };
+            if blocked.is_dir() {
+                fs::remove_dir_all(&blocked).unwrap();
+            } else if blocked.exists() {
+                fs::remove_file(&blocked).unwrap();
+            }
+            if matches!(self.0, Failure::Manifest | Failure::Publication) {
+                fs::create_dir_all(&blocked).unwrap();
+                fs::write(blocked.join("blocked"), "blocked").unwrap();
+            } else {
+                fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+                fs::write(blocked, "blocked").unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    for failure in
+        [Failure::ArtifactParent, Failure::BuildInfo, Failure::Manifest, Failure::Publication]
+    {
+        let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.set_solc("0.8.30");
+        project.project_mut().update_output_selection(|selection| {
+            *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+        });
+        let source_a =
+            "pragma solidity ^0.8.0; contract Contract { function original() public {} }";
+        project.add_source("Contract", source_a).unwrap();
+        let original = ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(FailingStorage(Failure::None))
+            .compile_abi_cached()
+            .unwrap();
+        original.assert_success();
+        let root = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
+        let directory = fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
+        let pointer = fs::read(directory.join("current")).unwrap();
+        let generation = directory.join(std::str::from_utf8(&pointer).unwrap());
+        let artifact = generation.join("artifacts/Contract.sol/Contract.json");
+        let bytes = fs::read(&artifact).unwrap();
+        project
+            .add_source(
+                "Contract",
+                "pragma solidity ^0.8.0; contract Contract { function changed() public {} }",
+            )
+            .unwrap();
+        let changed = ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(FailingStorage(failure))
+            .compile_abi_cached()
+            .unwrap();
+        changed.assert_success();
+        assert!(
+            changed
+                .find_first("Contract")
+                .unwrap()
+                .abi
+                .as_ref()
+                .unwrap()
+                .functions
+                .contains_key("changed")
+        );
+        assert_eq!(fs::read(&artifact).unwrap(), bytes, "{failure:?}");
+        if matches!(failure, Failure::Publication) {
+            fs::remove_dir_all(directory.join("current")).unwrap();
+            fs::write(directory.join("current"), &pointer).unwrap();
+        }
+        assert_eq!(fs::read(directory.join("current")).unwrap(), pointer);
+        project.add_source("Contract", source_a).unwrap();
+        let restored = ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(FailingStorage(Failure::None))
+            .compile_abi_cached()
+            .unwrap();
+        restored.assert_success();
+        assert!(restored.is_unchanged(), "{failure:?}");
+        assert_eq!(
+            restored.find_first("Contract").unwrap().abi,
+            original.find_first("Contract").unwrap().abi
+        );
+        assert_eq!(restored.builds().collect::<Vec<_>>(), original.builds().collect::<Vec<_>>());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn abi_cache_cleanup_failure_still_cleans_normal_output() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Contract", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
+    project.compile().unwrap().assert_success();
+    let abi_cache = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
+    fs::create_dir_all(&abi_cache).unwrap();
+    let blocked = abi_cache.join("blocked");
+    fs::write(&blocked, "cached data").unwrap();
+    fs::set_permissions(&abi_cache, fs::Permissions::from_mode(0o500)).unwrap();
+    let cleanup = project.project().cleanup();
+    // Restore permissions before asserting so the temporary project remains removable.
+    if abi_cache.exists() {
+        fs::set_permissions(&abi_cache, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    // Privileged test runners can remove read-only directories.
+    if blocked.exists() {
+        assert!(cleanup.is_err());
+    }
+    assert!(!project.cache_path().exists());
+    assert!(!project.paths().artifacts.exists());
+    assert!(!project.paths().build_infos.exists());
 }
 
 #[test]

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-- Reuse validated ABI artifacts through a separate cache without replacing normal build artifacts.
+- Reuse validated ABI artifacts through a separate cache without replacing normal build artifacts. Publish refreshes atomically and prune retired generations and invalid contexts.
 
 ## [0.21.0](https://github.com/foundry-rs/foundry-core/releases/tag/compilers-v0.21.0) - 2026-05-13
 
