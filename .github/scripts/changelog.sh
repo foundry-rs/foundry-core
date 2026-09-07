@@ -53,7 +53,7 @@ if [ -f "$group_root/CHANGELOG.md" ] && grep -q '^## \[[0-9]' "$group_root/CHANG
     fi
 
     run_unless_dry_run git cliff \
-        --workdir "$root" \
+        --repository "$root" \
         --config "$group_root/cliff.toml" \
         --include-path "$crate_glob" \
         --unreleased \
@@ -61,7 +61,7 @@ if [ -f "$group_root/CHANGELOG.md" ] && grep -q '^## \[[0-9]' "$group_root/CHANG
         --prepend "$group_root/CHANGELOG.md"
 else
     run_unless_dry_run git cliff \
-        --workdir "$root" \
+        --repository "$root" \
         --config "$group_root/cliff.toml" \
         --include-path "$crate_glob" \
         "${@}" \
