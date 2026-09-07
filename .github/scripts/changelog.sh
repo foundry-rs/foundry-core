@@ -17,6 +17,7 @@ run_unless_dry_run() {
 
 root=$WORKSPACE_ROOT
 crate=$CRATE_ROOT
+crate_glob="${crate#"$root/"}/**"
 
 # Find the crate group root (where cliff.toml lives) by walking up from the crate.
 group_root="$crate"
@@ -54,6 +55,7 @@ if [ -f "$group_root/CHANGELOG.md" ] && grep -q '^## \[[0-9]' "$group_root/CHANG
     run_unless_dry_run git cliff \
         --repository "$root" \
         --config "$group_root/cliff.toml" \
+        --include-path "$crate_glob" \
         --unreleased \
         "${@}" \
         --prepend "$group_root/CHANGELOG.md"
@@ -61,6 +63,7 @@ else
     run_unless_dry_run git cliff \
         --repository "$root" \
         --config "$group_root/cliff.toml" \
+        --include-path "$crate_glob" \
         "${@}" \
         --output "$group_root/CHANGELOG.md"
 fi
