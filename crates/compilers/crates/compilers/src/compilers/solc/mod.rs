@@ -29,6 +29,7 @@ use std::{
 
 pub use foundry_compilers_artifacts::SolcLanguage;
 
+mod command;
 mod compiler;
 pub use compiler::{SOLC_EXTENSIONS, Solc};
 
