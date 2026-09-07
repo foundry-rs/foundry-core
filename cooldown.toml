@@ -1,0 +1,2 @@
+# Only reviewed [[allow.exact]] crate/version exceptions belong here.
+# CI enforces a seven-day cooldown and rejects broader policy overrides.

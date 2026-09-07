@@ -17,7 +17,13 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
+  cargo-cooldown:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cargo-cooldown.yml
+
   test:
+    needs: cargo-cooldown
     name: nightly tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -38,7 +44,7 @@ jobs:
       - name: Test
         env:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
-        run: cargo nextest run --workspace --all-features --no-fail-fast --ignore-default-filter
+        run: cargo nextest run --workspace --all-features --locked --no-fail-fast --ignore-default-filter
 
   issue:
     name: Open an issue

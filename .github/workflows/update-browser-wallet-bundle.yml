@@ -62,10 +62,12 @@ jobs:
 
           base_sha="$(jq -r '.[0].base.sha' <<< "$prs_json")"
           pr_number="$(jq -r '.[0].number' <<< "$prs_json")"
-          echo "head-ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
-          echo "head-sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          echo "base-sha=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "pr-number=$pr_number" >> "$GITHUB_OUTPUT"
+          {
+            echo "head-ref=$HEAD_REF"
+            echo "head-sha=$HEAD_SHA"
+            echo "base-sha=$base_sha"
+            echo "pr-number=$pr_number"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
