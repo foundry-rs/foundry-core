@@ -17,7 +17,13 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
+  cargo-cooldown:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cargo-cooldown.yml
+
   test:
+    needs: cargo-cooldown
     name: nightly tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -27,18 +33,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           tool: nextest
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: Test
         env:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
-        run: cargo nextest run --workspace --all-features --no-fail-fast --ignore-default-filter
+        run: cargo nextest run --workspace --all-features --locked --no-fail-fast --ignore-default-filter
 
   issue:
     name: Open an issue
@@ -52,7 +58,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: JasonEtco/create-an-issue@1b14a70e4d8dc185e5cc76d3bec9eab20257b2c5 # v2.9.2
+      - uses: tempoxyz/gh-actions/vendor/JasonEtco/create-an-issue@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKFLOW_URL: |

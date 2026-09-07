@@ -3,7 +3,7 @@ name: Browser wallet / Update bundle
 permissions: {}
 
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers] Both jobs validate the same-repo Dependabot PR and exact head SHA; build has no write token, commit only copies validated assets.
     workflows: [Browser wallet / Validate]
     types: [completed]
 
@@ -62,10 +62,12 @@ jobs:
 
           base_sha="$(jq -r '.[0].base.sha' <<< "$prs_json")"
           pr_number="$(jq -r '.[0].number' <<< "$prs_json")"
-          echo "head-ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
-          echo "head-sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          echo "base-sha=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "pr-number=$pr_number" >> "$GITHUB_OUTPUT"
+          {
+            echo "head-ref=$HEAD_REF"
+            echo "head-sha=$HEAD_SHA"
+            echo "base-sha=$base_sha"
+            echo "pr-number=$pr_number"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,7 +96,7 @@ jobs:
           fi
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: tempoxyz/gh-actions/vendor/pnpm/action-setup@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           version: 11.9.0
           run_install: false
@@ -259,6 +261,7 @@ jobs:
         with:
           ref: ${{ needs.build.outputs.head-sha }}
           fetch-depth: 0
+          persist-credentials: true # zizmor: ignore[artipacked] Needed for the guarded same-repo bot-branch push; no cache or artifact upload follows this checkout.
 
       - name: Stage bundle
         id: stage

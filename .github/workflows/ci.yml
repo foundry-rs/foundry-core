@@ -17,6 +17,11 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
+  cargo-cooldown:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cargo-cooldown.yml
+
   rustfmt:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -26,13 +31,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: nightly
           components: rustfmt
       - run: cargo fmt --all --check
 
   clippy:
+    needs: cargo-cooldown
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
@@ -47,13 +53,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: nightly
           components: clippy
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo clippy --workspace --all-targets --all-features
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - run: cargo clippy --workspace --all-targets --all-features --locked
         env:
           RUSTFLAGS: -Dwarnings
 
@@ -69,6 +75,7 @@ jobs:
   # If the runner image drops that Xcode, the pin step fails loudly so the
   # floor is re-evaluated instead of silently sliding forward.
   touch-id-link:
+    needs: cargo-cooldown
     runs-on: ${{ matrix.toolchain.os }}
     timeout-minutes: 30
     permissions:
@@ -95,12 +102,12 @@ jobs:
             exit 1
           fi
           echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           key: ${{ matrix.toolchain.xcode }}
       - run: swiftc --version
@@ -109,7 +116,7 @@ jobs:
           artifacts="$RUNNER_TEMP/touch-id-artifacts.json"
           executables="$RUNNER_TEMP/touch-id-executables"
           cargo test -p foundry-wallets --features touch-id --target ${{ matrix.target }} \
-            --no-run --message-format=json > "$artifacts"
+            --locked --no-run --message-format=json > "$artifacts"
           jq -r \
             'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' \
             "$artifacts" > "$executables"
@@ -123,6 +130,7 @@ jobs:
           done < "$executables"
 
   feature-checks:
+    needs: cargo-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -131,18 +139,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # master
+      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           tool: cargo-hack
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: cargo hack
-        run: cargo hack check --feature-powerset --depth 1
+        run: cargo hack check --feature-powerset --depth 1 --locked
 
   test:
+    needs: cargo-cooldown
     name: test ${{ matrix.rust }} ${{ matrix.flags }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -164,19 +173,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: ${{ matrix.rust }}
       - name: Install nextest
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           tool: nextest
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: test
-        run: cargo nextest run --workspace ${{ matrix.flags }}
+        run: cargo nextest run --workspace --locked ${{ matrix.flags }}
 
   doctest:
+    needs: cargo-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -185,14 +195,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: stable
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test --workspace --doc --all-features
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - run: cargo test --workspace --doc --all-features --locked
 
   docs:
+    needs: cargo-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -201,12 +212,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: nightly
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo doc --workspace --all-features --no-deps --document-private-items
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - run: cargo doc --workspace --all-features --no-deps --document-private-items --locked
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings --show-type-layout --generate-link-to-definition --enable-index-page -Zunstable-options
 
@@ -219,12 +230,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: crate-ci/typos@4d9c206a77c041268485162b8e2579ad7a5cb9a3 # v1.50.0
+      - uses: tempoxyz/gh-actions/actions/typos@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
 
   deny:
-    uses: tempoxyz/ci/.github/workflows/deny.yml@268b3ce142717ff86c58fbbcc3abc3f109f0fb8d # main
+    needs: cargo-cooldown
+    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@3a37d720685503bb084ba723ee981a6c1b120360 # main
     permissions:
       contents: read
+    secrets:
+      STEP_SECURITY_API_KEY: ${{ secrets.STEP_SECURITY_API_KEY }}
+    with:
+      run-clippy: false
+      run-fmt: false
+      run-typos: false
+      deny-rust-toolchain: nightly
+      deny-flags: --all-features --locked
 
   codeql:
     name: Analyze (${{ matrix.language }})
@@ -256,11 +276,23 @@ jobs:
         with:
           category: "/language:${{matrix.language}}"
 
+  workflow-validation:
+    name: Workflow Validation
+    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@9b0664503f535261c1d4af0aadf0098bb7cbf26f # main
+    permissions:
+      actions: read
+      contents: read
+    secrets:
+      STEP_SECURITY_API_KEY: ${{ secrets.STEP_SECURITY_API_KEY }}
+    with:
+      pinact: true
+
   ci-success:
     runs-on: ubuntu-latest
     if: always()
     permissions: {}
     needs:
+      - cargo-cooldown
       - rustfmt
       - clippy
       - touch-id-link
@@ -271,10 +303,11 @@ jobs:
       - typos
       - deny
       - codeql
+      - workflow-validation
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # release/v1
+        uses: tempoxyz/gh-actions/actions/check-needs@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           jobs: ${{ toJSON(needs) }}
 
@@ -290,7 +323,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: JasonEtco/create-an-issue@1b14a70e4d8dc185e5cc76d3bec9eab20257b2c5 # v2.9.2
+      - uses: tempoxyz/gh-actions/vendor/JasonEtco/create-an-issue@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKFLOW_URL: |
