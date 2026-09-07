@@ -257,6 +257,10 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
     /// Refreshes publish immutable generations atomically; contention or unavailable storage uses
     /// in-memory output. Persistence prunes retired generations and invalid contexts. Distinct,
     /// still-valid preprocessor contexts remain reusable until invalidated or explicitly cleaned.
+    ///
+    /// Consume artifacts and build contexts from the returned in-memory output. Paths into
+    /// secondary storage are temporary cache locations, not owned by that output: later ABI
+    /// acquisitions or cleanup may remove them even while the returned output is still alive.
     pub fn compile_abi_cached(self) -> Result<ProjectCompileOutput<C>> {
         let project = self.project;
         if project.build_info || project.artifacts.additional_files != Default::default() {

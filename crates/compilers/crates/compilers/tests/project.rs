@@ -605,9 +605,7 @@ fn abi_cache_prunes_obsolete_contexts_and_preserves_valid_filters() {
         *selection = OutputSelection::common_output_selection(["abi".to_string()]);
     });
     for name in ["First", "Second", "Third"] {
-        project
-            .add_source(name, &format!("pragma solidity ^0.8.0; contract {name} {{}} "))
-            .unwrap();
+        project.add_source(name, format!("pragma solidity ^0.8.0; contract {name} {{}} ")).unwrap();
     }
     let compile = |name: &str| {
         let output = ProjectCompiler::with_sources(

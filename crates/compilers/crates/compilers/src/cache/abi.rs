@@ -143,7 +143,8 @@ impl AbiCache {
         let _ = fs::remove_file(directory.join("cache.json"));
         let _ = fs::remove_dir_all(directory.join("artifacts"));
         let _ = fs::remove_dir_all(directory.join("build-info"));
-        // Only the lock holder can stage or publish; no reader can be loading retired files.
+        // The lock protects snapshot acquisition, not the lifetime of returned artifact paths.
+        // Other acquisitions cannot load retired files while this lock is held.
         if let Ok(entries) = fs::read_dir(directory) {
             for entry in entries.flatten() {
                 let path = entry.path();
