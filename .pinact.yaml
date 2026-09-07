@@ -2,9 +2,9 @@ version: 3
 
 rules:
   # Tempo's shared workflows are SHA-pinned but do not publish releases that
-  # pinact can use for version-comment or minimum-age verification.
+  # pinact can use for version-comment verification.
   - ignore: true
     conditions:
-      - expr: |
-          ActionRepoFullName == "tempoxyz/gh-actions"
-      - expr: ActionVersion matches "^[0-9a-f]{40}$"
+      - expr: >-
+          ActionRepoFullName == "tempoxyz/gh-actions" &&
+          ActionVersion matches "^[0-9a-f]{40}$"
