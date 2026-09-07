@@ -14,18 +14,18 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "accounts": "^0.16.2",
+    "accounts": "^0.18.1",
     "ox": "^0.14.30",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "viem": "^2.55.19"
+    "viem": "^2.56.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.10",
-    "@types/node": "^26.2.0",
+    "@biomejs/biome": "^2.5.11",
+    "@types/node": "^26.4.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
-    "@vitejs/plugin-react": "^6.1.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "typescript": "~7.0.2",
     "vite": "^8.2.2"
   }
