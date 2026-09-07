@@ -649,6 +649,62 @@ fn abi_cache_prunes_obsolete_contexts_and_preserves_valid_filters() {
 }
 
 #[test]
+fn abi_cache_migrates_legacy_storage_after_successful_publication() {
+    #[derive(Debug)]
+    struct Noop;
+    impl Preprocessor<MultiCompiler> for Noop {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+    }
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Built", "pragma solidity ^0.8.0; contract Built {}").unwrap();
+    project.compile().unwrap().assert_success();
+    let primary = fs::read(project.cache_path()).unwrap();
+    project.add_source("Discovered", "pragma solidity ^0.8.0; contract Discovered {}").unwrap();
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    let compile = || {
+        ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(Noop)
+            .compile_abi_cached()
+            .unwrap()
+    };
+    compile().assert_success();
+    let root = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
+    let directory = fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
+    let generation = directory.join(fs::read_to_string(directory.join("current")).unwrap());
+    // Recreate the baseline layout, whose manifest uses paths relative to artifacts/.
+    for name in ["cache.json", "artifacts", "build-info"] {
+        fs::rename(generation.join(name), directory.join(name)).unwrap();
+    }
+    fs::remove_dir(generation).unwrap();
+    fs::remove_file(directory.join("current")).unwrap();
+    fs::write(root.join("cache.json"), "old unpreprocessed manifest").unwrap();
+    fs::create_dir(root.join("artifacts")).unwrap();
+    fs::create_dir(root.join("build-info")).unwrap();
+    let refreshed = compile();
+    refreshed.assert_success();
+    assert!(!refreshed.is_unchanged());
+    for parent in [&root, &directory] {
+        for name in ["cache.json", "artifacts", "build-info"] {
+            assert!(!parent.join(name).exists());
+        }
+    }
+    assert!(compile().is_unchanged());
+    assert_eq!(fs::read(project.cache_path()).unwrap(), primary);
+}
+
+#[test]
 fn abi_cache_concurrent_refresh_keeps_snapshots_coherent() {
     #[derive(Debug)]
     struct Paused(std::sync::mpsc::Sender<()>, std::sync::Mutex<std::sync::mpsc::Receiver<()>>);

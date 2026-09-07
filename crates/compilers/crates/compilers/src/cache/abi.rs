@@ -132,11 +132,17 @@ impl AbiCache {
         pointer.persist(self.directory.join("current")).map_err(|err| err.error)?;
         let published = generation.keep();
         Self::collect_generations(&self.directory, &published);
+        let _ = fs::remove_file(self.root.join("cache.json"));
         self.prune(project);
         Ok(())
     }
 
     fn collect_generations(directory: &Path, published: &Path) {
+        // Previous ABI caches stored these payloads directly in the context directory.
+        // They are superseded only once a complete generation has been published.
+        let _ = fs::remove_file(directory.join("cache.json"));
+        let _ = fs::remove_dir_all(directory.join("artifacts"));
+        let _ = fs::remove_dir_all(directory.join("build-info"));
         // Only the lock holder can stage or publish; no reader can be loading retired files.
         if let Ok(entries) = fs::read_dir(directory) {
             for entry in entries.flatten() {
