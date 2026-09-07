@@ -234,7 +234,7 @@ jobs:
 
   deny:
     needs: cargo-cooldown
-    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@d33c89e929adc5355c4d7516e780b0629c42116f # fix cargo-deny container toolchain
+    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@3a37d720685503bb084ba723ee981a6c1b120360 # main
     permissions:
       contents: read
     secrets:
