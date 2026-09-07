@@ -263,6 +263,17 @@ jobs:
         with:
           category: "/language:${{matrix.language}}"
 
+  workflow-validation:
+    name: Workflow Validation
+    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@9b0664503f535261c1d4af0aadf0098bb7cbf26f # main
+    permissions:
+      actions: read
+      contents: read
+    secrets:
+      STEP_SECURITY_API_KEY: ${{ secrets.STEP_SECURITY_API_KEY }}
+    with:
+      pinact: true
+
   ci-success:
     runs-on: ubuntu-latest
     if: always()
@@ -278,6 +289,7 @@ jobs:
       - typos
       - deny
       - codeql
+      - workflow-validation
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed

@@ -3,7 +3,7 @@ name: Browser wallet / Update bundle
 permissions: {}
 
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers] Both jobs validate the same-repo Dependabot PR and exact head SHA; build has no write token, commit only copies validated assets.
     workflows: [Browser wallet / Validate]
     types: [completed]
 
@@ -259,6 +259,7 @@ jobs:
         with:
           ref: ${{ needs.build.outputs.head-sha }}
           fetch-depth: 0
+          persist-credentials: true # zizmor: ignore[artipacked] Needed for the guarded same-repo bot-branch push; no cache or artifact upload follows this checkout.
 
       - name: Stage bundle
         id: stage
