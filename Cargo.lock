@@ -909,7 +909,7 @@ dependencies = [
  "fnv",
  "hashbrown 0.17.1",
  "itertools 0.14.0",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
  "zeroize",
@@ -926,7 +926,7 @@ dependencies = [
  "ark-serialize 0.3.0",
  "ark-std 0.3.0",
  "derivative",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "paste",
  "rustc_version 0.3.3",
@@ -946,7 +946,7 @@ dependencies = [
  "derivative",
  "digest 0.10.7",
  "itertools 0.10.5",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "paste",
  "rustc_version 0.4.1",
@@ -967,7 +967,7 @@ dependencies = [
  "digest 0.10.7",
  "educe",
  "itertools 0.13.0",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "paste",
  "zeroize",
@@ -985,7 +985,7 @@ dependencies = [
  "ark-std 0.6.0",
  "digest 0.10.7",
  "educe",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "zeroize",
 ]
@@ -1036,7 +1036,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db2fd794a08ccb318058009eefdf15bcaaaaf6f8161eb3345f907222bac38b20"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "quote",
  "syn 1.0.109",
@@ -1048,7 +1048,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7abe79b0e4288889c4574159ab790824d0033b9fdcb2a112a3182fac2e514565"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "proc-macro2",
  "quote",
@@ -1061,7 +1061,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09be120733ee33f7693ceaa202ca41accd5653b779563608f1234f78ae07c4b3"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "proc-macro2",
  "quote",
@@ -1074,7 +1074,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a0691ed21ef00ef89c1e9bda832eba493dda3ec2f8d892fb25b705f73f06bb8"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "proc-macro2",
  "quote",
@@ -1108,7 +1108,7 @@ dependencies = [
  "ark-std 0.6.0",
  "educe",
  "itertools 0.14.0",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
  "tracing",
@@ -1148,7 +1148,7 @@ checksum = "adb7b85a02b83d2f22f89bd5cac66c9c89474240cb6207cb1efc16d098e822a5"
 dependencies = [
  "ark-std 0.4.0",
  "digest 0.10.7",
- "num-bigint",
+ "num-bigint 0.4.8",
 ]
 
 [[package]]
@@ -1160,7 +1160,7 @@ dependencies = [
  "ark-std 0.5.0",
  "arrayvec",
  "digest 0.10.7",
- "num-bigint",
+ "num-bigint 0.4.8",
 ]
 
 [[package]]
@@ -1172,7 +1172,7 @@ dependencies = [
  "ark-serialize-derive",
  "ark-std 0.6.0",
  "digest 0.10.7",
- "num-bigint",
+ "num-bigint 0.4.8",
  "serde_with",
 ]
 
@@ -2301,9 +2301,9 @@ dependencies = [
 
 [[package]]
 name = "comfy-table"
-version = "7.2.2"
+version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "958c5d6ecf1f214b4c2bbbbf6ab9523a864bd136dcf71a7e8904799acfe1ad47"
+checksum = "136c8c4c3823846e8ba6d4bda011b4e5d5827b8bb0ac26c31f9ab31abe9f54f2"
 dependencies = [
  "unicode-segmentation",
  "unicode-width",
@@ -2958,6 +2958,12 @@ dependencies = [
  "syn 2.0.119",
  "unicode-xid",
 ]
+
+[[package]]
+name = "diff"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
 
 [[package]]
 name = "digest"
@@ -4683,7 +4689,7 @@ version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-complex",
  "num-integer",
  "num-iter",
@@ -4696,6 +4702,16 @@ name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -4741,7 +4757,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
 ]
@@ -6087,7 +6103,7 @@ dependencies = [
  "bytes",
  "fastrlp 0.3.1",
  "fastrlp 0.4.0",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
  "parity-scale-codec",
@@ -6749,7 +6765,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "thiserror 2.0.20",
  "time",
@@ -6811,8 +6827,7 @@ dependencies = [
 [[package]]
 name = "solar-ast"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "756d3259a664e087dcc43b4a7d335c8d86d9d1971d396430f128a0ce33622b18"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
 dependencies = [
  "alloy-primitives",
  "bumpalo",
@@ -6828,16 +6843,19 @@ dependencies = [
 [[package]]
 name = "solar-codegen"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cd401083e2463480b4c11840ec7f654ca0b75a976a915033ca8b1804c3ad95e"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
 dependencies = [
  "alloy-primitives",
+ "arrayvec",
  "derive_more",
+ "either",
+ "memchr",
  "smallvec",
  "solar-ast",
  "solar-config",
  "solar-data-structures",
  "solar-interface",
+ "solar-parse",
  "solar-sema",
  "tracing",
 ]
@@ -6845,8 +6863,7 @@ dependencies = [
 [[package]]
 name = "solar-compiler"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d0fb69164d78ebd2e399ebc47818e3a610414fe9da4f6b2579a058d7fc567f9"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
 dependencies = [
  "alloy-primitives",
  "idna_adapter",
@@ -6855,6 +6872,7 @@ dependencies = [
  "solar-config",
  "solar-data-structures",
  "solar-interface",
+ "solar-lint",
  "solar-macros",
  "solar-parse",
  "solar-sema",
@@ -6863,9 +6881,9 @@ dependencies = [
 [[package]]
 name = "solar-config"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4aae5537cc9b12d88f4d4464319b2f3395522b24d8661ae3ae466023f3bb217"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
 dependencies = [
+ "alloy-primitives",
  "colorchoice",
  "strum 0.28.0",
 ]
@@ -6873,10 +6891,10 @@ dependencies = [
 [[package]]
 name = "solar-data-structures"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "199a526376b5b66acaee7a96349207e85242516e8daf4aad20963f1389145ee1"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
 dependencies = [
  "bumpalo",
+ "diff",
  "indexmap 2.14.1",
  "oxc_index",
  "parking_lot",
@@ -6888,8 +6906,7 @@ dependencies = [
 [[package]]
 name = "solar-interface"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5eca1dc6ececb31400960e2614fa2c16f361633b8ce3497b3a358f509dd8195e"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
 dependencies = [
  "annotate-snippets",
  "anstream",
@@ -6897,7 +6914,7 @@ dependencies = [
  "derive_more",
  "dunce",
  "inturn",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "itoa",
  "normalize-path",
  "once_map",
@@ -6909,34 +6926,43 @@ dependencies = [
  "solar-config",
  "solar-data-structures",
  "solar-macros",
- "thiserror 2.0.20",
+ "thiserror 1.0.69",
  "tracing",
  "unicode-width",
 ]
 
 [[package]]
+name = "solar-lint"
+version = "0.2.0"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
+dependencies = [
+ "rayon",
+ "solar-ast",
+ "solar-interface",
+ "solar-sema",
+]
+
+[[package]]
 name = "solar-macros"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acba5b79d1cf90faca7c9115c35b2bee41c3f940b611bfd384b926fa40bc7083"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
 name = "solar-parse"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdfec224fb34c504576d0124fcfb0ffbdb5461d2b55df00253e89e37fcd3f6f5"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
 dependencies = [
  "alloy-primitives",
  "bitflags 2.13.1",
  "bumpalo",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "memchr",
- "num-bigint",
+ "num-bigint 0.5.1",
  "num-rational",
  "num-traits",
  "ruint",
@@ -6950,8 +6976,7 @@ dependencies = [
 [[package]]
 name = "solar-sema"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d13d74065eeed9b3f70ab8e62a8a449de624ebcc8618b5fb3afee0520f93cc57"
+source = "git+https://github.com/paradigmxyz/solar?rev=315cf80d7db9bff4e583c631c204d3fce69c0e1e#315cf80d7db9bff4e583c631c204d3fce69c0e1e"
 dependencies = [
  "alloy-json-abi",
  "alloy-primitives",
@@ -6960,11 +6985,13 @@ dependencies = [
  "comfy-table",
  "derive_more",
  "either",
- "num-bigint",
+ "indexmap 2.14.1",
+ "num-bigint 0.5.1",
  "num-traits",
  "once_map",
  "paste",
  "rayon",
+ "serde",
  "solar-ast",
  "solar-data-structures",
  "solar-interface",

@@ -11,7 +11,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.96"
 authors = ["Foundry Contributors"]
 license = "MIT OR Apache-2.0"
 homepage = "https://getfoundry.sh"
@@ -221,7 +221,7 @@ semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }
 snapbox = "1.2.1"
-solar = { package = "solar-compiler", version = "=0.2.0", default-features = false }
+solar = { package = "solar-compiler", git = "https://github.com/paradigmxyz/solar", rev = "315cf80d7db9bff4e583c631c204d3fce69c0e1e", default-features = false }
 svm = { package = "svm-rs", version = "0.5.25", default-features = false }
 tempfile = "3.20.0"
 thiserror = "2.0.18"

@@ -18,6 +18,8 @@ pub mod cache;
 
 pub mod flatten;
 
+pub mod storage_layout;
+
 pub mod resolver;
 pub use resolver::Graph;
 
