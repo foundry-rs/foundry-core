@@ -5,6 +5,7 @@
 
 use crate::{artifacts::StorageLayout, error::SolcError, resolver::parse::SolParser};
 use alloy_primitives::{U256, keccak256};
+use path_slash::PathExt;
 use solar::{
     ast::NatSpecKind,
     sema::{
@@ -107,8 +108,21 @@ pub fn erc7201_storage_layouts(
         for item in gcx.hir.contract(base).items {
             if let Some(id) = item.as_struct() {
                 let strukt = gcx.hir.strukt(id);
-                let declaration =
-                    format!("{}.{}", gcx.contract_fully_qualified_name(base), strukt.name);
+                let contract = gcx.hir.contract(base);
+                let file = &gcx.hir.source(contract.source).file.name;
+                let contract_name = if let Some(path) = file.as_real() {
+                    let path = gcx
+                        .sess
+                        .opts
+                        .base_path
+                        .as_ref()
+                        .and_then(|root| path.strip_prefix(root).ok())
+                        .unwrap_or(path);
+                    format!("{}:{}", path.to_slash_lossy(), contract.name)
+                } else {
+                    gcx.contract_fully_qualified_name(base).to_string()
+                };
+                let declaration = format!("{contract_name}.{}", strukt.name);
                 let mut namespace = None;
                 for tag in gcx.natspec_doc_comments(strukt.doc) {
                     if let NatSpecKind::Custom { name } = tag.kind
@@ -123,7 +137,16 @@ pub fn erc7201_storage_layouts(
                 }
                 if let Some(namespace) = namespace {
                     let root = erc7201_root(namespace);
-                    let output = gcx.storage_layout_for_struct(id, root);
+                    let mut output = gcx.storage_layout_for_struct(id, root);
+                    // Match solc's project-relative source names at every level of the type graph.
+                    for entry in &mut output.storage {
+                        entry.contract.clone_from(&contract_name);
+                    }
+                    if let Some(types) = &mut output.types {
+                        for member in types.values_mut().flat_map(|ty| &mut ty.members) {
+                            member.contract.clone_from(&contract_name);
+                        }
+                    }
                     let mut layout: StorageLayout =
                         serde_json::from_value(serde_json::to_value(output)?)?;
                     scope_types(&mut layout, namespace);
@@ -193,19 +216,40 @@ mod tests {
     use solar::sema::Compiler;
     use std::path::PathBuf;
 
-    fn parser(source: &str) -> SolParser {
+    fn parser_at(source: &str, path: &str) -> SolParser {
         let mut compiler = Compiler::new(Session::builder().with_test_emitter().build());
         compiler.enter_mut(|compiler| {
-            let file = compiler
-                .sess()
-                .source_map()
-                .new_source_file(PathBuf::from("test.sol"), source)
-                .unwrap();
+            let file =
+                compiler.sess().source_map().new_source_file(PathBuf::from(path), source).unwrap();
             let mut parser = compiler.parse();
             parser.add_file(file);
             parser.parse();
         });
         SolParser { compiler }
+    }
+
+    fn parser(source: &str) -> SolParser {
+        parser_at(source, "test.sol")
+    }
+
+    #[test]
+    fn project_relative_source_names() {
+        let mut parser = parser_at(
+            r#"contract C {
+            struct Inner { uint256 x; }
+            /// @custom:storage-location erc7201:example
+            struct Data { Inner inner; }
+        }"#,
+            "/project/src/test.sol",
+        );
+        parser.compiler.sess_mut().opts.base_path = Some(PathBuf::from("/project"));
+        let namespaces =
+            parser.erc7201_storage_layouts(Path::new("/project/src/test.sol"), Some("C")).unwrap();
+        let namespace = &namespaces[0];
+        assert_eq!(namespace.declaration, "src/test.sol:C.Data");
+        assert_eq!(namespace.layout.storage[0].contract, "src/test.sol:C");
+        let ty = &namespace.layout.types[&namespace.layout.storage[0].storage_type];
+        assert_eq!(ty.other["members"][0]["contract"], "src/test.sol:C");
     }
 
     fn layouts(source: &str, contract: &str) -> Result<Vec<StorageNamespace>, SolcError> {
