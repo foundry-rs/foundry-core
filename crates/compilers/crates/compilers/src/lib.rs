@@ -350,6 +350,17 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler> Pro
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn cleanup(&self) -> std::result::Result<(), SolcIoError> {
+        let abi_cache = self.abi_cache_path();
+        let abi_cleanup = if abi_cache.exists() {
+            if abi_cache.is_dir() {
+                std::fs::remove_dir_all(&abi_cache)
+            } else {
+                std::fs::remove_file(&abi_cache)
+            }
+            .map_err(|err| SolcIoError::new(err, &abi_cache))
+        } else {
+            Ok(())
+        };
         trace!("clean up project");
         if self.cache_path().exists() {
             std::fs::remove_file(self.cache_path())
@@ -385,7 +396,13 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler> Pro
             tracing::trace!("removed build-info dir \"{}\"", self.build_info_path().display());
         }
 
-        Ok(())
+        abi_cleanup
+    }
+
+    pub(crate) fn abi_cache_path(&self) -> PathBuf {
+        let mut name = self.paths.cache.file_name().unwrap_or_default().to_os_string();
+        name.push(".abi");
+        self.paths.cache.with_file_name(name)
     }
 
     /// Parses the sources in memory and collects all the contract names mapped to their file paths.

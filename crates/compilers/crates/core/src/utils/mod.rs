@@ -464,7 +464,13 @@ pub fn write_json_file<T: Serialize>(
 ) -> Result<(), SolcError> {
     let file = fs::File::create(path).map_err(|err| SolcError::io(err, path))?;
     let mut writer = std::io::BufWriter::with_capacity(capacity, file);
-    serde_json::to_writer(&mut writer, value)?;
+    serde_json::to_writer(&mut writer, value).map_err(|err| {
+        if let Some(kind) = err.io_error_kind() {
+            SolcError::io(std::io::Error::new(kind, err), path)
+        } else {
+            SolcError::from(err)
+        }
+    })?;
     writer.flush().map_err(|e| SolcError::io(e, path))
 }
 
@@ -473,13 +479,7 @@ pub fn write_json_file<T: Serialize>(
 /// See [`fs::create_dir_all()`].
 pub fn create_parent_dir_all(file: &Path) -> Result<(), SolcError> {
     if let Some(parent) = file.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            SolcError::msg(format!(
-                "Failed to create artifact parent folder \"{}\": {}",
-                parent.display(),
-                err
-            ))
-        })?;
+        fs::create_dir_all(parent).map_err(|err| SolcError::io(err, parent))?;
     }
     Ok(())
 }
@@ -531,6 +531,35 @@ mod tests {
         let path = tmp_dir.path().join("IVersioned.sol/IVersioned.json");
         create_parent_dir_all(&path).unwrap();
         assert!(path.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn blocked_artifact_parent_preserves_io_error() {
+        let tmp_dir = tempdir("out").unwrap();
+        let parent = tmp_dir.path().join("Contract.sol");
+        fs::write(&parent, "blocked").unwrap();
+        let error = create_parent_dir_all(&parent.join("Contract.json")).unwrap_err();
+        assert!(matches!(error, SolcError::Io(_)));
+    }
+
+    #[test]
+    fn json_write_preserves_serialization_errors() {
+        let tmp_dir = tempdir("out").unwrap();
+        let path = tmp_dir.path().join("artifact.json");
+        // JSON object keys cannot be sequences. This is not a filesystem failure.
+        let value = std::collections::BTreeMap::from([(vec![1, 2], 3)]);
+        assert!(matches!(write_json_file(&value, &path, 8), Err(SolcError::SerdeJson(_))));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn json_write_preserves_writer_io_errors() {
+        // Exceed the buffer so the write fails inside serde_json rather than on final flush.
+        let value = "x".repeat(1024);
+        assert!(matches!(
+            write_json_file(&value, Path::new("/dev/full"), 8),
+            Err(SolcError::Io(_))
+        ));
     }
 
     #[test]
