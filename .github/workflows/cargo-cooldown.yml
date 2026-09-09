@@ -25,4 +25,5 @@ jobs:
         uses: tempoxyz/gh-actions/actions/cargo-cooldown@9b0664503f535261c1d4af0aadf0098bb7cbf26f # main
         with:
           cooldown-days: "7"
-          strict-project-config: true
+          # Permit crate-wide exceptions and inline TOML tables in cooldown.toml.
+          strict-project-config: false

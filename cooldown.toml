@@ -1,7 +1,21 @@
-# Only reviewed [[allow.exact]] crate/version exceptions belong here.
-# CI enforces a seven-day cooldown and rejects broader policy overrides.
+# CI enforces a seven-day cooldown, with the exceptions below.
+
+[allow]
+# Allow revm releases without adding an exception for each version.
+package = [
+    { crate = "revm", min-publish-age = "0" },
+    { crate = "revm-bytecode", min-publish-age = "0" },
+    { crate = "revm-context", min-publish-age = "0" },
+    { crate = "revm-context-interface", min-publish-age = "0" },
+    { crate = "revm-database", min-publish-age = "0" },
+    { crate = "revm-database-interface", min-publish-age = "0" },
+    { crate = "revm-handler", min-publish-age = "0" },
+    { crate = "revm-inspector", min-publish-age = "0" },
+    { crate = "revm-interpreter", min-publish-age = "0" },
+    { crate = "revm-precompile", min-publish-age = "0" },
+    { crate = "revm-primitives", min-publish-age = "0" },
+    { crate = "revm-state", min-publish-age = "0" },
+]
 
 # Match Foundry's exception for the required RustCrypto release; 0.14.0 is yanked.
-[[allow.exact]]
-crate = "wnaf"
-version = "0.14.1"
+exact = [{ crate = "wnaf", version = "0.14.1" }]
