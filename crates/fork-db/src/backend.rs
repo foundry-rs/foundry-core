@@ -1046,7 +1046,7 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
         let (backend, backend_rx) = unbounded();
         let cache = Arc::new(FlushJsonBlockCacheDB(Arc::clone(db.cache())));
         db.block_hashes().write().insert(U256::from(anchor.number), anchor.hash);
-        let block_id = BlockId::from((anchor.hash, Some(false)));
+        let block_id = BlockId::from((anchor.hash, None));
         let handler =
             BackendHandler::new(provider.erased(), db, backend_rx, Some(block_id), Some(anchor));
         Ok((Self { backend, cache, blocking_mode: Default::default(), exact: true }, handler))
@@ -1460,8 +1460,7 @@ mod tests {
             let mut storage_request = server.recv().unwrap();
             let storage: Request = serde_json::from_reader(storage_request.as_reader()).unwrap();
             assert_eq!(storage.method, "eth_getStorageAt");
-            assert_eq!(storage.params[2]["blockHash"], anchor_hash.to_string());
-            assert_eq!(storage.params[2]["requireCanonical"], false);
+            assert_eq!(storage.params[2], anchor_hash.to_string());
             storage_request
                 .respond(Response::from_string(
                     serde_json::json!({
@@ -1794,8 +1793,7 @@ mod tests {
             let mut request = server.recv().unwrap();
             let rpc_request: Request = serde_json::from_reader(request.as_reader()).unwrap();
             assert_eq!(rpc_request.method, "eth_call");
-            assert_eq!(rpc_request.params[1]["blockHash"], anchor_hash.to_string());
-            assert_eq!(rpc_request.params[1]["requireCanonical"], false);
+            assert_eq!(rpc_request.params[1], anchor_hash.to_string());
             assert_eq!(
                 rpc_request.params[0]["data"],
                 format!("0x7f{:064x}4060005260206000f3", U256::from(99))
