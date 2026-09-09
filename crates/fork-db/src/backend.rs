@@ -1034,6 +1034,28 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
         db: BlockchainDb<B>,
         anchor: ForkBlock,
     ) -> eyre::Result<(Self, BackendHandler<N, B>)> {
+        Self::new_anchored(provider, db, anchor, BlockId::from((anchor.hash, None)))
+    }
+
+    /// Same as [`Self::new_with_anchor`], but addresses state reads by the anchor's RPC block
+    /// number instead of its hash, for RPCs that cannot serve state by block hash.
+    ///
+    /// Block hash ancestry is still validated against the anchor; only the per-read reorg
+    /// protection of hash-addressed state reads is lost.
+    pub fn new_with_anchor_by_number<P: Provider<N> + 'static>(
+        provider: P,
+        db: BlockchainDb<B>,
+        anchor: ForkBlock,
+    ) -> eyre::Result<(Self, BackendHandler<N, B>)> {
+        Self::new_anchored(provider, db, anchor, BlockId::number(anchor.rpc_number))
+    }
+
+    fn new_anchored<P: Provider<N> + 'static>(
+        provider: P,
+        db: BlockchainDb<B>,
+        anchor: ForkBlock,
+        block_id: BlockId,
+    ) -> eyre::Result<(Self, BackendHandler<N, B>)> {
         let meta = db.meta().read();
         eyre::ensure!(
             meta.fork_hash == Some(anchor.hash),
@@ -1046,7 +1068,6 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
         let (backend, backend_rx) = unbounded();
         let cache = Arc::new(FlushJsonBlockCacheDB(Arc::clone(db.cache())));
         db.block_hashes().write().insert(U256::from(anchor.number), anchor.hash);
-        let block_id = BlockId::from((anchor.hash, None));
         let handler =
             BackendHandler::new(provider.erased(), db, backend_rx, Some(block_id), Some(anchor));
         Ok((Self { backend, cache, blocking_mode: Default::default(), exact: true }, handler))
@@ -1513,6 +1534,85 @@ mod tests {
         let db = BlockchainDb::new(meta, None);
         let (backend, handler) =
             SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, anchor_hash)).unwrap();
+        tokio::spawn(handler);
+
+        assert_eq!(backend.storage_ref(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
+        assert_eq!(backend.block_hash_ref(9).unwrap(), parent_hash);
+        server_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exact_anchor_by_number_reads_state_by_number() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
+        let anchor_hash = B256::with_last_byte(0xaa);
+        let parent_hash = B256::with_last_byte(0xbb);
+
+        let server_handle = std::thread::spawn(move || {
+            #[derive(Debug, Deserialize)]
+            struct Request {
+                id: serde_json::Value,
+                method: String,
+                params: serde_json::Value,
+            }
+
+            let mut storage_request = server.recv().unwrap();
+            let storage: Request = serde_json::from_reader(storage_request.as_reader()).unwrap();
+            assert_eq!(storage.method, "eth_getStorageAt");
+            assert_eq!(storage.params[2], "0xa");
+            storage_request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": storage.id,
+                        "result": "0x2a",
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+
+            let mut block_request = server.recv().unwrap();
+            let block: Request = serde_json::from_reader(block_request.as_reader()).unwrap();
+            assert_eq!(block.method, "eth_getBlockByHash");
+            assert_eq!(block.params[0], anchor_hash.to_string());
+            block_request
+                .respond(Response::from_string(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": block.id,
+                        "result": {
+                            "hash": anchor_hash,
+                            "parentHash": parent_hash,
+                            "sha3Uncles": B256::ZERO,
+                            "miner": Address::ZERO,
+                            "stateRoot": B256::ZERO,
+                            "transactionsRoot": B256::ZERO,
+                            "receiptsRoot": B256::ZERO,
+                            "logsBloom": format!("0x{}", "00".repeat(256)),
+                            "difficulty": "0x0",
+                            "number": "0xa",
+                            "gasLimit": "0x1c9c380",
+                            "gasUsed": "0x0",
+                            "timestamp": "0x1",
+                            "extraData": "0x",
+                            "mixHash": B256::ZERO,
+                            "nonce": "0x0000000000000000",
+                            "baseFeePerGas": "0x1",
+                            "transactions": [],
+                            "uncles": [],
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        });
+
+        let provider = get_http_provider(&endpoint);
+        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::mainnet());
+        let db = BlockchainDb::new(meta, None);
+        let (backend, handler) =
+            SharedBackend::new_with_anchor_by_number(provider, db, ForkBlock::new(10, anchor_hash))
+                .unwrap();
         tokio::spawn(handler);
 
         assert_eq!(backend.storage_ref(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
