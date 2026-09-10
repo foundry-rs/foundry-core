@@ -228,7 +228,14 @@ jobs:
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: test
         shell: bash
-        run: cargo nextest run --workspace --locked ${{ matrix.flags }}
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace --locked ${{ matrix.flags }} 2>&1 | tee "$RUNNER_TEMP/sfw-test.log"
+          # Socket can return success after an internal error without finishing tests.
+          if grep -F "Socket Firewall encountered an unexpected error" "$RUNNER_TEMP/sfw-test.log"; then
+            echo "::error::Socket Firewall failed before the test command completed"
+            exit 1
+          fi
 
   doctest:
     runs-on: ubuntu-latest
