@@ -25,19 +25,27 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     env:
       CI: "true"
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Set up pnpm
-        uses: tempoxyz/gh-actions/vendor/pnpm/action-setup@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
-        with:
-          version: 11.9.0
-          run_install: false
       - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: crates/wallets/src/wallet_browser/app/src/.nvmrc
+      - name: Secure Linux runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@5338a3746a2ac2ddd88cbede733c79f907aca3a0
+        with:
+          egress-policy: audit
+      - name: Set up pnpm
+        run: sfw npm install --global pnpm@11.9.0
+      - name: Restore pnpm cache
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: crates/wallets/src/wallet_browser/app/src/.nvmrc
@@ -45,15 +53,15 @@ jobs:
           cache-dependency-path: crates/wallets/src/wallet_browser/app/src/pnpm-lock.yaml
       - name: Install dependencies
         working-directory: crates/wallets/src/wallet_browser/app/src
-        run: pnpm install --frozen-lockfile
+        run: sfw pnpm install --frozen-lockfile
       - name: Check formatting
         working-directory: crates/wallets/src/wallet_browser/app/src
-        run: pnpm run fmt:check
+        run: sfw pnpm run fmt:check
       - name: Lint
         working-directory: crates/wallets/src/wallet_browser/app/src
-        run: pnpm run lint:check
+        run: sfw pnpm run lint:check
       - name: Build bundle
         working-directory: crates/wallets/src/wallet_browser/app/src
-        run: pnpm run build
+        run: sfw pnpm run build
       - name: Check generated assets
         run: git diff --exit-code -- crates/wallets/src/wallet_browser/app/assets
