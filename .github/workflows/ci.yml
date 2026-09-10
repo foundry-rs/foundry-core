@@ -227,6 +227,7 @@ jobs:
       - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: test
+        shell: bash
         run: cargo nextest run --workspace --locked ${{ matrix.flags }}
 
   doctest:
