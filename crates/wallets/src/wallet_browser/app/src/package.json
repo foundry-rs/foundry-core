@@ -11,7 +11,8 @@
     "fmt:check": "biome format .",
     "lint": "biome check . --write --unsafe",
     "lint:check": "biome check .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
   },
   "dependencies": {
     "accounts": "^0.18.1",
