@@ -58,6 +58,9 @@ jobs:
       - name: Lint
         working-directory: crates/wallets/src/wallet_browser/app/src
         run: sfw pnpm run lint:check
+      - name: Test
+        working-directory: crates/wallets/src/wallet_browser/app/src
+        run: sfw pnpm run test
       - name: Build bundle
         working-directory: crates/wallets/src/wallet_browser/app/src
         run: sfw pnpm run build
