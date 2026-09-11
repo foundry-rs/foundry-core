@@ -41,8 +41,6 @@ jobs:
           node-version-file: crates/wallets/src/wallet_browser/app/src/.nvmrc
       - name: Secure Linux runner
         uses: tempoxyz/gh-actions/actions/secure-runner@5338a3746a2ac2ddd88cbede733c79f907aca3a0
-        with:
-          egress-policy: audit
       - name: Set up pnpm
         run: sfw npm install --global pnpm@11.9.0
       - name: Restore pnpm cache

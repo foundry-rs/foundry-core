@@ -40,8 +40,6 @@ jobs:
           tool: nextest
       - name: Secure Linux runner
         uses: tempoxyz/gh-actions/actions/secure-runner@5338a3746a2ac2ddd88cbede733c79f907aca3a0
-        with:
-          egress-policy: audit
       - name: Verify Socket Cargo interception
         uses: ./.github/actions/check-socket-shim
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
