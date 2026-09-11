@@ -9,3 +9,10 @@ Provides a shared, caching database layer backed by a remote RPC provider, allow
 ## Features
 
 - `zstd`: Enables [zstd](https://github.com/gysber/zstd-rs) compression support.
+
+## Remote account loading
+
+For RPCs such as Tempo, where `eth_getBalance` returns a placeholder, use
+`BlockchainDbMeta::with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo)`
+to require authoritative account data without fallback. The policy is part of cache
+identity, so incompatible caches are discarded even in offline-start mode.
