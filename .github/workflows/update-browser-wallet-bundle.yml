@@ -40,7 +40,7 @@ jobs:
       SFW_UNKNOWN_HOST_ACTION: ignore
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - name: Record trusted workflow context
         id: context
         env:
