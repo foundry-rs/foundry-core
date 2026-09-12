@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -9,6 +10,8 @@
 static _Thread_local int reporting;
 
 __attribute__((constructor)) static void init(void) {
+    // Observe Cargo only; compiler subprocess diagnostics must stay unmodified.
+    unsetenv("DYLD_INSERT_LIBRARIES");
     char message[160];
     int n = snprintf(message, sizeof(message),
                      "IO_OBSERVER loaded pid=%d stdout_flags=%x stderr_flags=%x\n",

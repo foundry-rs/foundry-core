@@ -156,6 +156,12 @@ jobs:
               exit 1
             fi
           done < "$executables"
+      - name: Show compiler errors captured in Cargo JSON
+        if: failure()
+        run: |
+          if [ -f "$RUNNER_TEMP/touch-id-artifacts.json" ]; then
+            jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' "$RUNNER_TEMP/touch-id-artifacts.json"
+          fi
       - name: Repeat the affected Cargo JSON path for diagnostics
         if: always() && matrix.target == 'x86_64-apple-darwin' && matrix.toolchain.xcode == '15.0.1'
         run: |
