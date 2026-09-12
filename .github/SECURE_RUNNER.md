@@ -1,6 +1,6 @@
 # CI dependency screening
 
-Rust and browser-wallet jobs start with the pinned `secure-runner` action and
+Rust build and browser-wallet jobs start with the pinned `secure-runner` action and
 use Bash. Its startup hook refreshes package-manager interception after toolchain
 setup and cache restoration; commands do not need an explicit `sfw` prefix.
 
@@ -16,7 +16,10 @@ setup and cache restoration; commands do not need an explicit `sfw` prefix.
   retains the guard against Socket reporting an internal error with exit code zero.
 
 The existing Cargo cooldown workflow and `cooldown.toml` remain in place until
-Socket's equivalent policy enforcement is independently validated.
+Socket's equivalent policy enforcement is independently validated. That verifier
+keeps its unchanged standalone setup: wrapping its nested `cargo metadata` call
+produced truncated JSON in CI. Its metadata requests are outside Socket coverage;
+dependency installation and compilation in the downstream jobs remain wrapped.
 
 ## Compatibility and limits
 

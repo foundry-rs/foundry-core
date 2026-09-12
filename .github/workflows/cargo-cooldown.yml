@@ -5,11 +5,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
-
-defaults:
-  run:
-    shell: bash
 
 jobs:
   check:
@@ -17,12 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      NODE_OPTIONS: --no-network-family-autoselection
-      SFW_UNKNOWN_HOST_ACTION: ignore
       RUSTC_WRAPPER: ""
     steps:
-      - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
