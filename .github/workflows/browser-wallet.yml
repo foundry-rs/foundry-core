@@ -51,6 +51,14 @@ jobs:
         run: npm install --global pnpm@11.9.0 nanoid@3.3.19 # zizmor: ignore[adhoc-packages] Temporary pinned cooldown canary at the real manager-bootstrap path.
       - name: Record unexpected canary installation
         run: npm list --global nanoid --depth=0
+      - name: Record Socket cooldown decision
+        if: always()
+        run: |
+          if [[ -f "${SFW_JSON_REPORT_PATH:-}" ]]; then
+            jq '{fields: [paths(scalars) | map(tostring) | join(".")], decisions: [.. | objects | with_entries(select(.key == "purl" or .key == "name" or .key == "version" or .key == "type" or .key == "action" or .key == "severity" or .key == "alertType" or .key == "title")) | select(length > 0)], cooldown: [.. | strings | select(. == "recentlyPublished")]}' "$SFW_JSON_REPORT_PATH"
+          else
+            echo "::warning::No Socket report was produced; no cooldown evidence available"
+          fi
       - name: Restore pnpm cache
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
