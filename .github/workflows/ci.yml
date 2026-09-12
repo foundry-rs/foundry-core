@@ -130,6 +130,15 @@ jobs:
         with:
           key: ${{ matrix.toolchain.xcode }}
       - run: swiftc --version
+      - name: Observe Cargo output descriptors on macOS
+        run: |
+          diag_dir="$RUNNER_TEMP/cargo-io-diagnostics"
+          mkdir -p "$diag_dir/bin"
+          clang -std=c11 -Wall -Wextra -dynamiclib .github/scripts/cargo-io-observer.c -o "$diag_dir/observer.dylib"
+          clang -std=c11 -Wall -Wextra .github/scripts/cargo-io-probe.c -o "$diag_dir/bin/cargo"
+          echo "DIAG_REAL_CARGO=$(rustup which cargo)" >> "$GITHUB_ENV"
+          echo "DIAG_IO_LIBRARY=$diag_dir/observer.dylib" >> "$GITHUB_ENV"
+          echo "$diag_dir/bin" >> "$GITHUB_PATH"
       - name: compile and link touch-id test binaries
         run: |
           artifacts="$RUNNER_TEMP/touch-id-artifacts.json"
@@ -147,6 +156,22 @@ jobs:
               exit 1
             fi
           done < "$executables"
+      - name: Repeat the affected Cargo JSON path for diagnostics
+        if: always() && matrix.target == 'x86_64-apple-darwin' && matrix.toolchain.xcode == '15.0.1'
+        run: |
+          status=0
+          for attempt in 1 2 3; do
+            echo "IO_DIAGNOSTIC attempt=$attempt"
+            if cargo test -p foundry-wallets --features touch-id --target x86_64-apple-darwin \
+              --locked --no-run --message-format=json > "$RUNNER_TEMP/touch-id-repeat-$attempt.json"; then
+              echo "IO_DIAGNOSTIC attempt=$attempt status=0"
+            else
+              code=$?
+              echo "IO_DIAGNOSTIC attempt=$attempt status=$code"
+              status=$code
+            fi
+          done
+          exit "$status"
 
   feature-checks:
     runs-on: ubuntu-latest
@@ -229,6 +254,9 @@ jobs:
           fallback: none
       - name: test
         run: cargo nextest run --workspace --locked ${{ matrix.flags }}
+      - name: Compare registry addresses after the package operation
+        if: always() && matrix.flags == '--all-features' && runner.os != 'Windows'
+        run: node .github/scripts/registry-network-diagnostics.cjs
 
   doctest:
     runs-on: ubuntu-latest
