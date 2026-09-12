@@ -40,4 +40,6 @@ jobs:
       # shared launcher to fail and stop the next command, without a local grep.
       # This tests the guard deterministically, not a live Socket outage.
       - name: Verify shared guard rejects simulated internal failures
-        run: node --test actions/secure-runner/bash-hook.test.js
+        # Each fixture installs its own BASH_ENV. Do not inherit the outer hook
+        # during the suite's native Windows Bash discovery. Real CI keeps it.
+        run: BASH_ENV= node --test actions/secure-runner/bash-hook.test.js
