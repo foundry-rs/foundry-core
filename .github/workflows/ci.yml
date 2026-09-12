@@ -32,7 +32,7 @@ jobs:
       SFW_UNKNOWN_HOST_ACTION: ignore
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -60,7 +60,7 @@ jobs:
       SFW_CUSTOM_REGISTRIES: ${{ matrix.os == 'ubuntu-latest' && 'wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds' || 'bypass:binaries.soliditylang.org,bypass:raw.githubusercontent.com' }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -106,7 +106,7 @@ jobs:
           - { xcode: "latest", os: "macos-latest" }
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -160,7 +160,7 @@ jobs:
       SFW_CUSTOM_REGISTRIES: wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -203,7 +203,7 @@ jobs:
       CARGO_HTTP_CHECK_REVOKE: ${{ matrix.os == 'windows-latest' && 'false' || 'true' }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -221,14 +221,7 @@ jobs:
           checksum: true
           fallback: none
       - name: test
-        run: |
-          set -o pipefail
-          cargo nextest run --workspace --locked ${{ matrix.flags }} 2>&1 | tee "$RUNNER_TEMP/sfw-test.log"
-          # Socket has reported internal errors with a zero exit status.
-          if grep -F "Socket Firewall encountered an unexpected error" "$RUNNER_TEMP/sfw-test.log"; then
-            echo "::error::Socket Firewall failed before the test command completed"
-            exit 1
-          fi
+        run: cargo nextest run --workspace --locked ${{ matrix.flags }}
 
   doctest:
     runs-on: ubuntu-latest
@@ -242,7 +235,7 @@ jobs:
       SFW_CUSTOM_REGISTRIES: wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -267,7 +260,7 @@ jobs:
       SFW_CUSTOM_REGISTRIES: wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -293,7 +286,7 @@ jobs:
       SFW_UNKNOWN_HOST_ACTION: ignore
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -312,7 +305,7 @@ jobs:
       SFW_UNKNOWN_HOST_ACTION: ignore
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
