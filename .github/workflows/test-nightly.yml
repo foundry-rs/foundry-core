@@ -58,6 +58,9 @@ jobs:
             echo "::error::Socket Firewall failed before the test command completed"
             exit 1
           fi
+      - name: Record Socket cooldown decision
+        if: always()
+        run: node .github/scripts/socket-report.cjs
 
   issue:
     name: Open an issue
