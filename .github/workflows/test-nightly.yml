@@ -11,6 +11,10 @@ concurrency:
   group: tests-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
@@ -20,6 +24,7 @@ jobs:
   cargo-cooldown:
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/cargo-cooldown.yml
 
   test:
@@ -29,28 +34,43 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
+      SFW_CUSTOM_REGISTRIES: wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds,wrap:api.etherscan.io,wrap:eth.blockscout.com
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
-        with:
-          tool: nextest
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      # Keep the cache daemon outside Socket's per-command proxy environment.
+      - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - name: Install cargo-nextest
+        run: cargo install --locked --version 0.9.143 cargo-nextest
       - name: Test
         env:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
-        run: cargo nextest run --workspace --all-features --locked --no-fail-fast --ignore-default-filter
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace --all-features --locked --no-fail-fast --ignore-default-filter 2>&1 | tee "$RUNNER_TEMP/sfw-test.log"
+          # Socket has reported internal errors with a zero exit status.
+          if grep -F "Socket Firewall encountered an unexpected error" "$RUNNER_TEMP/sfw-test.log"; then
+            echo "::error::Socket Firewall failed before the test command completed"
+            exit 1
+          fi
 
   issue:
     name: Open an issue
     runs-on: ubuntu-latest
     needs: [test]
-    if: failure()
+    if: failure() && github.ref == 'refs/heads/main'
     permissions:
       contents: read
       issues: write

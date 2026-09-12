@@ -11,6 +11,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
@@ -20,6 +24,7 @@ jobs:
   cargo-cooldown:
     permissions:
       contents: read
+      id-token: write
     uses: ./.github/workflows/cargo-cooldown.yml
 
   rustfmt:
@@ -27,7 +32,13 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -35,7 +46,7 @@ jobs:
         with:
           toolchain: nightly
           components: rustfmt
-      - run: cargo fmt --all --check
+      - run: cargo +nightly fmt --all --check
 
   clippy:
     needs: cargo-cooldown
@@ -43,13 +54,20 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
         # macOS covers the target-gated `touch-id` code, which the Linux leg
         # never compiles.
         os: ["ubuntu-latest", "macos-latest"]
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
+      SFW_CUSTOM_REGISTRIES: ${{ matrix.os == 'ubuntu-latest' && 'wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds' || 'bypass:binaries.soliditylang.org,bypass:raw.githubusercontent.com' }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -58,8 +76,10 @@ jobs:
           toolchain: nightly
           components: clippy
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      # Keep the cache daemon outside Socket's per-command proxy environment.
+      - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
-      - run: cargo clippy --workspace --all-targets --all-features --locked
+      - run: cargo +nightly clippy --workspace --all-targets --all-features --locked
         env:
           RUSTFLAGS: -Dwarnings
 
@@ -80,7 +100,10 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     strategy:
       fail-fast: false
@@ -90,6 +113,8 @@ jobs:
           - { xcode: "15.0.1", os: "macos-14" }
           - { xcode: "latest", os: "macos-latest" }
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -107,6 +132,8 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      # Keep the cache daemon outside Socket's per-command proxy environment.
+      - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           key: ${{ matrix.toolchain.xcode }}
@@ -135,18 +162,26 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
+      SFW_CUSTOM_REGISTRIES: wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
-        with:
-          tool: cargo-hack
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      # Keep the cache daemon outside Socket's per-command proxy environment.
+      - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - name: Install cargo-hack
+        run: cargo install --locked --version 0.6.45 cargo-hack
       - name: cargo hack
         run: cargo hack check --feature-powerset --depth 1 --locked
 
@@ -157,6 +192,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -169,21 +205,36 @@ jobs:
           # Skip because some features have higher MSRV.
           - rust: "1.95" # MSRV
             flags: "--all-features"
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
+      SFW_CUSTOM_REGISTRIES: ${{ matrix.os == 'ubuntu-latest' && 'wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds' || 'bypass:binaries.soliditylang.org,bypass:raw.githubusercontent.com' }},wrap:api.etherscan.io,wrap:eth.blockscout.com
+      # Socket proxy certificates lack revocation endpoints; retain TLS validation.
+      CARGO_HTTP_CHECK_REVOKE: ${{ matrix.os == 'windows-latest' && 'false' || 'true' }}
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: ${{ matrix.rust }}
-      - name: Install nextest
-        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
-        with:
-          tool: nextest
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      # Keep the cache daemon outside Socket's per-command proxy environment.
+      - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - name: Install cargo-nextest
+        run: cargo install --locked --version 0.9.143 cargo-nextest
       - name: test
-        run: cargo nextest run --workspace --locked ${{ matrix.flags }}
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace --locked ${{ matrix.flags }} 2>&1 | tee "$RUNNER_TEMP/sfw-test.log"
+          # Socket has reported internal errors with a zero exit status.
+          if grep -F "Socket Firewall encountered an unexpected error" "$RUNNER_TEMP/sfw-test.log"; then
+            echo "::error::Socket Firewall failed before the test command completed"
+            exit 1
+          fi
 
   doctest:
     needs: cargo-cooldown
@@ -191,7 +242,14 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
+      SFW_CUSTOM_REGISTRIES: wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -199,6 +257,8 @@ jobs:
         with:
           toolchain: stable
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      # Keep the cache daemon outside Socket's per-command proxy environment.
+      - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - run: cargo test --workspace --doc --all-features --locked
 
@@ -208,7 +268,14 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
+      SFW_CUSTOM_REGISTRIES: wrap:binaries.soliditylang.org,wrap:raw.githubusercontent.com/nikitastupin/solc,wrap:raw.githubusercontent.com/alloy-rs/solc-builds
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -216,6 +283,8 @@ jobs:
         with:
           toolchain: nightly
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      # Keep the cache daemon outside Socket's per-command proxy environment.
+      - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - run: cargo doc --workspace --all-features --no-deps --document-private-items --locked
         env:
@@ -226,7 +295,13 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -234,17 +309,28 @@ jobs:
 
   deny:
     needs: cargo-cooldown
-    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@3a37d720685503bb084ba723ee981a6c1b120360 # main
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
-    secrets:
-      STEP_SECURITY_API_KEY: ${{ secrets.STEP_SECURITY_API_KEY }}
-    with:
-      run-clippy: false
-      run-fmt: false
-      run-typos: false
-      deny-rust-toolchain: nightly
-      deny-flags: --all-features --locked
+      id-token: write
+    env:
+      RUSTC_WRAPPER: ""
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+        with:
+          toolchain: nightly
+      - name: Install cargo-deny
+        run: cargo install --locked --version 0.20.2 cargo-deny
+      - run: cargo deny --all-features --locked check all
 
   codeql:
     name: Analyze (${{ matrix.language }})
