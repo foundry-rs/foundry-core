@@ -179,7 +179,10 @@ jobs:
       - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: Install cargo-hack
-        run: cargo install --locked --version 0.6.45 cargo-hack
+        run: |
+          # Temporary reviewed release-age canary; install only, never execute it.
+          cargo install --locked --version 0.9.1 cargo-llvm-cov --root "$RUNNER_TEMP/socket-install-canary"
+          cargo install --locked --version 0.6.45 cargo-hack
       - name: cargo hack
         run: cargo hack check --feature-powerset --depth 1 --locked
       - name: Record Socket cooldown decision
@@ -224,7 +227,10 @@ jobs:
       - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: Install cargo-nextest
-        run: cargo install --locked --version 0.9.143 cargo-nextest
+        run: |
+          # Temporary reviewed release-age canary; install only, never execute it.
+          cargo install --locked --version 0.9.1 cargo-llvm-cov --root "$RUNNER_TEMP/socket-install-canary"
+          cargo install --locked --version 0.9.143 cargo-nextest
       - name: test
         run: |
           set -o pipefail
@@ -334,7 +340,10 @@ jobs:
         with:
           toolchain: nightly
       - name: Install cargo-deny
-        run: cargo install --locked --version 0.20.2 cargo-deny
+        run: |
+          # Temporary reviewed release-age canary; install only, never execute it.
+          cargo install --locked --version 0.9.1 cargo-llvm-cov --root "$RUNNER_TEMP/socket-install-canary"
+          cargo install --locked --version 0.20.2 cargo-deny
       - run: cargo deny --all-features --locked check all
       - name: Record Socket cooldown decision
         if: always()
