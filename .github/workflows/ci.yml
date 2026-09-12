@@ -21,11 +21,6 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
-  cargo-cooldown:
-    permissions:
-      contents: read
-    uses: ./.github/workflows/cargo-cooldown.yml
-
   rustfmt:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -45,10 +40,9 @@ jobs:
         with:
           toolchain: nightly
           components: rustfmt
-      - run: cargo +nightly fmt --all --check
+      - run: cargo fmt --all --check
 
   clippy:
-    needs: cargo-cooldown
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
@@ -78,7 +72,7 @@ jobs:
       # Keep the cache daemon outside Socket's per-command proxy environment.
       - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
-      - run: cargo +nightly clippy --workspace --all-targets --all-features --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked
         env:
           RUSTFLAGS: -Dwarnings
 
@@ -94,7 +88,6 @@ jobs:
   # If the runner image drops that Xcode, the pin step fails loudly so the
   # floor is re-evaluated instead of silently sliding forward.
   touch-id-link:
-    needs: cargo-cooldown
     runs-on: ${{ matrix.toolchain.os }}
     timeout-minutes: 30
     permissions:
@@ -156,7 +149,6 @@ jobs:
           done < "$executables"
 
   feature-checks:
-    needs: cargo-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -185,7 +177,6 @@ jobs:
         run: cargo hack check --feature-powerset --depth 1 --locked
 
   test:
-    needs: cargo-cooldown
     name: test ${{ matrix.rust }} ${{ matrix.flags }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -236,7 +227,6 @@ jobs:
           fi
 
   doctest:
-    needs: cargo-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -262,7 +252,6 @@ jobs:
       - run: cargo test --workspace --doc --all-features --locked
 
   docs:
-    needs: cargo-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -307,7 +296,6 @@ jobs:
       - uses: tempoxyz/gh-actions/actions/typos@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
 
   deny:
-    needs: cargo-cooldown
     name: cargo deny check
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -377,7 +365,6 @@ jobs:
     if: always()
     permissions: {}
     needs:
-      - cargo-cooldown
       - rustfmt
       - clippy
       - touch-id-link

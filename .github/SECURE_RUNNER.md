@@ -15,11 +15,11 @@ setup and cache restoration; commands do not need an explicit `sfw` prefix.
 - Workspace dependency fetches occur through wrapped Cargo commands. Nextest
   retains the guard against Socket reporting an internal error with exit code zero.
 
-The existing Cargo cooldown workflow and `cooldown.toml` remain in place until
-Socket's equivalent policy enforcement is independently validated. That verifier
-keeps its unchanged standalone setup: wrapping its nested `cargo metadata` call
-produced truncated JSON in CI. Its metadata requests are outside Socket coverage;
-dependency installation and compilation in the downstream jobs remain wrapped.
+The standalone Cargo cooldown workflow and `cooldown.toml` are removed. Crate-age
+thresholds and exceptions must be enforced by the active Socket organization
+policy; successful installs alone do not verify equivalent cooldown enforcement.
+The nightly toolchain setup remains responsible for selecting nightly for fmt
+and Clippy, without redundant command-line toolchain selectors.
 
 ## Compatibility and limits
 
@@ -30,9 +30,9 @@ revocation settings. On macOS/Windows the raw GitHub exception covers the entire
 host; certificate validation remains enabled.
 
 This is Bash command routing, not runner-wide interception. Rust/Node toolchain
-downloads, sccache and typos release binaries, the checksum-verified cooldown
-binary, CodeQL tooling, and the separate workflow-validation workflow are not
-screened by these Cargo/npm wrappers. Their existing installation/integrity
+downloads, sccache and typos release binaries, CodeQL tooling, and the separate
+workflow-validation workflow are not screened by these Cargo/npm wrappers. Their
+existing installation/integrity
 mechanisms remain unchanged. Restored dependencies are not rechecked by network
 interception, and actions using other shells or direct executable paths may not
 use the hook. Fork PRs without OIDC use Socket Free, without organization policy.

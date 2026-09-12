@@ -21,13 +21,7 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
-  cargo-cooldown:
-    permissions:
-      contents: read
-    uses: ./.github/workflows/cargo-cooldown.yml
-
   test:
-    needs: cargo-cooldown
     name: nightly tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
