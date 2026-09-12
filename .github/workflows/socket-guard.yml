@@ -1,0 +1,43 @@
+name: Socket guard / Regression
+
+permissions: {}
+
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  guard:
+    name: Guard regression (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
+      - name: Check out regression tests at the exact action revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tempoxyz/gh-actions
+          ref: 6e62935eb0bfeac202d19c425f742dc1dcd88f5d
+          persist-credentials: false
+      # Fake Socket emits the known error and exits zero. The suite requires the
+      # shared launcher to fail and stop the next command, without a local grep.
+      # This tests the guard deterministically, not a live Socket outage.
+      - name: Verify shared guard rejects simulated internal failures
+        run: node --test actions/secure-runner/bash-hook.test.js
