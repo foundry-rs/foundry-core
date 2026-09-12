@@ -3,12 +3,13 @@ name: Browser wallet / Update bundle
 permissions: {}
 
 on:
+  workflow_dispatch: # Temporary read-only validation of the actual build steps.
   workflow_run: # zizmor: ignore[dangerous-triggers] Both jobs validate the same-repo Dependabot PR and exact head SHA; build has no write token, commit only copies validated assets.
     workflows: [Browser wallet / Validate]
     types: [completed]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -19,12 +20,13 @@ jobs:
   build:
     name: Build browser wallet bundle
     if: >-
+      github.event_name == 'workflow_dispatch' || (
       (github.event.workflow_run.conclusion == 'success' ||
        github.event.workflow_run.conclusion == 'failure') &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.actor.login == 'dependabot[bot]' &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
-      startsWith(github.event.workflow_run.head_branch, 'dependabot/npm_and_yarn/crates/wallets/src/wallet_browser/app/src/npm-weekly-')
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/npm_and_yarn/crates/wallets/src/wallet_browser/app/src/npm-weekly-'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -42,6 +44,7 @@ jobs:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@7a9d1c1bf11e4804fc617ad0c14ec0a3699599fd
       - name: Record trusted workflow context
+        if: github.event_name == 'workflow_run'
         id: context
         env:
           GH_TOKEN: ${{ github.token }}
@@ -81,11 +84,12 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Validate changed paths
+        if: github.event_name == 'workflow_run'
         env:
           BASE_SHA: ${{ steps.context.outputs.base-sha }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -169,6 +173,8 @@ jobs:
 
   commit:
     name: Commit browser wallet bundle
+    # Manual validation must never enter a job with repository write permission.
+    if: github.event_name == 'workflow_run'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
