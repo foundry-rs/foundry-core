@@ -8,7 +8,7 @@ if (!reportPath || !fs.existsSync(reportPath)) {
 const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
 const fields = [];
 const decisions = [];
-const allowed = new Set(['purl', 'name', 'version', 'type', 'action', 'severity', 'alertType', 'title']);
+const allowed = new Set(['purl', 'purlString', 'name', 'version', 'type', 'action', 'severity', 'alertType', 'title', 'publishedAt', 'checkedAt', 'thresholdDays']);
 function visit(value, path = []) {
   if (value && typeof value === 'object') {
     for (const [key, child] of Object.entries(value)) visit(child, [...path, key]);

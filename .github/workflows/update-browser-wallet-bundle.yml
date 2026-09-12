@@ -116,8 +116,8 @@ jobs:
       - name: Set up pnpm
         env:
           npm_config_cache: ${{ runner.temp }}/socket-negative-npm
-        run: npm install --global pnpm@11.9.0 nanoid@3.3.19 # zizmor: ignore[adhoc-packages] Temporary pinned cooldown canary at the real manager-bootstrap path.
-      - name: Record unexpected canary installation
+        run: npm install --global pnpm@11.9.0 nanoid@3.3.18 # zizmor: ignore[adhoc-packages] Temporary cooled control at the real manager-bootstrap path.
+      - name: Record cooled control installation
         run: npm list --global nanoid --depth=0
       - name: Record Socket cooldown decision
         if: always()
