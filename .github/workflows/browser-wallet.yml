@@ -41,13 +41,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Trusted manager bootstrap; install application dependencies through Socket below.
       - name: Set up pnpm
         uses: tempoxyz/gh-actions/vendor/pnpm/action-setup@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           version: 11.9.0
           run_install: false
-      - name: Set up Node and restore pnpm cache
+      - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: crates/wallets/src/wallet_browser/app/src/.nvmrc

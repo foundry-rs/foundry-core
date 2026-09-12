@@ -214,7 +214,6 @@ jobs:
       # Keep the cache daemon outside Socket's per-command proxy environment.
       - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
-      # Trusted prebuilt tool; Socket still screens workspace dependency fetches.
       - name: Install nextest
         uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
