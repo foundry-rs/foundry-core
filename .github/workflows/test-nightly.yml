@@ -46,10 +46,7 @@ jobs:
       - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: Install cargo-nextest
-        run: |
-          # Temporary reviewed release-age canary; install only, never execute it.
-          cargo install --locked --version 0.9.1 cargo-llvm-cov --root "$RUNNER_TEMP/socket-install-canary"
-          cargo install --locked --version 0.9.143 cargo-nextest
+        run: cargo install --locked --version 0.9.143 cargo-nextest
       - name: Test
         env:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
@@ -61,9 +58,6 @@ jobs:
             echo "::error::Socket Firewall failed before the test command completed"
             exit 1
           fi
-      - name: Record Socket cooldown decision
-        if: always()
-        run: node .github/scripts/socket-report.cjs
 
   issue:
     name: Open an issue

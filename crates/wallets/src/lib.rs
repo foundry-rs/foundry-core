@@ -8,9 +8,6 @@
 #[macro_use]
 extern crate tracing;
 
-// Temporary cooldown canary; compile-time reference only, never executed.
-use iddqd as _;
-
 // The RLP traits are consumed by the browser module only when both features
 // are enabled; retain the dependency for Tempo-only builds as well.
 #[cfg(feature = "tempo")]

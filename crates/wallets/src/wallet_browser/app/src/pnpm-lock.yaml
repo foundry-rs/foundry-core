@@ -39,9 +39,6 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.1.1
         version: 6.1.1(vite@8.2.2(@types/node@26.4.0)(yaml@2.9.0))
-      nanoid:
-        specifier: 3.3.18
-        version: 3.3.18
       typescript:
         specifier: ~7.0.2
         version: 7.0.2

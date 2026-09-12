@@ -15,8 +15,6 @@ exclude = ["src/wallet_browser/app/src/**"]
 workspace = true
 
 [dependencies]
-# Temporary cooldown canary: reviewed, unused, registry-published 2026-09-10.
-iddqd = "=0.5.0"
 alloy-primitives.workspace = true
 alloy-signer = { workspace = true, features = ["eip712"] }
 alloy-signer-local = { workspace = true, features = ["mnemonic", "keystore"] }
