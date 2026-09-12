@@ -320,8 +320,13 @@ jobs:
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: nightly
+      # Trusted prebuilt tool; run the dependency audit through Socket on the host.
       - name: Install cargo-deny
-        run: cargo install --locked --version 0.20.2 cargo-deny
+        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+        with:
+          tool: cargo-deny@0.20.2
+          checksum: true
+          fallback: none
       - run: cargo deny --all-features --locked check all
 
   codeql:
