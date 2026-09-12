@@ -133,7 +133,10 @@ jobs:
         working-directory: crates/wallets/src/wallet_browser/app/src
         env:
           CI: true
-        run: pnpm install --frozen-lockfile --store-dir "$RUNNER_TEMP/socket-negative-pnpm"
+        run: |
+          # Keep setup-node's post-cache path valid while the probe uses a fresh store.
+          mkdir -p "$(pnpm store path --silent)"
+          pnpm install --frozen-lockfile --store-dir "$RUNNER_TEMP/socket-negative-pnpm"
       - name: Record pnpm Socket cooldown decision
         if: always()
         run: node .github/scripts/socket-report.cjs
