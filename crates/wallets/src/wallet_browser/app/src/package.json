@@ -27,7 +27,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^6.1.1",
-    "nanoid": "3.3.19",
+    "nanoid": "3.3.18",
     "typescript": "~7.0.2",
     "vite": "^8.2.2"
   }
