@@ -213,6 +213,14 @@ jobs:
       # Keep the cache daemon outside Socket's per-command proxy environment.
       - run: sccache --start-server
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - name: Select Cargo's bin directory for the Windows installer
+        if: runner.os == 'Windows'
+        run: |
+          # Taiki installs beside the first cargo on PATH; avoid Socket's shim
+          # directory. The next Bash step refreshes Socket interception again.
+          cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
+          test -x "$cargo_bin/cargo.exe"
+          cygpath -w "$cargo_bin" >> "$GITHUB_PATH"
       - name: Install nextest
         uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
