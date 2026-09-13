@@ -11,6 +11,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     name: Build browser wallet bundle
@@ -25,12 +29,18 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
       pull-requests: read
     outputs:
       head-ref: ${{ steps.context.outputs.head-ref }}
       head-sha: ${{ steps.context.outputs.head-sha }}
       pr-number: ${{ steps.context.outputs.pr-number }}
+    env:
+      NODE_OPTIONS: --no-network-family-autoselection
+      SFW_UNKNOWN_HOST_ACTION: ignore
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@6e62935eb0bfeac202d19c425f742dc1dcd88f5d
       - name: Record trusted workflow context
         id: context
         env:
@@ -100,7 +110,6 @@ jobs:
         with:
           version: 11.9.0
           run_install: false
-
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
