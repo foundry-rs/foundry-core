@@ -52,12 +52,10 @@ jobs:
           tool: nextest@0.9.140
           checksum: true
           fallback: none
-      - name: Fetch nextest dependencies through Socket
-        run: bash .github/scripts/nextest-offline.sh fetch
-      - name: Test (offline Cargo)
+      - name: Test
         env:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
-        run: bash .github/scripts/nextest-offline.sh test --all-features --no-fail-fast --ignore-default-filter
+        run: cargo nextest run --workspace --all-features --locked --no-fail-fast --ignore-default-filter
 
   issue:
     name: Open an issue
