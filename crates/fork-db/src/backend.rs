@@ -1,7 +1,9 @@
 //! Smart caching and deduplication of requests when using a forking provider.
 
 use crate::{
-    cache::{BlockchainDb, FlushJsonBlockCacheDB, ForkBlockEnv, MemDb, StorageInfo},
+    cache::{
+        AccountFetchPolicy, BlockchainDb, FlushJsonBlockCacheDB, ForkBlockEnv, MemDb, StorageInfo,
+    },
     error::{DatabaseError, DatabaseResult},
 };
 use alloy_chains::Chain;
@@ -206,6 +208,8 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     block_hash_via_evm: Option<bool>,
     /// The mode for fetching account data
     account_fetch_mode: Arc<AtomicU8>,
+    /// Account-loading policy fixed when this backend is created.
+    account_fetch_policy: AccountFetchPolicy,
 }
 
 impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
@@ -225,9 +229,11 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 None
             }
         });
+        let account_fetch_policy = db.meta().read().account_fetch_policy;
         Self {
             provider,
             db,
+            account_fetch_policy,
             pending_requests: Default::default(),
             account_requests: Default::default(),
             storage_requests: Default::default(),
@@ -354,7 +360,16 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         let provider = self.provider.clone();
         let block_id = self.block_id.unwrap_or_default();
         let mode = Arc::clone(&self.account_fetch_mode);
+        let policy = self.account_fetch_policy;
         let fut = async move {
+            if policy == AccountFetchPolicy::RequireAccountInfo {
+                return provider
+                    .get_account_info(address)
+                    .block_id(block_id)
+                    .await
+                    .map(|info| (info.balance, info.nonce, info.code))
+                    .wrap_err("fork account policy requires eth_getAccountInfo");
+            }
             // depending on the tracked mode we can dispatch requests.
             let initial_mode = mode.load(Ordering::Relaxed);
             match initial_mode {
@@ -1291,7 +1306,7 @@ mod tests {
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_client::ClientBuilder;
     use serde::Deserialize;
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, sync::atomic::AtomicBool, time::Duration};
     use tiny_http::{Response, Server};
 
     pub fn get_http_provider(endpoint: &str) -> impl Provider<AnyNetwork> + Clone + use<> {
@@ -1303,6 +1318,108 @@ mod tests {
     fn exact_meta(endpoint: &str, anchor_hash: B256) -> BlockchainDbMeta<BlockEnv> {
         BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string())
             .with_fork_identity(anchor_hash, B256::with_last_byte(1))
+    }
+
+    /// Serves deliberately inconsistent balances from the two account RPC paths.
+    fn account_policy_server(
+        reject_account_info: bool,
+    ) -> (String, Arc<AtomicBool>, std::thread::JoinHandle<Vec<serde_json::Value>>) {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", server.server_addr());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            while !stopped.load(Ordering::Relaxed) {
+                if let Some(mut request) = server.recv_timeout(Duration::from_millis(20)).unwrap() {
+                    let rpc: serde_json::Value =
+                        serde_json::from_reader(request.as_reader()).unwrap();
+                    let mut response = serde_json::json!({"jsonrpc": "2.0", "id": rpc["id"]});
+                    if rpc["method"] == "eth_getAccountInfo" && reject_account_info {
+                        response["error"] =
+                            serde_json::json!({"code": -32601, "message": "unsupported"});
+                    } else {
+                        response["result"] = match rpc["method"].as_str().unwrap() {
+                            "eth_getAccountInfo" => serde_json::json!({
+                                "balance": "0x2a", "nonce": "0x7", "code": "0x6000",
+                            }),
+                            "eth_getBalance" => serde_json::json!("0xffff"),
+                            "eth_getTransactionCount" => serde_json::json!("0x7"),
+                            "eth_getCode" => serde_json::json!("0x6000"),
+                            method => panic!("unexpected method {method}"),
+                        };
+                    }
+                    requests.push(rpc);
+                    request.respond(Response::from_string(response.to_string())).unwrap();
+                }
+            }
+            requests
+        });
+        (endpoint, stop, handle)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn required_account_info_uses_authoritative_balance_and_pinned_block() {
+        let (endpoint, stop, server) = account_policy_server(false);
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint)
+            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let db = BlockchainDb::new(meta, None);
+        let hash = B256::with_last_byte(1);
+        let backend = SharedBackend::spawn_backend(Arc::new(provider), db, Some(hash.into())).await;
+        let address = Address::with_last_byte(1);
+        let account = backend.basic_ref(address).unwrap().unwrap();
+        assert_eq!(account.balance, U256::from(42));
+        assert_eq!(account.nonce, 7);
+        assert_eq!(account.code.unwrap().original_bytes(), Bytes::from_static(&[0x60, 0]));
+
+        backend.set_pinned_block(123).unwrap();
+        let clone = backend.clone();
+        assert_eq!(
+            clone.basic_ref(Address::with_last_byte(2)).unwrap().unwrap().balance,
+            U256::from(42)
+        );
+        assert_eq!(backend.basic_ref(address).unwrap().unwrap().balance, U256::from(42));
+        stop.store(true, Ordering::Relaxed);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|r| r["method"] == "eth_getAccountInfo"));
+        assert_eq!(requests[0]["params"], serde_json::json!([address, BlockId::from(hash)]));
+        assert_eq!(requests[1]["params"][1], "0x7b");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn required_account_info_never_falls_back_after_rpc_errors() {
+        let (endpoint, stop, server) = account_policy_server(true);
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint)
+            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let db = BlockchainDb::new(meta, None);
+        let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
+        for address in [Address::with_last_byte(1), Address::with_last_byte(2)] {
+            assert!(backend.basic_ref(address).is_err());
+        }
+        assert!(db.accounts().read().is_empty());
+        stop.store(true, Ordering::Relaxed);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|r| r["method"] == "eth_getAccountInfo"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_account_fetch_still_supports_separate_requests() {
+        let (endpoint, stop, server) = account_policy_server(true);
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
+        let db = BlockchainDb::new(meta, None);
+        let backend = SharedBackend::spawn_backend(Arc::new(provider), db, None).await;
+        assert_eq!(
+            backend.basic_ref(Address::with_last_byte(1)).unwrap().unwrap().balance,
+            U256::from(65535)
+        );
+        stop.store(true, Ordering::Relaxed);
+        let requests = server.join().unwrap();
+        assert!(requests.iter().any(|r| r["method"] == "eth_getBalance"));
     }
 
     const ENDPOINT: Option<&str> = option_env!("ETH_RPC_URL");

@@ -32,6 +32,20 @@ pub type StorageInfo = StorageKeyMap<U256>;
 /// Zstd frame magic number: `0x28B52FFD` (little-endian).
 const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
+/// Policy for loading remote account balances, nonces, and code.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountFetchPolicy {
+    /// Race `eth_getAccountInfo` against separate balance, nonce, and code requests.
+    #[default]
+    Auto,
+    /// Require `eth_getAccountInfo`, without falling back to separate requests.
+    ///
+    /// Use this when `eth_getBalance` does not expose the balance used by execution,
+    /// such as Tempo RPCs that return a placeholder native balance.
+    RequireAccountInfo,
+}
+
 /// A shareable Block database
 #[derive(Clone, Debug)]
 pub struct BlockchainDb<B = BlockEnv> {
@@ -58,7 +72,8 @@ impl<B: ForkBlockEnv> BlockchainDb<B> {
         Self::new_db(meta, cache_path, false)
     }
 
-    /// Creates a new instance of the [BlockchainDb] and skips check when comparing meta
+    /// Creates a new instance of the [BlockchainDb] without comparing block metadata.
+    /// Account-fetch policies must still match, preventing reuse of incompatible account data.
     /// This is useful for offline-start mode when we don't want to fetch metadata of `block`.
     ///
     /// if a `cache_path` is provided it attempts to load a previously stored [JsonBlockCacheData]
@@ -80,6 +95,10 @@ impl<B: ForkBlockEnv> BlockchainDb<B> {
             .as_ref()
             .and_then(|p| {
                 JsonBlockCacheDB::load(p).ok().filter(|cache| {
+                    // Account-loading semantics must match even when block checks are skipped.
+                    if cache.meta().read().account_fetch_policy != meta.account_fetch_policy {
+                        return false;
+                    }
                     if skip_check {
                         return true;
                     }
@@ -156,6 +175,8 @@ pub struct BlockchainDbMeta<B> {
     pub fork_hash: Option<B256>,
     /// Opaque identity of the RPC source and its authentication context.
     pub source_id: Option<B256>,
+    /// Account-loading semantics used to populate this cache.
+    pub account_fetch_policy: AccountFetchPolicy,
 }
 
 impl<B> BlockchainDbMeta<B> {
@@ -172,7 +193,14 @@ impl<B> BlockchainDbMeta<B> {
             hosts: BTreeSet::from([host]),
             fork_hash: None,
             source_id: None,
+            account_fetch_policy: AccountFetchPolicy::Auto,
         }
+    }
+
+    /// Sets the remote account-loading policy and binds cached data to that policy.
+    pub const fn with_account_fetch_policy(mut self, policy: AccountFetchPolicy) -> Self {
+        self.account_fetch_policy = policy;
+        self
     }
 
     /// Infers the host from the provided url and adds it to the set of hosts
@@ -212,6 +240,7 @@ impl<B: PartialEq> PartialEq for BlockchainDbMeta<B> {
         self.block_env == other.block_env
             && self.fork_hash == other.fork_hash
             && self.source_id == other.source_id
+            && self.account_fetch_policy == other.account_fetch_policy
     }
 }
 
@@ -219,7 +248,7 @@ impl<B: Serialize> Serialize for BlockchainDbMeta<B> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
 
-        let field_count = 2
+        let field_count = 3
             + usize::from(self.chain.is_some())
             + usize::from(self.fork_hash.is_some())
             + usize::from(self.source_id.is_some());
@@ -229,6 +258,7 @@ impl<B: Serialize> Serialize for BlockchainDbMeta<B> {
         }
         s.serialize_field("block_env", &self.block_env)?;
         s.serialize_field("hosts", &self.hosts)?;
+        s.serialize_field("account_fetch_policy", &self.account_fetch_policy)?;
         if let Some(fork_hash) = self.fork_hash {
             s.serialize_field("fork_hash", &fork_hash)?;
         }
@@ -298,11 +328,20 @@ impl<'de, B: DeserializeOwned + Default + Serialize> Deserialize<'de> for Blockc
             fork_hash: Option<B256>,
             #[serde(default)]
             source_id: Option<B256>,
+            #[serde(default)]
+            account_fetch_policy: AccountFetchPolicy,
         }
 
-        let Meta { chain, block_env, hosts, fork_hash, source_id } =
+        let Meta { chain, block_env, hosts, fork_hash, source_id, account_fetch_policy } =
             Meta::deserialize(deserializer)?;
-        Ok(Self { chain, block_env: block_env.inner, hosts: hosts.into(), fork_hash, source_id })
+        Ok(Self {
+            chain,
+            block_env: block_env.inner,
+            hosts: hosts.into(),
+            fork_hash,
+            source_id,
+            account_fetch_policy,
+        })
     }
 }
 
@@ -786,6 +825,48 @@ mod tests {
     }
 
     #[test]
+    fn account_fetch_policy_invalidates_incompatible_disk_caches() {
+        for skip_check in [false, true] {
+            for (stored, requested) in [
+                (AccountFetchPolicy::Auto, AccountFetchPolicy::RequireAccountInfo),
+                (AccountFetchPolicy::RequireAccountInfo, AccountFetchPolicy::Auto),
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let path = temp.path().join("cache.json");
+                let meta = BlockchainDbMeta::new(BlockEnv::default(), "http://localhost".into())
+                    .with_account_fetch_policy(stored);
+                let db = BlockchainDb::new(meta.clone(), Some(path.clone()));
+                let address = Address::with_last_byte(1);
+                db.accounts().write().insert(address, AccountInfo::from_balance(U256::from(42)));
+                db.cache().flush();
+
+                // Matching semantics preserve the actual balance, including nonzero values.
+                let compatible = BlockchainDb::new_db(meta.clone(), Some(path.clone()), skip_check);
+                assert_eq!(compatible.accounts().read()[&address].balance, U256::from(42));
+                let incompatible = BlockchainDb::new_db(
+                    meta.with_account_fetch_policy(requested),
+                    Some(path),
+                    skip_check,
+                );
+                assert!(incompatible.accounts().read().is_empty());
+                assert_eq!(incompatible.meta().read().account_fetch_policy, requested);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_account_cache_defaults_to_auto_policy() {
+        let mut value = serde_json::to_value(BlockchainDbMeta::<BlockEnv>::default()).unwrap();
+        value.as_object_mut().unwrap().remove("account_fetch_policy");
+        let legacy = serde_json::from_value::<BlockchainDbMeta<BlockEnv>>(value).unwrap();
+        assert_eq!(legacy.account_fetch_policy, AccountFetchPolicy::Auto);
+        assert_ne!(
+            legacy,
+            legacy.clone().with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo)
+        );
+    }
+
+    #[test]
     fn roundtrip_meta_block_env() {
         let meta = BlockchainDbMeta {
             chain: Some(Chain::mainnet()),
@@ -793,6 +874,7 @@ mod tests {
             hosts: BTreeSet::from(["eth-mainnet.alchemyapi.io".to_string()]),
             fork_hash: Some(B256::with_last_byte(1)),
             source_id: Some(B256::with_last_byte(2)),
+            account_fetch_policy: AccountFetchPolicy::RequireAccountInfo,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let recovered: BlockchainDbMeta<BlockEnv> = serde_json::from_str(&json).unwrap();
