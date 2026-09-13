@@ -258,11 +258,13 @@ jobs:
           tool: nextest@0.9.140
           checksum: true
           fallback: none
-      - name: test
-        run: cargo nextest run --workspace --locked ${{ matrix.flags }}
+      - name: Fetch nextest dependencies through Socket
+        run: bash .github/scripts/nextest-offline.sh fetch
         env:
           # Diagnostic control: restore Node address fallback only on the failing leg.
           NODE_OPTIONS: ${{ runner.os == 'macOS' && matrix.flags == '--all-features' && '--network-family-autoselection' || '--no-network-family-autoselection' }}
+      - name: test (offline Cargo)
+        run: bash .github/scripts/nextest-offline.sh test ${{ matrix.flags }}
       - name: Compare registry addresses after the package operation
         if: always() && matrix.flags == '--all-features' && runner.os != 'Windows'
         run: node .github/scripts/registry-network-diagnostics.cjs
