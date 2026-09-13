@@ -147,6 +147,12 @@ jobs:
               exit 1
             fi
           done < "$executables"
+      - name: Show compiler errors captured in Cargo JSON
+        if: failure()
+        run: |
+          if [ -f "$RUNNER_TEMP/touch-id-artifacts.json" ]; then
+            jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' "$RUNNER_TEMP/touch-id-artifacts.json"
+          fi
 
   feature-checks:
     runs-on: ubuntu-latest
@@ -186,9 +192,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Keep PR feedback fast by running the test matrix on Linux only.
-        # Pushes to main retain cross-platform coverage.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest", "windows-latest"]') }}
+        # Compare Depot macOS with the GitHub-hosted runner that timed out in Socket.
+        os: ["ubuntu-latest", "depot-macos-latest", "windows-latest"]
         rust: ["stable", "1.95"]
         flags: ["", "--all-features"]
         exclude:
@@ -230,6 +235,9 @@ jobs:
           fallback: none
       - name: test
         run: cargo nextest run --workspace --locked ${{ matrix.flags }}
+      - name: Compare registry addresses after the package operation
+        if: always() && matrix.flags == '--all-features' && runner.os != 'Windows'
+        run: node .github/scripts/registry-network-diagnostics.cjs
 
   doctest:
     runs-on: ubuntu-latest
