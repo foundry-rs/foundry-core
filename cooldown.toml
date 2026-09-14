@@ -17,5 +17,15 @@ package = [
     { crate = "revm-state", min-publish-age = "0" },
 ]
 
-# Match Foundry's exception for the required RustCrypto release; 0.14.0 is yanked.
-exact = [{ crate = "wnaf", version = "0.14.1" }]
+# Allow the Alloy 1.7.3 update; remove once the seven-day cooldown clears.
+exact = [
+    { crate = "alloy-dyn-abi", version = "1.7.3" },
+    { crate = "alloy-json-abi", version = "1.7.3" },
+    { crate = "alloy-primitives", version = "1.7.3" },
+    { crate = "alloy-sol-macro", version = "1.7.3" },
+    { crate = "alloy-sol-macro-expander", version = "1.7.3" },
+    { crate = "alloy-sol-macro-input", version = "1.7.3" },
+    { crate = "alloy-sol-type-parser", version = "1.7.3" },
+    { crate = "alloy-sol-types", version = "1.7.3" },
+    { crate = "syn-solidity", version = "1.7.3" },
+]
