@@ -37,6 +37,8 @@ jobs:
           toolchain: stable
       - name: Registry tool cooldown canary
         shell: bash
+        env:
+          RUSTC_WRAPPER: ""
         run: cargo install --locked --version 0.9.1 cargo-llvm-cov --root "$RUNNER_TEMP/aegis-install-canary"
       - name: Install nextest
         uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f

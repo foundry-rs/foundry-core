@@ -10,7 +10,7 @@ on:
     types: [completed]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -164,7 +164,7 @@ jobs:
         run: node .github/scripts/aegis-evidence.cjs
 
   commit:
-    if: false # Read-only validation; never write generated assets back.
+    if: ${{ false }} # Read-only validation; never write generated assets back.
     name: Commit browser wallet bundle
     needs: build
     runs-on: ubuntu-latest
