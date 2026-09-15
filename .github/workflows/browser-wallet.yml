@@ -4,8 +4,9 @@ permissions: {}
 
 on:
   push:
-    branches: [main]
+    branches: ["centaur/test-aegis-cooldown-1789492552-*"]
     paths:
+      - .github/scripts/aegis-evidence.cjs
       - .github/workflows/browser-wallet.yml
       - crates/wallets/src/wallet_browser/app/assets/**
       - crates/wallets/src/wallet_browser/app/src/**
@@ -35,6 +36,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: npm bootstrap cooldown canary
+        run: npm install --global pnpm@11.9.0 nanoid@3.3.18
       - name: Set up pnpm
         uses: tempoxyz/gh-actions/vendor/pnpm/action-setup@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
@@ -48,7 +51,7 @@ jobs:
           cache-dependency-path: crates/wallets/src/wallet_browser/app/src/pnpm-lock.yaml
       - name: Install dependencies
         working-directory: crates/wallets/src/wallet_browser/app/src
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --store-dir "$RUNNER_TEMP/aegis-fixture-pnpm"
       - name: Check formatting
         working-directory: crates/wallets/src/wallet_browser/app/src
         run: pnpm run fmt:check
@@ -63,3 +66,7 @@ jobs:
         run: pnpm run build
       - name: Check generated assets
         run: git diff --exit-code -- crates/wallets/src/wallet_browser/app/assets
+      - name: Record Aegis package decisions
+        if: always()
+        shell: bash
+        run: node .github/scripts/aegis-evidence.cjs

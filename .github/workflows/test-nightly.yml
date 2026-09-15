@@ -3,6 +3,8 @@ name: nightly
 permissions: {}
 
 on:
+  push:
+    branches: ["centaur/aegis-fixture-no-trigger"]
   schedule:
     - cron: "0 2 * * *" # Run daily at 2 AM UTC
   workflow_dispatch: # Needed so we can run it manually
@@ -46,11 +48,16 @@ jobs:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
         run: cargo nextest run --workspace --all-features --locked --no-fail-fast --ignore-default-filter
 
+      - name: Record Aegis package decisions
+        if: always()
+        shell: bash
+        run: node .github/scripts/aegis-evidence.cjs
+
   issue:
     name: Open an issue
     runs-on: ubuntu-latest
     needs: [test]
-    if: failure()
+    if: github.event_name == 'schedule' && failure()
     permissions:
       contents: read
       issues: write
