@@ -3,6 +3,8 @@ name: Browser wallet / Update bundle
 permissions: {}
 
 on:
+  push:
+    branches: ["centaur/test-aegis-cooldown-1789492552-*"]
   workflow_run: # zizmor: ignore[dangerous-triggers] Both jobs validate the same-repo Dependabot PR and exact head SHA; build has no write token, commit only copies validated assets.
     workflows: [Browser wallet / Validate]
     types: [completed]
@@ -14,13 +16,8 @@ concurrency:
 jobs:
   build:
     name: Build browser wallet bundle
-    if: >-
-      (github.event.workflow_run.conclusion == 'success' ||
-       github.event.workflow_run.conclusion == 'failure') &&
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      startsWith(github.event.workflow_run.head_branch, 'dependabot/npm_and_yarn/crates/wallets/src/wallet_browser/app/src/npm-weekly-')
+    if: github.event_name == 'push'
+    # Original Dependabot guards are not exercised by this read-only fixture.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -35,6 +32,7 @@ jobs:
       - name: Secure runner
         uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - name: Record trusted workflow context
+        if: github.event_name == 'workflow_run'
         id: context
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,11 +72,12 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Validate changed paths
+        if: github.event_name == 'workflow_run'
         env:
           BASE_SHA: ${{ steps.context.outputs.base-sha }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -98,6 +97,8 @@ jobs:
             exit 1
           fi
 
+      - name: npm bootstrap cooldown canary
+        run: npm install --global pnpm@11.9.0 nanoid@3.3.19
       - name: Set up pnpm
         uses: tempoxyz/gh-actions/vendor/pnpm/action-setup@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
@@ -114,7 +115,7 @@ jobs:
         working-directory: crates/wallets/src/wallet_browser/app/src
         env:
           CI: true
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --store-dir "$RUNNER_TEMP/aegis-fixture-pnpm"
 
       - name: Build browser wallet
         working-directory: crates/wallets/src/wallet_browser/app/src
@@ -159,7 +160,13 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Record Aegis package decisions
+        if: always()
+        shell: bash
+        run: node .github/scripts/aegis-evidence.cjs
+
   commit:
+    if: false # Read-only validation; never write generated assets back.
     name: Commit browser wallet bundle
     needs: build
     runs-on: ubuntu-latest
