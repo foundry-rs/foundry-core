@@ -17,8 +17,11 @@ package = [
     { crate = "revm-state", min-publish-age = "0" },
 ]
 
-# Allow the Alloy 1.7.3 update; remove once the seven-day cooldown clears.
+# Temporary exact-version exceptions; remove once each seven-day cooldown clears.
 exact = [
+    # Security fix for RUSTSEC-2026-0285.
+    { crate = "rustls", version = "0.23.45" },
+    # Alloy 1.7.3 update.
     { crate = "alloy-dyn-abi", version = "1.7.3" },
     { crate = "alloy-json-abi", version = "1.7.3" },
     { crate = "alloy-primitives", version = "1.7.3" },
