@@ -18,7 +18,7 @@ env:
 
 jobs:
   rustfmt:
-    if: ${{ false }} # Covered by the separate workspace test revision.
+    if: github.event_name == 'workflow_dispatch' # Covered by the separate workspace test revision.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -42,7 +42,7 @@ jobs:
         run: node .github/scripts/aegis-evidence.cjs
 
   clippy:
-    if: ${{ false }} # Covered by the separate workspace test revision.
+    if: github.event_name == 'workflow_dispatch' # Covered by the separate workspace test revision.
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
@@ -87,7 +87,7 @@ jobs:
         run: node .github/scripts/aegis-evidence.cjs
 
   touch-id-link:
-    if: ${{ false }} # Covered by the separate workspace test revision.
+    if: github.event_name == 'workflow_dispatch' # Covered by the separate workspace test revision.
     runs-on: ${{ matrix.toolchain.os }}
     timeout-minutes: 30
     permissions:
@@ -170,7 +170,7 @@ jobs:
         shell: bash
         env:
           RUSTC_WRAPPER: ""
-        run: cargo install --locked --version 0.9.1 cargo-llvm-cov --root "$RUNNER_TEMP/aegis-install-canary"
+        run: cargo install --locked --version 0.9.144 cargo-nextest --root "$RUNNER_TEMP/aegis-install-canary"
       - name: Install cargo-hack
         run: cargo install --locked --version 0.6.45 cargo-hack
       - name: cargo hack
@@ -213,7 +213,7 @@ jobs:
         shell: bash
         env:
           RUSTC_WRAPPER: ""
-        run: cargo install --locked --version 0.9.1 cargo-llvm-cov --root "$RUNNER_TEMP/aegis-install-canary"
+        run: cargo install --locked --version 0.9.144 cargo-nextest --root "$RUNNER_TEMP/aegis-install-canary"
       - name: Install nextest
         uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
@@ -231,7 +231,7 @@ jobs:
         run: node .github/scripts/aegis-evidence.cjs
 
   doctest:
-    if: ${{ false }} # Covered by the separate workspace test revision.
+    if: github.event_name == 'workflow_dispatch' # Covered by the separate workspace test revision.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -256,7 +256,7 @@ jobs:
         run: node .github/scripts/aegis-evidence.cjs
 
   docs:
-    if: ${{ false }} # Covered by the separate workspace test revision.
+    if: github.event_name == 'workflow_dispatch' # Covered by the separate workspace test revision.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -283,7 +283,7 @@ jobs:
         run: node .github/scripts/aegis-evidence.cjs
 
   typos:
-    if: ${{ false }} # Covered by the separate workspace test revision.
+    if: github.event_name == 'workflow_dispatch' # Covered by the separate workspace test revision.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -325,7 +325,7 @@ jobs:
         shell: bash
         env:
           RUSTC_WRAPPER: ""
-        run: cargo install --locked --version 0.9.1 cargo-llvm-cov --root "$RUNNER_TEMP/aegis-install-canary"
+        run: cargo install --locked --version 0.9.144 cargo-nextest --root "$RUNNER_TEMP/aegis-install-canary"
       - name: Install cargo-deny
         uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
@@ -340,7 +340,7 @@ jobs:
         run: node .github/scripts/aegis-evidence.cjs
 
   codeql:
-    if: ${{ false }} # Covered by the separate workspace test revision.
+    if: github.event_name == 'workflow_dispatch' # Covered by the separate workspace test revision.
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     permissions:

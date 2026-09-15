@@ -19,7 +19,7 @@ for (const line of data.split('\n')) {
   try { row = JSON.parse(line); } catch { continue; }
   if (row.msg !== 'package decision') continue;
   decisions++;
-  if (row.action === 'block' || /(?:iddqd|cargo-llvm-cov|nanoid)@/.test(row.purl || '')) {
+  if (row.action === 'block' || /(?:iddqd|cargo-llvm-cov|cargo-nextest|nanoid)@/.test(row.purl || '')) {
     console.log('AEGIS_EVIDENCE '+JSON.stringify(Object.fromEntries(
       ['time','purl','action','reason','request_id'].filter(k=>k in row).map(k=>[k,row[k]])
     )));
