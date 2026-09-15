@@ -17,17 +17,15 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
-  cargo-cooldown:
-    permissions:
-      contents: read
-    uses: ./.github/workflows/cargo-cooldown.yml
-
   rustfmt:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -38,11 +36,11 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
-    needs: cargo-cooldown
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +48,8 @@ jobs:
         # never compiles.
         os: ["ubuntu-latest", "macos-latest"]
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -75,11 +75,11 @@ jobs:
   # If the runner image drops that Xcode, the pin step fails loudly so the
   # floor is re-evaluated instead of silently sliding forward.
   touch-id-link:
-    needs: cargo-cooldown
     runs-on: ${{ matrix.toolchain.os }}
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     strategy:
@@ -90,6 +90,8 @@ jobs:
           - { xcode: "15.0.1", os: "macos-14" }
           - { xcode: "latest", os: "macos-latest" }
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -130,33 +132,34 @@ jobs:
           done < "$executables"
 
   feature-checks:
-    needs: cargo-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
-        with:
-          tool: cargo-hack
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - name: Install cargo-hack
+        run: cargo install --locked --version 0.6.45 cargo-hack
       - name: cargo hack
         run: cargo hack check --feature-powerset --depth 1 --locked
 
   test:
-    needs: cargo-cooldown
     name: test ${{ matrix.rust }} ${{ matrix.flags }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -170,6 +173,8 @@ jobs:
           - rust: "1.95" # MSRV
             flags: "--all-features"
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -179,19 +184,23 @@ jobs:
       - name: Install nextest
         uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
-          tool: nextest
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: test
         run: cargo nextest run --workspace --locked ${{ matrix.flags }}
 
   doctest:
-    needs: cargo-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -203,12 +212,14 @@ jobs:
       - run: cargo test --workspace --doc --all-features --locked
 
   docs:
-    needs: cargo-cooldown
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -226,25 +237,41 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: tempoxyz/gh-actions/actions/typos@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
 
   deny:
-    needs: cargo-cooldown
-    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@3a37d720685503bb084ba723ee981a6c1b120360 # main
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
-    secrets:
-      STEP_SECURITY_API_KEY: ${{ secrets.STEP_SECURITY_API_KEY }}
-    with:
-      run-clippy: false
-      run-fmt: false
-      run-typos: false
-      deny-rust-toolchain: nightly
-      deny-flags: --all-features --locked
+      id-token: write
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+        with:
+          toolchain: nightly
+      # Trusted prebuilt tool; run the dependency audit on the Aegis-protected host.
+      - name: Install cargo-deny
+        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+        with:
+          tool: cargo-deny@0.20.2
+          checksum: true
+          fallback: none
+      - run: cargo deny --all-features --locked check all
 
   codeql:
     name: Analyze (${{ matrix.language }})
@@ -292,7 +319,6 @@ jobs:
     if: always()
     permissions: {}
     needs:
-      - cargo-cooldown
       - rustfmt
       - clippy
       - touch-id-link

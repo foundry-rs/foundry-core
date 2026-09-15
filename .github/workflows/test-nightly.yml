@@ -17,28 +17,28 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
-  cargo-cooldown:
-    permissions:
-      contents: read
-    uses: ./.github/workflows/cargo-cooldown.yml
-
   test:
-    needs: cargo-cooldown
     name: nightly tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
+      id-token: write
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2b4621c91988f43ccdeaad0a1e23cffbd341743b
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+      - name: Install nextest
+        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
-          tool: nextest
+          tool: nextest@0.9.140
+          checksum: true
+          fallback: none
       - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
       - name: Test
