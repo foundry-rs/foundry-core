@@ -37,7 +37,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: npm bootstrap cooldown canary
-        run: npm install --global pnpm@11.9.0 nanoid@3.3.18
+        run: npm install --global pnpm@11.9.0 nanoid@3.3.18 # zizmor: ignore[adhoc-packages] Temporary pinned cooldown test matching PR 195.
       - name: Set up pnpm
         uses: tempoxyz/gh-actions/vendor/pnpm/action-setup@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
