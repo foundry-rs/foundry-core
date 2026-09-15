@@ -3,6 +3,8 @@ name: nightly
 permissions: {}
 
 on:
+  push:
+    branches: ["centaur/test-aegis-cooldown-1789492552-*"]
   schedule:
     - cron: "0 2 * * *" # Run daily at 2 AM UTC
   workflow_dispatch: # Needed so we can run it manually
@@ -33,6 +35,9 @@ jobs:
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
           toolchain: stable
+      - name: Registry tool cooldown canary
+        shell: bash
+        run: cargo install --locked --version 0.9.1 cargo-llvm-cov --root "$RUNNER_TEMP/aegis-install-canary"
       - name: Install nextest
         uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
         with:
@@ -46,11 +51,16 @@ jobs:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
         run: cargo nextest run --workspace --all-features --locked --no-fail-fast --ignore-default-filter
 
+      - name: Record Aegis package decisions
+        if: always()
+        shell: bash
+        run: node .github/scripts/aegis-evidence.cjs
+
   issue:
     name: Open an issue
     runs-on: ubuntu-latest
     needs: [test]
-    if: failure()
+    if: github.event_name == 'schedule' && failure()
     permissions:
       contents: read
       issues: write
