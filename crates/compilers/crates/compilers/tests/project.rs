@@ -472,7 +472,8 @@ fn abi_cache_preserves_out_of_scope_mocks() {
         .compile_abi_cached()
         .unwrap()
         .assert_success();
-    let cache = CompilerCache::<MultiCompilerSettings>::read(&cache_path).unwrap();
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(&cache_path).unwrap();
+    cache.join_entries(project.root());
     assert!(cache.mocks.contains(&mock));
 
     project.add_source("Base", "pragma solidity ^0.8.0; contract Base { function foo() public pure returns(uint) { return 2; } }").unwrap();
@@ -5503,6 +5504,44 @@ fn can_preprocess() {
     };
     compiled.assert_success();
     assert!(!compiled.is_unchanged());
+}
+
+#[test]
+fn preprocessor_version_invalidates_cache() {
+    #[derive(Debug)]
+    struct VersionedPreprocessor(u64);
+
+    impl Preprocessor<MultiCompiler> for VersionedPreprocessor {
+        fn cache_version(&self) -> u64 {
+            self.0
+        }
+
+        fn preprocess(
+            &self,
+            _compiler: &MultiCompiler,
+            _input: &mut MultiCompilerInput,
+            _paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _mocks: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.add_source("Contract.sol", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
+
+    let compile = |version| {
+        ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(VersionedPreprocessor(version))
+            .compile()
+            .unwrap()
+    };
+
+    assert!(!compile(1).is_unchanged());
+    assert!(compile(1).is_unchanged());
+    assert!(!compile(2).is_unchanged());
+    assert!(compile(2).is_unchanged());
 }
 
 #[test]
