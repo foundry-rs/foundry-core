@@ -915,7 +915,14 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
             // Pre-add all sources that are guaranteed to be dirty
             for file in sources.keys() {
-                if self.is_dirty(file, false) {
+                let imports = edges
+                    .imports(file)
+                    .into_iter()
+                    .map(|import| strip_prefix(import, self.project.root()).into())
+                    .collect::<BTreeSet<_>>();
+                if self.is_dirty(file, false)
+                    || self.cache.entry(file).is_none_or(|entry| entry.imports != imports)
+                {
                     self.dirty_sources.insert(file.clone());
                 }
             }
