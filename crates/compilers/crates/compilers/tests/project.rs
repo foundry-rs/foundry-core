@@ -16,7 +16,7 @@ use foundry_compilers::{
     flatten::Flattener,
     info::ContractInfo,
     multi::{MultiCompilerInput, MultiCompilerParser, MultiCompilerRestrictions},
-    project::{Preprocessor, ProjectCompiler},
+    project::{NativeDependencyState, Preprocessor, PreprocessorState, ProjectCompiler},
     project_util::*,
     solc::{Restriction, SolcRestrictions, SolcSettings},
     take_solc_installer_lock,
@@ -583,6 +583,96 @@ fn abi_cache_preserves_cached_profiles_during_partial_compilation() {
             previous = Some(ids);
         }
     }
+}
+
+#[test]
+fn preprocessor_state_preserves_clean_dependency_across_profiles() {
+    #[derive(Debug)]
+    struct ClassifyCommon(bool);
+
+    impl Preprocessor<MultiCompiler> for ClassifyCommon {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> foundry_compilers::error::Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if input.input.sources.contains_key(Path::new("src/Common.sol")) {
+                state.update(
+                    paths.root.join("src/Common.sol"),
+                    self.0.then_some(NativeDependencyState::Conservative),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    let mut optimized = project.project().settings.clone();
+    optimized.solc.optimizer.enabled = Some(true);
+    optimized.solc.optimizer.runs = Some(10000);
+    project.project_mut().additional_settings.insert("optimized".to_string(), optimized);
+    project.add_source("Common", "pragma solidity ^0.8.0; contract Common {}").unwrap();
+    let default = project
+        .add_source(
+            "Default",
+            "pragma solidity ^0.8.0; import './Common.sol'; contract Default is Common {}",
+        )
+        .unwrap();
+    let optimized = project
+        .add_source(
+            "Optimized",
+            "pragma solidity ^0.8.0; import './Common.sol'; contract Optimized is Common {}",
+        )
+        .unwrap();
+    project.project_mut().restrictions.insert(
+        optimized.clone(),
+        RestrictionsWithVersion {
+            restrictions: MultiCompilerRestrictions {
+                solc: SolcRestrictions {
+                    optimizer_runs: Restriction { min: Some(10000), ..Default::default() },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            version: None,
+        },
+    );
+
+    ProjectCompiler::with_sources(project.project(), Source::read_all([default]).unwrap())
+        .unwrap()
+        .with_preprocessor(ClassifyCommon(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+    ProjectCompiler::with_sources(project.project(), Source::read_all([optimized]).unwrap())
+        .unwrap()
+        .with_preprocessor(ClassifyCommon(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    cache.join_entries(project.root());
+    assert_eq!(
+        cache.native_dependencies.get(&project.paths().sources.join("Common.sol")),
+        Some(&NativeDependencyState::Conservative)
+    );
 }
 
 #[test]
@@ -1174,6 +1264,59 @@ fn can_compile_dapp_detect_changes_in_resolved_imports() {
         cache.files[Path::new("src/UsesDep.sol")].imports,
         BTreeSet::from([PathBuf::from("lib/b/Impl.sol")])
     );
+}
+
+#[test]
+fn can_compile_dapp_detect_swapped_remapping_bindings() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let lib = project.paths().libraries[0].clone();
+    project.paths_mut().remappings.extend([
+        Remapping::from_str(&format!("@first/={}/", lib.join("a").display())).unwrap(),
+        Remapping::from_str(&format!("@second/={}/", lib.join("b").display())).unwrap(),
+    ]);
+
+    project
+        .add_source(
+            "UsesDeps",
+            r#"
+    pragma solidity ^0.8.10;
+    import {Impl as First} from "@first/Impl.sol";
+    import {Impl as Second} from "@second/Impl.sol";
+
+    contract UsesDeps {
+        function first() external returns (uint256) { return new First().value(); }
+        function second() external returns (uint256) { return new Second().value(); }
+    }
+   "#,
+        )
+        .unwrap();
+    project
+        .add_lib(
+            "a/Impl",
+            r#"
+    pragma solidity ^0.8.10;
+    contract Impl { function value() external pure returns (uint256) { return 1; } }
+   "#,
+        )
+        .unwrap();
+    project
+        .add_lib(
+            "b/Impl",
+            r#"
+    pragma solidity ^0.8.10;
+    contract Impl { function value() external pure returns (uint256) { return 2; } }
+   "#,
+        )
+        .unwrap();
+
+    project.compile().unwrap().assert_success();
+    assert!(project.compile().unwrap().is_unchanged());
+
+    project.paths_mut().remappings.swap(0, 1);
+
+    let compiled = project.compile().unwrap();
+    compiled.assert_success();
+    assert!(!compiled.is_unchanged());
 }
 
 #[test]

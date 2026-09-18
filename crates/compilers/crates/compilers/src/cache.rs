@@ -10,7 +10,7 @@ use crate::{
     resolver::GraphEdges,
 };
 use foundry_compilers_artifacts::{
-    Settings,
+    Remapping, Settings,
     sources::{Source, Sources},
 };
 use foundry_compilers_core::{
@@ -58,6 +58,9 @@ pub struct CompilerCache<S = Settings> {
     /// Source units observed by the preprocessor across compiler requests.
     #[serde(default)]
     pub preprocessor_source_units: BTreeSet<PathBuf>,
+    /// Ordered remappings used to resolve the cached import graph.
+    #[serde(default)]
+    pub remappings: Vec<Remapping>,
     pub mocks: HashSet<PathBuf>,
     /// Native bytecode dependencies keyed by the source that embeds them.
     #[serde(default)]
@@ -67,7 +70,14 @@ pub struct CompilerCache<S = Settings> {
 impl<S> CompilerCache<S> {
     /// Creates a new empty cache.
     pub fn new(format: String, paths: ProjectPaths, preprocessed: bool) -> Self {
-        Self::new_with_preprocessor(format, paths, preprocessed, 0, Default::default())
+        Self::new_with_preprocessor(
+            format,
+            paths,
+            preprocessed,
+            0,
+            Default::default(),
+            Default::default(),
+        )
     }
 
     fn new_with_preprocessor(
@@ -76,6 +86,7 @@ impl<S> CompilerCache<S> {
         preprocessed: bool,
         preprocessor_version: u64,
         preprocessor_source_units: BTreeSet<PathBuf>,
+        remappings: Vec<Remapping>,
     ) -> Self {
         Self {
             format,
@@ -86,6 +97,7 @@ impl<S> CompilerCache<S> {
             preprocessed,
             preprocessor_version,
             preprocessor_source_units,
+            remappings,
             mocks: Default::default(),
             native_dependencies: Default::default(),
         }
@@ -466,6 +478,7 @@ impl<S> Default for CompilerCache<S> {
             preprocessed: false,
             preprocessor_version: 0,
             preprocessor_source_units: Default::default(),
+            remappings: Default::default(),
             mocks: Default::default(),
             native_dependencies: Default::default(),
         }
@@ -1229,6 +1242,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 && cache.paths == paths
                 && preprocessed == cache.preprocessed
                 && preprocessor_version == cache.preprocessor_version
+                && project.paths.remappings == cache.remappings
             {
                 let previous_source_units = cache.preprocessor_source_units.clone();
                 cache.preprocessor_source_units.retain(|path| {
@@ -1257,6 +1271,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                     preprocessed,
                     preprocessor_version,
                     current_source_units.clone(),
+                    project.paths.remappings.clone(),
                 ),
                 false,
             )

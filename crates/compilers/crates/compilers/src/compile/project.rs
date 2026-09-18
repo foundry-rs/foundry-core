@@ -186,14 +186,13 @@ impl PreprocessorState {
 
     /// Updates one source's classification for a compiler job.
     ///
-    /// The persisted classification is cleared when the source is first processed. Later jobs
-    /// merge into the request's result, with [`NativeDependencyState::Conservative`] dominating.
+    /// Persisted classifications are preserved because compiler jobs and cache invalidation are
+    /// artifact-specific while this state is source-specific. A job can replace one profile or
+    /// compiler version while another cached artifact survives. Later jobs merge into the
+    /// request's result, with [`NativeDependencyState::Conservative`] dominating.
     /// Returns whether this was the source's first update in the request.
     pub fn update(&mut self, file: PathBuf, state: Option<NativeDependencyState>) -> bool {
         let first_update = self.processed_sources.insert(file.clone());
-        if first_update {
-            self.native_dependencies.remove(&file);
-        }
         if let Some(state) = state {
             merge_native_dependencies(
                 &mut self.native_dependencies,
@@ -252,7 +251,7 @@ mod native_dependency_tests {
     }
 
     #[test]
-    fn preprocessor_state_clears_stale_entries_and_merges_jobs() {
+    fn preprocessor_state_preserves_entries_and_merges_jobs() {
         let cleared = PathBuf::from("cleared.sol");
         let merged = PathBuf::from("merged.sol");
         let mut state = PreprocessorState::new(NativeDependencies::from([
@@ -260,13 +259,37 @@ mod native_dependency_tests {
             (merged.clone(), known(&["old.sol"])),
         ]));
 
-        assert!(state.update(cleared, None));
+        assert!(state.update(cleared.clone(), None));
         assert!(state.update(merged.clone(), Some(known(&["a.sol"]))));
         assert!(!state.update(merged.clone(), Some(NativeDependencyState::Conservative)));
 
         assert_eq!(
             state.into_native_dependencies(),
-            NativeDependencies::from([(merged, NativeDependencyState::Conservative)])
+            NativeDependencies::from([
+                (cleared, known(&["old.sol"])),
+                (merged, NativeDependencyState::Conservative),
+            ])
+        );
+    }
+
+    #[test]
+    fn preprocessor_state_preserves_clean_optimized_dependency_across_jobs() {
+        let file = PathBuf::from("dependency.sol");
+        let dirty = PathBuf::from("test.sol");
+        let mut state = PreprocessorState::new(NativeDependencies::from([
+            (file.clone(), NativeDependencyState::Conservative),
+            (dirty.clone(), known(&["old.sol"])),
+        ]));
+
+        assert!(state.update(file.clone(), None));
+        assert!(!state.update(file.clone(), None));
+        assert!(state.update(dirty.clone(), None));
+        assert_eq!(
+            state.into_native_dependencies(),
+            NativeDependencies::from([
+                (file, NativeDependencyState::Conservative),
+                (dirty, known(&["old.sol"])),
+            ])
         );
     }
 }
