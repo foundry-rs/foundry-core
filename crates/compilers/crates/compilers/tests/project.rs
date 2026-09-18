@@ -1106,6 +1106,76 @@ fn can_compile_dapp_detect_changes_in_libs() {
 }
 
 #[test]
+fn can_compile_dapp_detect_changes_in_resolved_imports() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let lib = project.paths().libraries[0].clone();
+    project
+        .paths_mut()
+        .remappings
+        .push(Remapping::from_str(&format!("@dep/={}/", lib.join("a").display())).unwrap());
+
+    project
+        .add_source(
+            "UsesDep",
+            r#"
+    pragma solidity ^0.8.10;
+    import {Impl} from "@dep/Impl.sol";
+
+    contract UsesDep { function value() external returns (uint256) { return new Impl().value(); } }
+   "#,
+        )
+        .unwrap();
+    project
+        .add_source(
+            "KeepDeps",
+            r#"
+    pragma solidity ^0.8.10;
+    import {Impl as A} from "../lib/a/Impl.sol";
+    import {Impl as B} from "../lib/b/Impl.sol";
+
+    contract KeepDeps { function keep(A, B) external pure {} }
+   "#,
+        )
+        .unwrap();
+    project
+        .add_lib(
+            "a/Impl",
+            r#"
+    pragma solidity ^0.8.10;
+    contract Impl { function value() external pure returns (uint256) { return 1; } }
+   "#,
+        )
+        .unwrap();
+    project
+        .add_lib(
+            "b/Impl",
+            r#"
+    pragma solidity ^0.8.10;
+    contract Impl { function value() external pure returns (uint256) { return 2; } }
+   "#,
+        )
+        .unwrap();
+
+    let compiled = project.compile().unwrap();
+    compiled.assert_success();
+    assert!(!compiled.is_unchanged());
+    assert!(project.compile().unwrap().is_unchanged());
+
+    project.paths_mut().remappings[0] =
+        Remapping::from_str(&format!("@dep/={}/", lib.join("b").display())).unwrap();
+
+    let compiled = project.compile().unwrap();
+    compiled.assert_success();
+    assert!(!compiled.is_unchanged());
+
+    let cache = CompilerCache::<SolcSettings>::read(project.cache_path()).unwrap();
+    assert_eq!(
+        cache.files[Path::new("src/UsesDep.sol")].imports,
+        BTreeSet::from([PathBuf::from("lib/b/Impl.sol")])
+    );
+}
+
+#[test]
 fn can_compile_dapp_detect_changes_in_sources() {
     let project = TempProject::<MultiCompiler>::dapptools().unwrap();
 
