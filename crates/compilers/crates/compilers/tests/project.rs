@@ -16,7 +16,7 @@ use foundry_compilers::{
     flatten::Flattener,
     info::ContractInfo,
     multi::{MultiCompilerInput, MultiCompilerParser, MultiCompilerRestrictions},
-    project::{Preprocessor, ProjectCompiler},
+    project::{NativeDependencyState, Preprocessor, PreprocessorState, ProjectCompiler},
     project_util::*,
     solc::{Restriction, SolcRestrictions, SolcSettings},
     take_solc_installer_lock,
@@ -27,7 +27,7 @@ use foundry_compilers_artifacts::{
     UserDocNotice, output_selection::OutputSelection, remappings::Remapping,
 };
 use foundry_compilers_core::{
-    error::SolcError,
+    error::{Result, SolcError},
     utils::{self, RuntimeOrHandle, canonicalize},
 };
 use semver::Version;
@@ -472,7 +472,8 @@ fn abi_cache_preserves_out_of_scope_mocks() {
         .compile_abi_cached()
         .unwrap()
         .assert_success();
-    let cache = CompilerCache::<MultiCompilerSettings>::read(&cache_path).unwrap();
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(&cache_path).unwrap();
+    cache.join_entries(project.root());
     assert!(cache.mocks.contains(&mock));
 
     project.add_source("Base", "pragma solidity ^0.8.0; contract Base { function foo() public pure returns(uint) { return 2; } }").unwrap();
@@ -582,6 +583,670 @@ fn abi_cache_preserves_cached_profiles_during_partial_compilation() {
             previous = Some(ids);
         }
     }
+}
+
+#[test]
+fn preprocessor_state_replaces_only_compiled_profile() {
+    #[derive(Debug)]
+    struct ClassifyCommon(bool);
+
+    impl Preprocessor<MultiCompiler> for ClassifyCommon {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if input.input.sources.contains_key(Path::new("src/Common.sol")) {
+                state.update(
+                    paths.root.join("src/Common.sol"),
+                    self.0.then_some(NativeDependencyState::Conservative),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    let mut optimized = project.project().settings.clone();
+    optimized.solc.optimizer.enabled = Some(true);
+    optimized.solc.optimizer.runs = Some(10000);
+    project.project_mut().additional_settings.insert("optimized".to_string(), optimized);
+    project.add_source("Common", "pragma solidity ^0.8.0; contract Common {}").unwrap();
+    project
+        .add_source(
+            "Default",
+            "pragma solidity ^0.8.0; import './Common.sol'; contract Default is Common {}",
+        )
+        .unwrap();
+    let optimized = project
+        .add_source(
+            "Optimized",
+            "pragma solidity ^0.8.0; import './Common.sol'; contract Optimized is Common {}",
+        )
+        .unwrap();
+    project.project_mut().restrictions.insert(
+        optimized.clone(),
+        RestrictionsWithVersion {
+            restrictions: MultiCompilerRestrictions {
+                solc: SolcRestrictions {
+                    optimizer_runs: Restriction { min: Some(10000), ..Default::default() },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            version: None,
+        },
+    );
+
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyCommon(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+    // Regenerate only the optimized context while the default artifacts remain cached.
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    for file in [Path::new("src/Common.sol"), Path::new("src/Optimized.sol")] {
+        for (_, profile, artifact) in cache.files[file].artifacts_versions() {
+            if profile == "optimized" {
+                fs::remove_file(project.artifacts_path().join(&artifact.path)).unwrap();
+            }
+        }
+    }
+    ProjectCompiler::with_sources(project.project(), Source::read_all([optimized]).unwrap())
+        .unwrap()
+        .with_preprocessor(ClassifyCommon(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    cache.join_entries(project.root());
+    assert_eq!(
+        cache
+            .native_dependencies
+            .get(&project.paths().sources.join("Common.sol"))
+            .and_then(|versions| versions.get(&Version::new(0, 8, 30)))
+            .and_then(|profiles| profiles.get("default")),
+        Some(&NativeDependencyState::Conservative)
+    );
+    assert!(
+        cache
+            .native_dependencies
+            .get(&project.paths().sources.join("Common.sol"))
+            .and_then(|versions| versions.get(&Version::new(0, 8, 30)))
+            .is_some_and(|profiles| !profiles.contains_key("optimized"))
+    );
+}
+
+#[test]
+fn retired_profile_drops_native_dependency_context() {
+    #[derive(Debug)]
+    struct ClassifyTarget(bool);
+
+    impl Preprocessor<MultiCompiler> for ClassifyTarget {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if input.input.sources.contains_key(Path::new("src/Target.sol")) {
+                state.update(
+                    paths.root.join("src/Target.sol"),
+                    self.0.then_some(NativeDependencyState::Conservative),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    let mut optimized = project.project().settings.clone();
+    optimized.solc.optimizer.enabled = Some(true);
+    optimized.solc.optimizer.runs = Some(10000);
+    project.project_mut().additional_settings.insert("optimized".to_owned(), optimized);
+    let target =
+        project.add_source("Target", "pragma solidity ^0.8.0; contract Target {}").unwrap();
+    project.project_mut().restrictions.insert(
+        target,
+        RestrictionsWithVersion {
+            restrictions: MultiCompilerRestrictions {
+                solc: SolcRestrictions {
+                    optimizer_runs: Restriction { min: Some(10000), ..Default::default() },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            version: None,
+        },
+    );
+
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyTarget(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    project.project_mut().additional_settings.clear();
+    project.project_mut().restrictions.clear();
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyTarget(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    cache.join_entries(project.root());
+    assert!(!cache.native_dependencies.contains_key(&project.paths().sources.join("Target.sol")));
+}
+
+#[test]
+fn retired_compiler_version_drops_native_dependency_context() {
+    #[derive(Debug)]
+    struct ClassifyConsumer(bool);
+
+    impl Preprocessor<MultiCompiler> for ClassifyConsumer {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            state.update(
+                paths.root.join("test/Consumer.sol"),
+                self.0.then_some(NativeDependencyState::Conservative),
+            );
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.29");
+    let unrelated = project
+        .add_source("Unrelated", "pragma solidity ^0.8.0; contract Unrelated { uint value = 1; }")
+        .unwrap();
+    let consumer =
+        project.add_test("Consumer", "pragma solidity ^0.8.29; contract Consumer {}").unwrap();
+    let caller = project
+        .add_test(
+            "Caller",
+            "pragma solidity ^0.8.29; import './Consumer.sol'; contract Caller is Consumer {}",
+        )
+        .unwrap();
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    assert!(
+        cache.native_dependencies[Path::new("test/Consumer.sol")]
+            .contains_key(&Version::new(0, 8, 29))
+    );
+
+    // Retire every artifact that could have embedded the old observation.
+    project.set_solc("0.8.30");
+    for file in [&consumer, &caller] {
+        fs::write(file, fs::read_to_string(file).unwrap().replace("^0.8.29", "^0.8.30")).unwrap();
+    }
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    assert!(cache.native_dependencies.is_empty());
+
+    fs::write(unrelated, "pragma solidity ^0.8.0; contract Unrelated { uint value = 2; }").unwrap();
+    let output = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(false))
+        .compile()
+        .unwrap();
+    output.assert_success();
+    assert!(!output.is_unchanged());
+    assert!(output.compiled_artifacts().artifact_files().all(|artifact| {
+        !artifact.file.ends_with("Consumer.sol/Consumer.json")
+            && !artifact.file.ends_with("Caller.sol/Caller.json")
+    }));
+}
+
+#[test]
+fn regenerated_source_preserves_dependency_for_surviving_importer() {
+    #[derive(Debug)]
+    struct PreprocessConsumer(bool);
+
+    impl Preprocessor<MultiCompiler> for PreprocessConsumer {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            if let MultiCompilerInput::Solc(input) = input
+                && let Some(consumer) = input.input.sources.get_mut(Path::new("test/Consumer.sol"))
+            {
+                state.update(
+                    paths.root.join("test/Consumer.sol"),
+                    self.0.then(|| {
+                        NativeDependencyState::Known(BTreeSet::from([paths
+                            .root
+                            .join("src/Dep.sol")]))
+                    }),
+                );
+                if !self.0 {
+                    // Model a later job whose preprocessing removes the native deployment.
+                    consumer.content = consumer.content.replace("new Dep().value()", "42").into();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    let dep = project.add_source("Dep", "pragma solidity ^0.8.0; contract Dep { function value() public pure returns (uint) { return 1; } }").unwrap();
+    let consumer = project.add_test("Consumer", "pragma solidity ^0.8.0; import '../src/Dep.sol'; contract Consumer { function value() public returns (uint) { return new Dep().value(); } }").unwrap();
+    project.add_test("Caller", "pragma solidity ^0.8.0; import './Consumer.sol'; contract Caller { function value() public returns (uint) { return new Consumer().value(); } }").unwrap();
+    let initial = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(PreprocessConsumer(true))
+        .compile()
+        .unwrap();
+    initial.assert_success();
+    let initial_caller =
+        initial.find_first("Caller").unwrap().get_bytecode_bytes().unwrap().into_owned();
+
+    // Only Consumer's missing artifact is regenerated; Caller still embeds the old Consumer.
+    fs::remove_file(project.artifacts_path().join("Consumer.sol/Consumer.json")).unwrap();
+    let regenerated =
+        ProjectCompiler::with_sources(project.project(), Source::read_all([consumer]).unwrap())
+            .unwrap()
+            .with_preprocessor(PreprocessConsumer(false))
+            .compile()
+            .unwrap();
+    regenerated.assert_success();
+    assert!(
+        regenerated
+            .compiled_artifacts()
+            .artifact_files()
+            .any(|artifact| artifact.file.ends_with("Consumer.sol/Consumer.json"))
+    );
+    assert!(
+        regenerated
+            .compiled_artifacts()
+            .artifact_files()
+            .all(|artifact| !artifact.file.ends_with("Caller.sol/Caller.json"))
+    );
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    assert_eq!(
+        cache.native_dependencies[Path::new("test/Consumer.sol")][&Version::new(0, 8, 30)]["default"],
+        NativeDependencyState::Known(BTreeSet::from([PathBuf::from("src/Dep.sol")]))
+    );
+
+    fs::write(&dep, fs::read_to_string(&dep).unwrap().replace("return 1", "return 2")).unwrap();
+    let incremental = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(PreprocessConsumer(false))
+        .compile()
+        .unwrap();
+    incremental.assert_success();
+    assert!(
+        incremental
+            .compiled_artifacts()
+            .artifact_files()
+            .any(|artifact| artifact.file.ends_with("Caller.sol/Caller.json"))
+    );
+    let incremental_caller =
+        incremental.find_first("Caller").unwrap().get_bytecode_bytes().unwrap().into_owned();
+    assert_ne!(initial_caller, incremental_caller);
+    project.project().cleanup().unwrap();
+    let clean = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(PreprocessConsumer(false))
+        .compile()
+        .unwrap();
+    clean.assert_success();
+    assert_eq!(
+        &incremental_caller,
+        clean.find_first("Caller").unwrap().get_bytecode_bytes().unwrap().as_ref()
+    );
+}
+
+#[test]
+fn preprocessor_state_preserves_dependency_for_optimized_import() {
+    #[derive(Debug)]
+    struct ClassifyConsumer(bool);
+
+    impl Preprocessor<MultiCompiler> for ClassifyConsumer {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if input.input.sources.contains_key(Path::new("src/Consumer.sol")) {
+                state.update(
+                    paths.root.join("src/Consumer.sol"),
+                    self.0.then(|| {
+                        NativeDependencyState::Known(BTreeSet::from([paths
+                            .root
+                            .join("src/Dep.sol")]))
+                    }),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Dep", "pragma solidity ^0.8.0; contract Dep {}").unwrap();
+    project
+        .add_source(
+            "Consumer",
+            "pragma solidity ^0.8.0; import './Dep.sol'; contract Consumer is Dep {}",
+        )
+        .unwrap();
+    let importer = project
+        .add_source(
+            "Importer",
+            "pragma solidity ^0.8.0; import './Consumer.sol'; contract Importer { function consume(Consumer) public {} }",
+        )
+        .unwrap();
+
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    cache.join_entries(project.root());
+    assert_eq!(
+        cache
+            .native_dependencies
+            .get(&project.paths().sources.join("Consumer.sol"))
+            .and_then(|versions| versions.get(&Version::new(0, 8, 30)))
+            .and_then(|profiles| profiles.get("default")),
+        Some(&NativeDependencyState::Known(BTreeSet::from([project
+            .paths()
+            .sources
+            .join("Dep.sol")]))),
+        "initial classification was not cached: {:?}",
+        cache.native_dependencies
+    );
+
+    fs::write(
+        importer,
+        "pragma solidity ^0.8.0; import './Consumer.sol'; contract Importer { function consume(Consumer) public {} function changed() public {} }",
+    )
+    .unwrap();
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    cache.join_entries(project.root());
+    assert_eq!(
+        cache
+            .native_dependencies
+            .get(&project.paths().sources.join("Consumer.sol"))
+            .and_then(|versions| versions.get(&Version::new(0, 8, 30)))
+            .and_then(|profiles| profiles.get("default")),
+        Some(&NativeDependencyState::Known(BTreeSet::from([project
+            .paths()
+            .sources
+            .join("Dep.sol")])))
+    );
+}
+
+#[test]
+fn conservative_dependency_recompiles_after_repeated_sparse_edits() {
+    #[derive(Debug)]
+    struct ConservativeConsumer;
+
+    impl Preprocessor<MultiCompiler> for ConservativeConsumer {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if input.input.sources.contains_key(Path::new("test/Consumer.sol")) {
+                state.update(
+                    paths.root.join("test/Consumer.sol"),
+                    Some(NativeDependencyState::Conservative),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let dependency = project
+        .add_source("Dependency", "pragma solidity ^0.8.0; contract Dependency { uint value = 1; }")
+        .unwrap();
+    let consumer =
+        project.add_test("Consumer", "pragma solidity ^0.8.0; contract Consumer {}").unwrap();
+
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ConservativeConsumer)
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    for value in [2, 3] {
+        fs::write(
+            &dependency,
+            format!("pragma solidity ^0.8.0; contract Dependency {{ uint value = {value}; }}"),
+        )
+        .unwrap();
+        let output = ProjectCompiler::with_sources(
+            project.project(),
+            Source::read_all([&consumer]).unwrap(),
+        )
+        .unwrap()
+        .with_preprocessor(ConservativeConsumer)
+        .compile()
+        .unwrap();
+        output.assert_success();
+        assert!(!output.is_unchanged(), "edit {value} was hidden by sparse cache eviction");
+        assert!(
+            output
+                .compiled_artifacts()
+                .artifact_files()
+                .any(|artifact| { artifact.file.ends_with("Consumer.sol/Consumer.json") })
+        );
+    }
+}
+
+#[test]
+fn optimized_import_observations_invalidate_new_consumers() {
+    #[derive(Debug)]
+    struct ReportDependencies(bool);
+
+    impl Preprocessor<MultiCompiler> for ReportDependencies {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if self.0 && input.input.sources.contains_key(Path::new("test/Caller.sol")) {
+                state.update(
+                    paths.root.join("test/Consumer.sol"),
+                    Some(NativeDependencyState::Known(BTreeSet::from([paths
+                        .root
+                        .join("src/Dep.sol")]))),
+                );
+                state.update(
+                    paths.root.join("test/Caller.sol"),
+                    Some(NativeDependencyState::Known(BTreeSet::from([paths
+                        .root
+                        .join("test/Consumer.sol")]))),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let dependency = project
+        .add_source("Dep", "pragma solidity ^0.8.0; contract Dep { uint value = 1; }")
+        .unwrap();
+    project
+        .add_test(
+            "Consumer",
+            "pragma solidity ^0.8.0; import '../src/Dep.sol'; contract Consumer {}",
+        )
+        .unwrap();
+    let caller = project
+        .add_test(
+            "Caller",
+            "pragma solidity ^0.8.0; import './Consumer.sol'; contract Caller is Consumer {}",
+        )
+        .unwrap();
+
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ReportDependencies(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+    fs::write(
+        &caller,
+        "pragma solidity ^0.8.0; import './Consumer.sol'; contract Caller is Consumer { function changed() public {} }",
+    )
+    .unwrap();
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ReportDependencies(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    fs::write(dependency, "pragma solidity ^0.8.0; contract Dep { uint value = 2; }").unwrap();
+    let output = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ReportDependencies(false))
+        .compile()
+        .unwrap();
+    output.assert_success();
+    assert!(
+        output
+            .compiled_artifacts()
+            .artifact_files()
+            .any(|artifact| { artifact.file.ends_with("Caller.sol/Caller.json") })
+    );
 }
 
 #[test]
@@ -1173,6 +1838,59 @@ fn can_compile_dapp_detect_changes_in_resolved_imports() {
         cache.files[Path::new("src/UsesDep.sol")].imports,
         BTreeSet::from([PathBuf::from("lib/b/Impl.sol")])
     );
+}
+
+#[test]
+fn can_compile_dapp_detect_swapped_remapping_bindings() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let lib = project.paths().libraries[0].clone();
+    project.paths_mut().remappings.extend([
+        Remapping::from_str(&format!("@first/={}/", lib.join("a").display())).unwrap(),
+        Remapping::from_str(&format!("@second/={}/", lib.join("b").display())).unwrap(),
+    ]);
+
+    project
+        .add_source(
+            "UsesDeps",
+            r#"
+    pragma solidity ^0.8.10;
+    import {Impl as First} from "@first/Impl.sol";
+    import {Impl as Second} from "@second/Impl.sol";
+
+    contract UsesDeps {
+        function first() external returns (uint256) { return new First().value(); }
+        function second() external returns (uint256) { return new Second().value(); }
+    }
+   "#,
+        )
+        .unwrap();
+    project
+        .add_lib(
+            "a/Impl",
+            r#"
+    pragma solidity ^0.8.10;
+    contract Impl { function value() external pure returns (uint256) { return 1; } }
+   "#,
+        )
+        .unwrap();
+    project
+        .add_lib(
+            "b/Impl",
+            r#"
+    pragma solidity ^0.8.10;
+    contract Impl { function value() external pure returns (uint256) { return 2; } }
+   "#,
+        )
+        .unwrap();
+
+    project.compile().unwrap().assert_success();
+    assert!(project.compile().unwrap().is_unchanged());
+
+    project.paths_mut().remappings.swap(0, 1);
+
+    let compiled = project.compile().unwrap();
+    compiled.assert_success();
+    assert!(!compiled.is_unchanged());
 }
 
 #[test]
@@ -5503,6 +6221,44 @@ fn can_preprocess() {
     };
     compiled.assert_success();
     assert!(!compiled.is_unchanged());
+}
+
+#[test]
+fn preprocessor_version_invalidates_cache() {
+    #[derive(Debug)]
+    struct VersionedPreprocessor(u64);
+
+    impl Preprocessor<MultiCompiler> for VersionedPreprocessor {
+        fn cache_version(&self) -> u64 {
+            self.0
+        }
+
+        fn preprocess(
+            &self,
+            _compiler: &MultiCompiler,
+            _input: &mut MultiCompilerInput,
+            _paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _mocks: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.add_source("Contract.sol", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
+
+    let compile = |version| {
+        ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(VersionedPreprocessor(version))
+            .compile()
+            .unwrap()
+    };
+
+    assert!(!compile(1).is_unchanged());
+    assert!(compile(1).is_unchanged());
+    assert!(!compile(2).is_unchanged());
+    assert!(compile(2).is_unchanged());
 }
 
 #[test]
