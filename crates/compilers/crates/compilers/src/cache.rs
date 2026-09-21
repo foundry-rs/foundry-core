@@ -1555,7 +1555,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 let current = cache
                     .cache
                     .native_dependencies
-                    .entry(file.clone())
+                    .entry(file)
                     .or_default()
                     .entry(version.clone())
                     .or_default();
