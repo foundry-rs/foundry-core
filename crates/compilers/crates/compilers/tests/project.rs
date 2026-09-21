@@ -687,6 +687,85 @@ fn preprocessor_state_replaces_only_compiled_profile() {
 }
 
 #[test]
+fn retired_profile_drops_native_dependency_context() {
+    #[derive(Debug)]
+    struct ClassifyTarget(bool);
+
+    impl Preprocessor<MultiCompiler> for ClassifyTarget {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> foundry_compilers::error::Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if input.input.sources.contains_key(Path::new("src/Target.sol")) {
+                state.update(
+                    paths.root.join("src/Target.sol"),
+                    self.0.then_some(NativeDependencyState::Conservative),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    let mut optimized = project.project().settings.clone();
+    optimized.solc.optimizer.enabled = Some(true);
+    optimized.solc.optimizer.runs = Some(10000);
+    project.project_mut().additional_settings.insert("optimized".to_owned(), optimized);
+    let target =
+        project.add_source("Target", "pragma solidity ^0.8.0; contract Target {}").unwrap();
+    project.project_mut().restrictions.insert(
+        target,
+        RestrictionsWithVersion {
+            restrictions: MultiCompilerRestrictions {
+                solc: SolcRestrictions {
+                    optimizer_runs: Restriction { min: Some(10000), ..Default::default() },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            version: None,
+        },
+    );
+
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyTarget(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    project.project_mut().additional_settings.clear();
+    project.project_mut().restrictions.clear();
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyTarget(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    cache.join_entries(project.root());
+    assert!(!cache.native_dependencies.contains_key(&project.paths().sources.join("Target.sol")));
+}
+
+#[test]
 fn preprocessor_state_preserves_dependency_for_optimized_import() {
     #[derive(Debug)]
     struct ClassifyConsumer(bool);
@@ -788,6 +867,175 @@ fn preprocessor_state_preserves_dependency_for_optimized_import() {
             .paths()
             .sources
             .join("Dep.sol")])))
+    );
+}
+
+#[test]
+fn conservative_dependency_recompiles_after_repeated_sparse_edits() {
+    #[derive(Debug)]
+    struct ConservativeConsumer;
+
+    impl Preprocessor<MultiCompiler> for ConservativeConsumer {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> foundry_compilers::error::Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if input.input.sources.contains_key(Path::new("test/Consumer.sol")) {
+                state.update(
+                    paths.root.join("test/Consumer.sol"),
+                    Some(NativeDependencyState::Conservative),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let dependency = project
+        .add_source("Dependency", "pragma solidity ^0.8.0; contract Dependency { uint value = 1; }")
+        .unwrap();
+    let consumer =
+        project.add_test("Consumer", "pragma solidity ^0.8.0; contract Consumer {}").unwrap();
+
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ConservativeConsumer)
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    for value in [2, 3] {
+        fs::write(
+            &dependency,
+            format!("pragma solidity ^0.8.0; contract Dependency {{ uint value = {value}; }}"),
+        )
+        .unwrap();
+        let output = ProjectCompiler::with_sources(
+            project.project(),
+            Source::read_all([&consumer]).unwrap(),
+        )
+        .unwrap()
+        .with_preprocessor(ConservativeConsumer)
+        .compile()
+        .unwrap();
+        output.assert_success();
+        assert!(!output.is_unchanged(), "edit {value} was hidden by sparse cache eviction");
+        assert!(
+            output
+                .compiled_artifacts()
+                .artifact_files()
+                .any(|artifact| { artifact.file.ends_with("Consumer.sol/Consumer.json") })
+        );
+    }
+}
+
+#[test]
+fn optimized_import_observations_invalidate_new_consumers() {
+    #[derive(Debug)]
+    struct ReportDependencies(bool);
+
+    impl Preprocessor<MultiCompiler> for ReportDependencies {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> foundry_compilers::error::Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if self.0 && input.input.sources.contains_key(Path::new("test/Caller.sol")) {
+                state.update(
+                    paths.root.join("test/Consumer.sol"),
+                    Some(NativeDependencyState::Known(BTreeSet::from([paths
+                        .root
+                        .join("src/Dep.sol")]))),
+                );
+                state.update(
+                    paths.root.join("test/Caller.sol"),
+                    Some(NativeDependencyState::Known(BTreeSet::from([paths
+                        .root
+                        .join("test/Consumer.sol")]))),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let dependency = project
+        .add_source("Dep", "pragma solidity ^0.8.0; contract Dep { uint value = 1; }")
+        .unwrap();
+    project
+        .add_test(
+            "Consumer",
+            "pragma solidity ^0.8.0; import '../src/Dep.sol'; contract Consumer {}",
+        )
+        .unwrap();
+    let caller = project
+        .add_test(
+            "Caller",
+            "pragma solidity ^0.8.0; import './Consumer.sol'; contract Caller is Consumer {}",
+        )
+        .unwrap();
+
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ReportDependencies(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+    fs::write(
+        &caller,
+        "pragma solidity ^0.8.0; import './Consumer.sol'; contract Caller is Consumer { function changed() public {} }",
+    )
+    .unwrap();
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ReportDependencies(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    fs::write(dependency, "pragma solidity ^0.8.0; contract Dep { uint value = 2; }").unwrap();
+    let output = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ReportDependencies(false))
+        .compile()
+        .unwrap();
+    output.assert_success();
+    assert!(
+        output
+            .compiled_artifacts()
+            .artifact_files()
+            .any(|artifact| { artifact.file.ends_with("Caller.sol/Caller.json") })
     );
 }
 

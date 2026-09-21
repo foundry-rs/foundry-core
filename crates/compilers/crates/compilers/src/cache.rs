@@ -7,8 +7,8 @@ use crate::{
     compilers::{Compiler, CompilerSettings, Language},
     output::Builds,
     project::{
-        NativeDependencyContexts, NativeDependencyState, NativeDependencyUpdates,
-        collapse_native_dependency_contexts,
+        NativeDependencies, NativeDependencyContexts, NativeDependencyState,
+        NativeDependencyUpdates, collapse_native_dependency_contexts, merge_native_dependencies,
     },
     resolver::GraphEdges,
 };
@@ -232,8 +232,6 @@ impl<S: CompilerSettings> CompilerCache<S> {
             .into_iter()
             .map(|(path, entry)| (root.join(path), entry))
             .collect();
-        self.mocks =
-            std::mem::take(&mut self.mocks).into_iter().map(|path| root.join(path)).collect();
         self.native_dependencies = std::mem::take(&mut self.native_dependencies)
             .into_iter()
             .map(|(file, versions)| {
@@ -274,10 +272,6 @@ impl<S: CompilerSettings> CompilerCache<S> {
         self.files = std::mem::take(&mut self.files)
             .into_iter()
             .map(|(path, entry)| (path.strip_prefix(base).map(Into::into).unwrap_or(path), entry))
-            .collect();
-        self.mocks = std::mem::take(&mut self.mocks)
-            .into_iter()
-            .map(|path| path.strip_prefix(base).map(Into::into).unwrap_or(path))
             .collect();
         self.native_dependencies = std::mem::take(&mut self.native_dependencies)
             .into_iter()
@@ -1012,6 +1006,30 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
         let mut sources = Sources::new();
 
+        // Conservative classifications depend on every remembered source. A sparse build can
+        // evict an out-of-scope source's cache entry, so the missing fingerprint itself must keep
+        // conservative consumers dirty until that source is observed again.
+        if self.cache.native_dependencies.values().any(|versions| {
+            versions
+                .values()
+                .flat_map(BTreeMap::values)
+                .any(|state| matches!(state, NativeDependencyState::Conservative))
+        }) {
+            self.dirty_sources.extend(
+                self.cache
+                    .preprocessor_source_units
+                    .iter()
+                    .map(|file| {
+                        if file.is_absolute() {
+                            file.clone()
+                        } else {
+                            self.project.root().join(file)
+                        }
+                    })
+                    .filter(|file| !files.contains(file)),
+            );
+        }
+
         // Read all sources, marking entries as dirty on I/O errors.
         for file in &files {
             let Ok(source) = Source::read(file) else {
@@ -1131,6 +1149,13 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             trace!(profile, "removing dirty profile and artifacts");
             self.cache.profiles.remove(profile);
         }
+        self.cache.native_dependencies.retain(|_, versions| {
+            versions.retain(|_, contexts| {
+                contexts.retain(|profile, _| !dirty_profiles.contains(profile));
+                !contexts.is_empty()
+            });
+            !versions.is_empty()
+        });
 
         for (profile, settings) in existing_profiles {
             if !self.cache.profiles.contains_key(profile) {
@@ -1487,15 +1512,18 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         }
     }
 
-    /// Applies classifications from compiled jobs, replacing only their matching contexts.
+    /// Applies classifications from compiler jobs.
+    ///
+    /// Recompiled artifacts replace their matching contexts. Observations from optimized inputs
+    /// are merged because newly compiled consumers can embed their transitive native dependencies.
     pub fn apply_native_dependency_updates(&mut self, updates: NativeDependencyUpdates) {
         let ArtifactsCache::Cached(cache) = self else { return };
-        for ((version, profile), (processed, dependencies)) in updates.contexts {
-            for file in processed {
+        for ((version, profile), updates) in updates.contexts {
+            for file in updates.processed {
                 let versions = cache.cache.native_dependencies.entry(file.clone()).or_default();
                 let profiles = versions.entry(version.clone()).or_default();
                 profiles.remove(&profile);
-                if let Some(state) = dependencies.get(&file) {
+                if let Some(state) = updates.replacements.get(&file) {
                     profiles.insert(profile.clone(), state.clone());
                 }
                 if profiles.is_empty() {
@@ -1503,6 +1531,25 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 }
                 if versions.is_empty() {
                     cache.cache.native_dependencies.remove(&file);
+                }
+            }
+            for (file, state) in updates.observations {
+                let current = cache
+                    .cache
+                    .native_dependencies
+                    .entry(file.clone())
+                    .or_default()
+                    .entry(version.clone())
+                    .or_default();
+                if let Some(existing) = current.get(&profile).cloned() {
+                    let mut dependencies = NativeDependencies::from([(file.clone(), existing)]);
+                    merge_native_dependencies(
+                        &mut dependencies,
+                        NativeDependencies::from([(file.clone(), state)]),
+                    );
+                    current.insert(profile.clone(), dependencies.remove(&file).unwrap());
+                } else {
+                    current.insert(profile.clone(), state);
                 }
             }
         }
@@ -1721,7 +1768,7 @@ mod tests {
         };
 
         cache.strip_entries_prefix(&old_root);
-        assert_eq!(cache.mocks, HashSet::from([PathBuf::from("test/Importer.t.sol")]));
+        assert_eq!(cache.mocks, HashSet::from([old_root.join("test/Importer.t.sol")]));
         assert_eq!(
             cache.native_dependencies,
             [(
@@ -1735,7 +1782,7 @@ mod tests {
         );
 
         cache.join_entries(&new_root);
-        assert_eq!(cache.mocks, HashSet::from([new_root.join("test/Importer.t.sol")]));
+        assert_eq!(cache.mocks, HashSet::from([old_root.join("test/Importer.t.sol")]));
         assert_eq!(
             cache.native_dependencies,
             [(

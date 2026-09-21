@@ -196,7 +196,14 @@ pub fn collapse_native_dependency_contexts(
 /// Updates produced by preprocessing compiler jobs in one request.
 #[derive(Debug, Default)]
 pub struct NativeDependencyUpdates {
-    pub(crate) contexts: BTreeMap<(Version, String), (HashSet<PathBuf>, NativeDependencies)>,
+    pub(crate) contexts: BTreeMap<(Version, String), NativeDependencyContextUpdates>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct NativeDependencyContextUpdates {
+    pub(crate) processed: HashSet<PathBuf>,
+    pub(crate) replacements: NativeDependencies,
+    pub(crate) observations: NativeDependencies,
 }
 
 /// Merges classifications from compiler jobs, with conservative entries dominating exact edges.
@@ -255,13 +262,25 @@ impl PreprocessorState {
     pub fn update(&mut self, file: PathBuf, state: Option<NativeDependencyState>) -> bool {
         let first_update = self.processed_sources.insert(file.clone());
         if !self.active_replacements.contains(&file) {
+            if let Some(state) = state {
+                let context =
+                    self.active_context.clone().expect("preprocessor context must be set");
+                let updates = self.updates.contexts.entry(context).or_default();
+                merge_native_dependencies(
+                    &mut updates.observations,
+                    NativeDependencies::from([(file, state)]),
+                );
+            }
             return first_update;
         }
         let context = self.active_context.clone().expect("preprocessor context must be set");
-        let (processed, dependencies) = self.updates.contexts.entry(context).or_default();
-        processed.insert(file.clone());
+        let updates = self.updates.contexts.entry(context).or_default();
+        updates.processed.insert(file.clone());
         if let Some(state) = state {
-            merge_native_dependencies(dependencies, NativeDependencies::from([(file, state)]));
+            merge_native_dependencies(
+                &mut updates.replacements,
+                NativeDependencies::from([(file, state)]),
+            );
         }
         first_update
     }
@@ -334,13 +353,13 @@ mod native_dependency_tests {
         assert!(!state.update(merged.clone(), Some(NativeDependencyState::Conservative)));
 
         let updates = state.into_updates();
-        let (processed, dependencies) =
-            &updates.contexts[&(Version::new(0, 8, 30), "default".to_owned())];
-        assert_eq!(processed, &HashSet::from([cleared, merged.clone()]));
+        let updates = &updates.contexts[&(Version::new(0, 8, 30), "default".to_owned())];
+        assert_eq!(updates.processed, HashSet::from([cleared, merged.clone()]));
         assert_eq!(
-            dependencies,
-            &NativeDependencies::from([(merged, NativeDependencyState::Conservative)])
+            updates.replacements,
+            NativeDependencies::from([(merged, NativeDependencyState::Conservative)])
         );
+        assert!(updates.observations.is_empty());
     }
 
     #[test]
@@ -363,11 +382,14 @@ mod native_dependency_tests {
 
         let updates = state.into_updates();
         assert_eq!(updates.contexts.len(), 2);
-        assert_eq!(updates.contexts.values().map(|(files, _)| files.len()).sum::<usize>(), 2);
+        assert_eq!(
+            updates.contexts.values().map(|updates| updates.processed.len()).sum::<usize>(),
+            2
+        );
     }
 
     #[test]
-    fn preprocessor_state_ignores_updates_for_surviving_artifacts() {
+    fn preprocessor_state_does_not_clear_surviving_artifacts() {
         let file = PathBuf::from("optimized.sol");
         let mut state = PreprocessorState::new();
         state.set_context(Version::new(0, 8, 30), "default".to_owned(), &[]);
