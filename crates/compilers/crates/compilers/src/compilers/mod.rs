@@ -21,6 +21,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+pub mod fe;
 pub mod multi;
 pub mod solc;
 pub mod vyper;

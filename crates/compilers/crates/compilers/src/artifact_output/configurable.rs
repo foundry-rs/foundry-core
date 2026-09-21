@@ -237,7 +237,9 @@ impl ArtifactOutput for ConfigurableArtifacts {
             ir_optimized_ast,
         } = contract;
 
-        if (self.additional_values.metadata || self.additional_files.metadata)
+        if (self.additional_values.metadata
+            || self.additional_files.metadata
+            || metadata.as_ref().is_some_and(|m| m.metadata.language == "Fe"))
             && let Some(LosslessMetadata { raw_metadata, metadata }) = metadata
         {
             artifact_raw_metadata = Some(raw_metadata);
@@ -425,7 +427,11 @@ impl ArtifactOutput for ConfigurableArtifacts {
                     self.additional_files
                         .process_ir_optimized(artifact.ir_optimized.as_deref(), file)?;
                     self.additional_files.process_ewasm(artifact.ewasm.as_ref(), file)?;
-                    self.additional_files.process_metadata(artifact.metadata.as_ref(), file)?;
+                    self.additional_files.process_metadata(
+                        artifact.metadata.as_ref(),
+                        artifact.raw_metadata.as_deref(),
+                        file,
+                    )?;
                     self.additional_files
                         .process_source_map(artifact.get_source_map_str().as_deref(), file)?;
                 }
@@ -691,13 +697,27 @@ impl ExtraOutputFiles {
         Ok(())
     }
 
-    fn process_metadata(&self, metadata: Option<&Metadata>, file: &Path) -> Result<(), SolcError> {
+    fn process_metadata(
+        &self,
+        metadata: Option<&Metadata>,
+        raw_metadata: Option<&str>,
+        file: &Path,
+    ) -> Result<(), SolcError> {
         if self.metadata
             && let Some(metadata) = metadata
         {
             let file = file.with_extension("metadata.json");
-            fs::write(&file, serde_json::to_string_pretty(metadata)?)
-                .map_err(|err| SolcError::io(err, file))?
+            fs::write(
+                &file,
+                if metadata.language == "Fe" {
+                    raw_metadata
+                        .ok_or_else(|| SolcError::msg("missing raw Fe metadata"))?
+                        .to_string()
+                } else {
+                    serde_json::to_string_pretty(metadata)?
+                },
+            )
+            .map_err(|err| SolcError::io(err, file))?
         }
         Ok(())
     }
@@ -819,7 +839,11 @@ impl ExtraOutputFiles {
     /// Write the set values as separate files
     pub fn write_extras(&self, contract: &Contract, file: &Path) -> Result<(), SolcError> {
         self.process_abi(contract.abi.as_ref(), file)?;
-        self.process_metadata(contract.metadata.as_ref().map(|m| &m.metadata), file)?;
+        self.process_metadata(
+            contract.metadata.as_ref().map(|m| &m.metadata),
+            contract.metadata.as_ref().map(|m| m.raw_metadata.as_str()),
+            file,
+        )?;
         self.process_ir(contract.ir.as_deref(), file)?;
         self.process_ir_optimized(contract.ir_optimized.as_deref(), file)?;
         self.process_ewasm(contract.ewasm.as_ref(), file)?;

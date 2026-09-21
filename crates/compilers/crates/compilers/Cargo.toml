@@ -20,6 +20,8 @@ foundry-compilers-artifacts = { version = "0.21.0", path = "../artifacts/artifac
     "rayon",
 ] }
 foundry-compilers-core = { version = "0.21.0", path = "../core", features = ["hasher", "regex"] }
+toml.workspace = true
+walkdir.workspace = true
 serde.workspace = true
 semver.workspace = true
 alloy-primitives.workspace = true

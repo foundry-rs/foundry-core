@@ -1,6 +1,7 @@
 use super::{
     CompilationError, Compiler, CompilerInput, CompilerOutput, CompilerSettings, CompilerVersion,
     Language, ParsedSource,
+    fe::{Fe, FeInput, FeLanguage, FeParsedSource, FeParser, FeSettings},
     restrictions::CompilerSettingsRestrictions,
     solc::{SOLC_EXTENSIONS, SolcCompiler, SolcSettings, SolcVersionedInput},
     vyper::{
@@ -33,11 +34,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Compiler capable of compiling both Solidity and Vyper sources.
+/// Compiler capable of compiling Solidity, Vyper and Fe sources.
 #[derive(Clone, Debug)]
 pub struct MultiCompiler {
     pub solc: Option<SolcCompiler>,
     pub vyper: Option<Vyper>,
+    pub fe: Option<Fe>,
 }
 
 impl Default for MultiCompiler {
@@ -49,14 +51,14 @@ impl Default for MultiCompiler {
         #[cfg(not(feature = "svm-solc"))]
         let solc = crate::solc::Solc::new("solc").map(SolcCompiler::Specific).ok();
 
-        Self { solc, vyper }
+        Self { solc, vyper, fe: Fe::new("fe").ok() }
     }
 }
 
 impl MultiCompiler {
     pub fn new(solc: Option<SolcCompiler>, vyper_path: Option<PathBuf>) -> Result<Self> {
         let vyper = vyper_path.map(Vyper::new).transpose()?;
-        Ok(Self { solc, vyper })
+        Ok(Self { solc, vyper, fe: Fe::new("fe").ok() })
     }
 }
 
@@ -66,6 +68,7 @@ impl MultiCompiler {
 pub enum MultiCompilerLanguage {
     Solc(SolcLanguage),
     Vyper(VyperLanguage),
+    Fe(FeLanguage),
 }
 
 impl Default for MultiCompilerLanguage {
@@ -97,7 +100,7 @@ impl From<VyperLanguage> for MultiCompilerLanguage {
 }
 
 impl Language for MultiCompilerLanguage {
-    const FILE_EXTENSIONS: &'static [&'static str] = &["sol", "vy", "vyi", "yul"];
+    const FILE_EXTENSIONS: &'static [&'static str] = &["sol", "vy", "vyi", "yul", "fe"];
 }
 
 impl fmt::Display for MultiCompilerLanguage {
@@ -105,15 +108,17 @@ impl fmt::Display for MultiCompilerLanguage {
         match self {
             Self::Solc(lang) => lang.fmt(f),
             Self::Vyper(lang) => lang.fmt(f),
+            Self::Fe(lang) => lang.fmt(f),
         }
     }
 }
 
-/// Source parser for the [`MultiCompiler`]. Recognizes Solc and Vyper sources.
+/// Source parser for the [`MultiCompiler`]. Recognizes Solc, Vyper and Fe sources.
 #[derive(Clone, Debug)]
 pub struct MultiCompilerParser {
     solc: SolParser,
     vyper: VyperParser,
+    fe: FeParser,
 }
 
 impl MultiCompilerParser {
@@ -138,11 +143,12 @@ impl MultiCompilerParser {
     }
 }
 
-/// Source parser for the [MultiCompiler]. Recognizes Solc and Vyper sources.
+/// Source parser for the [MultiCompiler]. Recognizes Solc, Vyper and Fe sources.
 #[derive(Clone, Debug)]
 pub enum MultiCompilerParsedSource {
     Solc(SolData),
     Vyper(VyperParsedSource),
+    Fe(FeParsedSource),
 }
 
 impl From<SolData> for MultiCompilerParsedSource {
@@ -173,12 +179,13 @@ impl MultiCompilerParsedSource {
     }
 }
 
-/// Compilation error which may occur when compiling Solidity or Vyper sources.
+/// Compilation error which may occur when compiling Solidity, Vyper or Fe sources.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum MultiCompilerError {
     Solc(Error),
     Vyper(VyperCompilationError),
+    Fe(Error),
 }
 
 impl fmt::Display for MultiCompilerError {
@@ -186,6 +193,7 @@ impl fmt::Display for MultiCompilerError {
         match self {
             Self::Solc(error) => error.fmt(f),
             Self::Vyper(error) => error.fmt(f),
+            Self::Fe(error) => error.fmt(f),
         }
     }
 }
@@ -202,18 +210,22 @@ impl CompilerSettingsRestrictions for MultiCompilerRestrictions {
     }
 }
 
-/// Settings for the [MultiCompiler]. Includes settings for both Solc and Vyper compilers.
+/// Settings for the [MultiCompiler]. Includes settings for Solc, Vyper and Fe compilers.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiCompilerSettings {
     pub solc: SolcSettings,
     pub vyper: VyperSettings,
+    #[serde(default)]
+    pub fe: FeSettings,
 }
 
 impl CompilerSettings for MultiCompilerSettings {
     type Restrictions = MultiCompilerRestrictions;
 
     fn can_use_cached(&self, other: &Self) -> bool {
-        self.solc.can_use_cached(&other.solc) && self.vyper.can_use_cached(&other.vyper)
+        self.solc.can_use_cached(&other.solc)
+            && self.vyper.can_use_cached(&other.vyper)
+            && self.fe == other.fe
     }
 
     fn update_output_selection(&mut self, mut f: impl FnMut(&mut OutputSelection)) {
@@ -225,6 +237,7 @@ impl CompilerSettings for MultiCompilerSettings {
         Self {
             solc: self.solc.with_allow_paths(allowed_paths),
             vyper: self.vyper.with_allow_paths(allowed_paths),
+            fe: self.fe,
         }
     }
 
@@ -232,6 +245,7 @@ impl CompilerSettings for MultiCompilerSettings {
         Self {
             solc: self.solc.with_base_path(base_path),
             vyper: self.vyper.with_base_path(base_path),
+            fe: FeSettings { base_path: base_path.to_path_buf(), ..self.fe },
         }
     }
 
@@ -239,6 +253,7 @@ impl CompilerSettings for MultiCompilerSettings {
         Self {
             solc: self.solc.with_include_paths(include_paths),
             vyper: self.vyper.with_include_paths(include_paths),
+            fe: self.fe,
         }
     }
 
@@ -246,6 +261,7 @@ impl CompilerSettings for MultiCompilerSettings {
         Self {
             solc: self.solc.with_remappings(remappings),
             vyper: self.vyper.with_remappings(remappings),
+            fe: self.fe,
         }
     }
 
@@ -267,12 +283,13 @@ impl From<MultiCompilerSettings> for VyperSettings {
     }
 }
 
-/// Input for the [MultiCompiler]. Either Solc or Vyper input.
+/// Input for the [MultiCompiler]. Solc, Vyper or Fe input.
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum MultiCompilerInput {
     Solc(Box<SolcVersionedInput>),
     Vyper(VyperVersionedInput),
+    Fe(FeInput),
 }
 
 impl CompilerInput for MultiCompilerInput {
@@ -286,6 +303,7 @@ impl CompilerInput for MultiCompilerInput {
         version: Version,
     ) -> Self {
         match language {
+            MultiCompilerLanguage::Fe(_) => Self::Fe(FeInput::new(sources, settings.fe, version)),
             MultiCompilerLanguage::Solc(language) => Self::Solc(Box::new(
                 SolcVersionedInput::build(sources, settings.solc, language, version),
             )),
@@ -299,6 +317,7 @@ impl CompilerInput for MultiCompilerInput {
         match self {
             Self::Solc(input) => input.compiler_name(),
             Self::Vyper(input) => input.compiler_name(),
+            Self::Fe(input) => input.compiler_name(),
         }
     }
 
@@ -306,6 +325,7 @@ impl CompilerInput for MultiCompilerInput {
         match self {
             Self::Solc(input) => input.settings_summary(),
             Self::Vyper(input) => input.settings_summary(),
+            Self::Fe(input) => input.settings_summary(),
         }
     }
 
@@ -313,6 +333,7 @@ impl CompilerInput for MultiCompilerInput {
         match self {
             Self::Solc(input) => MultiCompilerLanguage::Solc(input.language()),
             Self::Vyper(input) => MultiCompilerLanguage::Vyper(input.language()),
+            Self::Fe(_) => MultiCompilerLanguage::Fe(FeLanguage::Fe),
         }
     }
 
@@ -320,6 +341,7 @@ impl CompilerInput for MultiCompilerInput {
         match self {
             Self::Solc(input) => input.strip_prefix(base),
             Self::Vyper(input) => input.strip_prefix(base),
+            Self::Fe(input) => input.strip_prefix(base),
         }
     }
 
@@ -327,6 +349,7 @@ impl CompilerInput for MultiCompilerInput {
         match self {
             Self::Solc(input) => input.version(),
             Self::Vyper(input) => input.version(),
+            Self::Fe(input) => &input.version,
         }
     }
 
@@ -334,6 +357,7 @@ impl CompilerInput for MultiCompilerInput {
         let ret: Box<dyn Iterator<Item = _>> = match self {
             Self::Solc(input) => Box::new(input.sources()),
             Self::Vyper(input) => Box::new(input.sources()),
+            Self::Fe(input) => Box::new(input.sources()),
         };
 
         ret
@@ -353,6 +377,7 @@ impl Compiler for MultiCompiler {
         input: &Self::Input,
     ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
         match input {
+            MultiCompilerInput::Fe(input) => self.fe.as_ref().ok_or_else(|| SolcError::msg("Fe compiler is not available; configure [profile.default.fe].path with Fe 26.3 or newer"))?.compile(input).map(|res| res.map_err(MultiCompilerError::Fe)),
             MultiCompilerInput::Solc(input) => {
                 if let Some(solc) = &self.solc {
                     Compiler::compile(solc, input).map(|res| res.map_err(MultiCompilerError::Solc))
@@ -373,6 +398,11 @@ impl Compiler for MultiCompiler {
 
     fn available_versions(&self, language: &Self::Language) -> Vec<CompilerVersion> {
         match language {
+            MultiCompilerLanguage::Fe(_) => self
+                .fe
+                .as_ref()
+                .map(|fe| vec![CompilerVersion::Installed(fe.version.clone())])
+                .unwrap_or_default(),
             MultiCompilerLanguage::Solc(language) => {
                 self.solc.as_ref().map(|s| s.available_versions(language)).unwrap_or_default()
             }
@@ -387,11 +417,18 @@ impl SourceParser for MultiCompilerParser {
     type ParsedSource = MultiCompilerParsedSource;
 
     fn new(config: &crate::ProjectPathsConfig) -> Self {
-        Self { solc: SolParser::new(config), vyper: VyperParser::new(config) }
+        Self {
+            solc: SolParser::new(config),
+            vyper: VyperParser::new(config),
+            fe: FeParser::new(config),
+        }
     }
 
     fn read(&mut self, path: &Path) -> Result<crate::resolver::Node<Self::ParsedSource>> {
         Ok(match guess_lang(path)? {
+            MultiCompilerLanguage::Fe(_) => {
+                self.fe.read(path)?.map_data(MultiCompilerParsedSource::Fe)
+            }
             MultiCompilerLanguage::Solc(_) => {
                 self.solc.read(path)?.map_data(MultiCompilerParsedSource::Solc)
             }
@@ -406,10 +443,15 @@ impl SourceParser for MultiCompilerParser {
         sources: &mut Sources,
     ) -> Result<Vec<(PathBuf, crate::resolver::Node<Self::ParsedSource>)>> {
         let mut vyper = Sources::new();
+        let mut fe = Sources::new();
         sources.retain(|path, source| {
             if let Ok(lang) = guess_lang(path) {
                 match lang {
                     MultiCompilerLanguage::Solc(_) => {}
+                    MultiCompilerLanguage::Fe(_) => {
+                        fe.insert(path.clone(), source.clone());
+                        return false;
+                    }
                     MultiCompilerLanguage::Vyper(_) => {
                         vyper.insert(path.clone(), source.clone());
                         return false;
@@ -419,11 +461,15 @@ impl SourceParser for MultiCompilerParser {
             true
         });
 
+        let fe_nodes = self.fe.parse_sources(&mut fe)?;
         let solc_nodes = self.solc.parse_sources(sources)?;
         let vyper_nodes = self.vyper.parse_sources(&mut vyper)?;
         Ok(solc_nodes
             .into_iter()
             .map(|(k, v)| (k, v.map_data(MultiCompilerParsedSource::Solc)))
+            .chain(
+                fe_nodes.into_iter().map(|(k, v)| (k, v.map_data(MultiCompilerParsedSource::Fe))),
+            )
             .chain(
                 vyper_nodes
                     .into_iter()
@@ -440,10 +486,12 @@ impl SourceParser for MultiCompilerParser {
         // Must maintain original order.
         let mut solc_nodes = Vec::new();
         let mut vyper_nodes = Vec::new();
+        let mut fe_nodes = Vec::new();
         let mut order = Vec::new();
         for node in std::mem::take(all_nodes) {
             order.push(node.data.language());
             match node.data {
+                MultiCompilerParsedSource::Fe(_) => fe_nodes.push(node),
                 MultiCompilerParsedSource::Solc(_) => {
                     solc_nodes.push(node.map_data(|data| match data {
                         MultiCompilerParsedSource::Solc(data) => data,
@@ -465,8 +513,10 @@ impl SourceParser for MultiCompilerParser {
         // Assume that the order was not changed by the parsers.
         let mut solc_nodes = solc_nodes.into_iter();
         let mut vyper_nodes = vyper_nodes.into_iter();
+        let mut fe_nodes = fe_nodes.into_iter();
         for lang in order {
             match lang {
+                MultiCompilerLanguage::Fe(_) => all_nodes.push(fe_nodes.next().unwrap()),
                 MultiCompilerLanguage::Solc(_) => {
                     all_nodes.push(solc_nodes.next().unwrap().map_data(Into::into));
                 }
@@ -491,6 +541,7 @@ impl ParsedSource for MultiCompilerParsedSource {
 
     fn parse(content: &str, file: &Path) -> Result<Self> {
         match guess_lang(file)? {
+            MultiCompilerLanguage::Fe(_) => FeParsedSource::parse(content, file).map(Self::Fe),
             MultiCompilerLanguage::Solc(_) => {
                 <SolData as ParsedSource>::parse(content, file).map(Self::Solc)
             }
@@ -504,6 +555,7 @@ impl ParsedSource for MultiCompilerParsedSource {
         match self {
             Self::Solc(parsed) => parsed.version_req(),
             Self::Vyper(parsed) => parsed.version_req(),
+            Self::Fe(parsed) => parsed.version_req(),
         }
     }
 
@@ -511,6 +563,7 @@ impl ParsedSource for MultiCompilerParsedSource {
         match self {
             Self::Solc(parsed) => parsed.contract_names(),
             Self::Vyper(parsed) => parsed.contract_names(),
+            Self::Fe(parsed) => parsed.contract_names(),
         }
     }
 
@@ -518,6 +571,7 @@ impl ParsedSource for MultiCompilerParsedSource {
         match self {
             Self::Solc(parsed) => MultiCompilerLanguage::Solc(parsed.language()),
             Self::Vyper(parsed) => MultiCompilerLanguage::Vyper(parsed.language()),
+            Self::Fe(parsed) => MultiCompilerLanguage::Fe(parsed.language()),
         }
     }
 
@@ -529,6 +583,7 @@ impl ParsedSource for MultiCompilerParsedSource {
         match self {
             Self::Solc(parsed) => parsed.resolve_imports(paths, include_paths),
             Self::Vyper(parsed) => parsed.resolve_imports(paths, include_paths),
+            Self::Fe(parsed) => parsed.resolve_imports(paths, include_paths),
         }
     }
 
@@ -540,6 +595,7 @@ impl ParsedSource for MultiCompilerParsedSource {
         Self: 'a,
     {
         match self {
+            Self::Fe(_) => imported_nodes.map(|(path, _)| path).collect::<Vec<_>>(),
             Self::Solc(parsed) => parsed
                 .compilation_dependencies(
                     imported_nodes.filter_map(|(path, node)| node.solc().map(|node| (path, node))),
@@ -560,7 +616,9 @@ fn guess_lang(path: &Path) -> Result<MultiCompilerLanguage> {
         .extension()
         .and_then(|e| e.to_str())
         .ok_or_else(|| SolcError::msg("failed to resolve file extension"))?;
-    if SOLC_EXTENSIONS.contains(&extension) {
+    if extension == "fe" || path.file_name().is_some_and(|n| n == "fe.toml") {
+        Ok(MultiCompilerLanguage::Fe(FeLanguage::Fe))
+    } else if SOLC_EXTENSIONS.contains(&extension) {
         Ok(MultiCompilerLanguage::Solc(match extension {
             "sol" => SolcLanguage::Solidity,
             "yul" => SolcLanguage::Yul,
@@ -578,12 +636,14 @@ impl CompilationError for MultiCompilerError {
         match self {
             Self::Solc(error) => error.is_warning(),
             Self::Vyper(error) => error.is_warning(),
+            Self::Fe(error) => error.is_warning(),
         }
     }
     fn is_error(&self) -> bool {
         match self {
             Self::Solc(error) => error.is_error(),
             Self::Vyper(error) => error.is_error(),
+            Self::Fe(error) => error.is_error(),
         }
     }
 
@@ -591,6 +651,7 @@ impl CompilationError for MultiCompilerError {
         match self {
             Self::Solc(error) => error.source_location(),
             Self::Vyper(error) => error.source_location(),
+            Self::Fe(error) => error.source_location(),
         }
     }
 
@@ -598,6 +659,7 @@ impl CompilationError for MultiCompilerError {
         match self {
             Self::Solc(error) => error.severity(),
             Self::Vyper(error) => error.severity(),
+            Self::Fe(error) => error.severity(),
         }
     }
 
@@ -605,6 +667,7 @@ impl CompilationError for MultiCompilerError {
         match self {
             Self::Solc(error) => error.error_code(),
             Self::Vyper(error) => error.error_code(),
+            Self::Fe(error) => error.error_code(),
         }
     }
 }

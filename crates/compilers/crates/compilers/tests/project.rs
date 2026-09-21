@@ -5787,6 +5787,7 @@ fn test_deterministic_metadata() {
             Solc::find_svm_installed_version(&Version::new(0, 8, 18)).unwrap().unwrap(),
         )),
         vyper: None,
+        fe: None,
     };
     let paths = ProjectPathsConfig::builder().root(root).build().unwrap();
     let project = Project::builder().paths(paths).build(compiler).unwrap();
@@ -5913,10 +5914,11 @@ fn test_can_compile_multi() {
             ..Default::default()
         },
         solc: Default::default(),
+        fe: Default::default(),
     };
 
     let compiler =
-        MultiCompiler { solc: Some(SolcCompiler::default()), vyper: Some(VYPER.clone()) };
+        MultiCompiler { solc: Some(SolcCompiler::default()), vyper: Some(VYPER.clone()), fe: None };
 
     let project = ProjectBuilder::<MultiCompiler>::new(Default::default())
         .settings(settings)
