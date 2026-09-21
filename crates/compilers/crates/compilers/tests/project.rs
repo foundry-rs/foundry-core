@@ -586,7 +586,7 @@ fn abi_cache_preserves_cached_profiles_during_partial_compilation() {
 }
 
 #[test]
-fn preprocessor_state_preserves_clean_dependency_across_profiles() {
+fn preprocessor_state_replaces_only_compiled_profile() {
     #[derive(Debug)]
     struct ClassifyCommon(bool);
 
@@ -670,8 +670,19 @@ fn preprocessor_state_preserves_clean_dependency_across_profiles() {
     let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
     cache.join_entries(project.root());
     assert_eq!(
-        cache.native_dependencies.get(&project.paths().sources.join("Common.sol")),
+        cache
+            .native_dependencies
+            .get(&project.paths().sources.join("Common.sol"))
+            .and_then(|versions| versions.get(&Version::new(0, 8, 30)))
+            .and_then(|profiles| profiles.get("default")),
         Some(&NativeDependencyState::Conservative)
+    );
+    assert!(
+        cache
+            .native_dependencies
+            .get(&project.paths().sources.join("Common.sol"))
+            .and_then(|versions| versions.get(&Version::new(0, 8, 30)))
+            .is_some_and(|profiles| !profiles.contains_key("optimized"))
     );
 }
 

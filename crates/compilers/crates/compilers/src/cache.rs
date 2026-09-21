@@ -6,7 +6,10 @@ use crate::{
     buildinfo::RawBuildInfo,
     compilers::{Compiler, CompilerSettings, Language},
     output::Builds,
-    project::{NativeDependencies, NativeDependencyState},
+    project::{
+        NativeDependencyContexts, NativeDependencyState, NativeDependencyUpdates,
+        collapse_native_dependency_contexts,
+    },
     resolver::GraphEdges,
 };
 use foundry_compilers_artifacts::{
@@ -62,9 +65,9 @@ pub struct CompilerCache<S = Settings> {
     #[serde(default)]
     pub remappings: Vec<Remapping>,
     pub mocks: HashSet<PathBuf>,
-    /// Native bytecode dependencies keyed by the source that embeds them.
+    /// Native bytecode dependencies keyed by source, compiler version, and profile.
     #[serde(default)]
-    pub native_dependencies: NativeDependencies,
+    pub native_dependencies: NativeDependencyContexts,
 }
 
 impl<S> CompilerCache<S> {
@@ -233,14 +236,33 @@ impl<S: CompilerSettings> CompilerCache<S> {
             std::mem::take(&mut self.mocks).into_iter().map(|path| root.join(path)).collect();
         self.native_dependencies = std::mem::take(&mut self.native_dependencies)
             .into_iter()
-            .map(|(file, state)| {
-                let state = match state {
-                    NativeDependencyState::Known(dependencies) => NativeDependencyState::Known(
-                        dependencies.into_iter().map(|path| root.join(path)).collect(),
-                    ),
-                    NativeDependencyState::Conservative => NativeDependencyState::Conservative,
-                };
-                (root.join(file), state)
+            .map(|(file, versions)| {
+                let versions = versions
+                    .into_iter()
+                    .map(|(version, profiles)| {
+                        let profiles = profiles
+                            .into_iter()
+                            .map(|(profile, state)| {
+                                let state = match state {
+                                    NativeDependencyState::Known(dependencies) => {
+                                        NativeDependencyState::Known(
+                                            dependencies
+                                                .into_iter()
+                                                .map(|path| root.join(path))
+                                                .collect(),
+                                        )
+                                    }
+                                    NativeDependencyState::Conservative => {
+                                        NativeDependencyState::Conservative
+                                    }
+                                };
+                                (profile, state)
+                            })
+                            .collect();
+                        (version, profiles)
+                    })
+                    .collect();
+                (root.join(file), versions)
             })
             .collect();
         self
@@ -259,18 +281,38 @@ impl<S: CompilerSettings> CompilerCache<S> {
             .collect();
         self.native_dependencies = std::mem::take(&mut self.native_dependencies)
             .into_iter()
-            .map(|(file, state)| {
+            .map(|(file, versions)| {
                 let file = file.strip_prefix(base).map(Into::into).unwrap_or(file);
-                let state = match state {
-                    NativeDependencyState::Known(dependencies) => NativeDependencyState::Known(
-                        dependencies
+                let versions = versions
+                    .into_iter()
+                    .map(|(version, profiles)| {
+                        let profiles = profiles
                             .into_iter()
-                            .map(|path| path.strip_prefix(base).map(Into::into).unwrap_or(path))
-                            .collect(),
-                    ),
-                    NativeDependencyState::Conservative => NativeDependencyState::Conservative,
-                };
-                (file, state)
+                            .map(|(profile, state)| {
+                                let state = match state {
+                                    NativeDependencyState::Known(dependencies) => {
+                                        NativeDependencyState::Known(
+                                            dependencies
+                                                .into_iter()
+                                                .map(|path| {
+                                                    path.strip_prefix(base)
+                                                        .map(Into::into)
+                                                        .unwrap_or(path)
+                                                })
+                                                .collect(),
+                                        )
+                                    }
+                                    NativeDependencyState::Conservative => {
+                                        NativeDependencyState::Conservative
+                                    }
+                                };
+                                (profile, state)
+                            })
+                            .collect();
+                        (version, profiles)
+                    })
+                    .collect();
+                (file, versions)
             })
             .collect();
         self
@@ -302,7 +344,8 @@ impl<S: CompilerSettings> CompilerCache<S> {
                 trace!("remove {} from cache", file.display());
             }
             exists
-        })
+        });
+        self.native_dependencies.retain(|file, _| file.exists());
     }
 
     /// Checks if all artifact files exist
@@ -1001,6 +1044,8 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             }
 
             if self.cache.preprocessed {
+                let native_dependencies =
+                    collapse_native_dependency_contexts(&self.cache.native_dependencies);
                 // Propagate changes until every importer has been considered. Native bytecode
                 // dependencies are explicit edges and are invalidated by any implementation
                 // change, while dynamically linked dependencies retain interface-only invalidation.
@@ -1011,7 +1056,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                             continue;
                         }
                         let is_src = self.is_source_file(file);
-                        let native_dependency = self.cache.native_dependencies.get(file);
+                        let native_dependency = native_dependencies.get(file);
                         if native_dependency.is_some_and(|state| match state {
                             NativeDependencyState::Known(dependencies) => {
                                 dependencies.iter().any(|dep| self.dirty_sources.contains(dep))
@@ -1426,19 +1471,40 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         }
     }
 
-    /// Replaces persisted native bytecode dependency edges.
-    pub fn update_native_dependencies(&mut self, dependencies: NativeDependencies) {
+    /// Replaces persisted native bytecode dependency contexts.
+    pub fn update_native_dependency_contexts(&mut self, dependencies: NativeDependencyContexts) {
         match self {
             ArtifactsCache::Ephemeral(..) => {}
             ArtifactsCache::Cached(cache) => cache.cache.native_dependencies = dependencies,
         }
     }
 
-    /// Returns persisted native bytecode dependency edges.
-    pub fn native_dependencies(&self) -> NativeDependencies {
+    /// Returns persisted native bytecode dependency contexts.
+    pub fn native_dependency_contexts(&self) -> NativeDependencyContexts {
         match self {
             ArtifactsCache::Ephemeral(..) => BTreeMap::default(),
             ArtifactsCache::Cached(cache) => cache.cache.native_dependencies.clone(),
+        }
+    }
+
+    /// Applies classifications from compiled jobs, replacing only their matching contexts.
+    pub fn apply_native_dependency_updates(&mut self, updates: NativeDependencyUpdates) {
+        let ArtifactsCache::Cached(cache) = self else { return };
+        for ((version, profile), (processed, dependencies)) in updates.contexts {
+            for file in processed {
+                let versions = cache.cache.native_dependencies.entry(file.clone()).or_default();
+                let profiles = versions.entry(version.clone()).or_default();
+                profiles.remove(&profile);
+                if let Some(state) = dependencies.get(&file) {
+                    profiles.insert(profile.clone(), state.clone());
+                }
+                if profiles.is_empty() {
+                    versions.remove(&version);
+                }
+                if versions.is_empty() {
+                    cache.cache.native_dependencies.remove(&file);
+                }
+            }
         }
     }
 
@@ -1625,10 +1691,17 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 mod tests {
     use super::CompilerCache;
     use crate::{project::NativeDependencyState, solc::SolcSettings};
+    use semver::Version;
     use std::{
-        collections::{BTreeSet, HashSet},
+        collections::{BTreeMap, BTreeSet, HashSet},
         path::PathBuf,
     };
+
+    fn context(
+        state: NativeDependencyState,
+    ) -> BTreeMap<Version, BTreeMap<String, NativeDependencyState>> {
+        BTreeMap::from([(Version::new(0, 8, 30), BTreeMap::from([("default".to_owned(), state)]))])
+    }
 
     #[test]
     fn dependency_paths_follow_cache_root() {
@@ -1640,7 +1713,7 @@ mod tests {
             mocks: HashSet::from([importer.clone()]),
             native_dependencies: [(
                 importer,
-                NativeDependencyState::Known(BTreeSet::from([dependency])),
+                context(NativeDependencyState::Known(BTreeSet::from([dependency]))),
             )]
             .into_iter()
             .collect(),
@@ -1653,9 +1726,9 @@ mod tests {
             cache.native_dependencies,
             [(
                 PathBuf::from("test/Importer.t.sol"),
-                NativeDependencyState::Known(BTreeSet::from([
-                    PathBuf::from("src/Dependency.sol",)
-                ])),
+                context(NativeDependencyState::Known(BTreeSet::from([PathBuf::from(
+                    "src/Dependency.sol",
+                )]))),
             )]
             .into_iter()
             .collect()
@@ -1667,9 +1740,9 @@ mod tests {
             cache.native_dependencies,
             [(
                 new_root.join("test/Importer.t.sol"),
-                NativeDependencyState::Known(BTreeSet::from(
-                    [new_root.join("src/Dependency.sol"),]
-                )),
+                context(NativeDependencyState::Known(BTreeSet::from([
+                    new_root.join("src/Dependency.sol"),
+                ]))),
             )]
             .into_iter()
             .collect()

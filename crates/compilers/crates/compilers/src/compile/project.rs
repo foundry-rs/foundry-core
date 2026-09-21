@@ -144,6 +144,61 @@ pub enum NativeDependencyState {
 /// An absent entry means that preprocessing proved the source has no native dependencies.
 pub type NativeDependencies = BTreeMap<PathBuf, NativeDependencyState>;
 
+/// Native bytecode dependency classifications keyed by source, compiler version, and profile.
+pub type NativeDependencyContexts =
+    BTreeMap<PathBuf, BTreeMap<Version, BTreeMap<String, NativeDependencyState>>>;
+
+/// Merges cached contexts without replacing independently cached artifacts.
+pub fn merge_native_dependency_contexts(
+    contexts: &mut NativeDependencyContexts,
+    incoming: NativeDependencyContexts,
+) {
+    for (file, versions) in incoming {
+        for (version, profiles) in versions {
+            for (profile, state) in profiles {
+                let current =
+                    contexts.entry(file.clone()).or_default().entry(version.clone()).or_default();
+                match current.entry(profile) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(state);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let mut dependencies =
+                            NativeDependencies::from([(file.clone(), entry.get().clone())]);
+                        merge_native_dependencies(
+                            &mut dependencies,
+                            NativeDependencies::from([(file.clone(), state)]),
+                        );
+                        *entry.get_mut() = dependencies.remove(&file).unwrap();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Collapses artifact-specific contexts into source-level invalidation classifications.
+pub fn collapse_native_dependency_contexts(
+    contexts: &NativeDependencyContexts,
+) -> NativeDependencies {
+    let mut dependencies = NativeDependencies::new();
+    for (file, versions) in contexts {
+        for state in versions.values().flat_map(BTreeMap::values) {
+            merge_native_dependencies(
+                &mut dependencies,
+                NativeDependencies::from([(file.clone(), state.clone())]),
+            );
+        }
+    }
+    dependencies
+}
+
+/// Updates produced by preprocessing compiler jobs in one request.
+#[derive(Debug, Default)]
+pub struct NativeDependencyUpdates {
+    pub(crate) contexts: BTreeMap<(Version, String), (HashSet<PathBuf>, NativeDependencies)>,
+}
+
 /// Merges classifications from compiler jobs, with conservative entries dominating exact edges.
 pub fn merge_native_dependencies(
     dependencies: &mut NativeDependencies,
@@ -175,44 +230,52 @@ pub fn merge_native_dependencies(
 /// Native dependency state accumulated across every compiler job in one request.
 #[derive(Debug, Default)]
 pub struct PreprocessorState {
-    native_dependencies: NativeDependencies,
+    active_context: Option<(Version, String)>,
+    updates: NativeDependencyUpdates,
     processed_sources: HashSet<PathBuf>,
 }
 
 impl PreprocessorState {
-    fn new(native_dependencies: NativeDependencies) -> Self {
-        Self { native_dependencies, processed_sources: HashSet::new() }
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn set_context(&mut self, version: Version, profile: String) {
+        self.active_context = Some((version, profile));
     }
 
     /// Updates one source's classification for a compiler job.
     ///
-    /// Persisted classifications are preserved because compiler jobs and cache invalidation are
-    /// artifact-specific while this state is source-specific. A job can replace one profile or
-    /// compiler version while another cached artifact survives. Later jobs merge into the
-    /// request's result, with [`NativeDependencyState::Conservative`] dominating.
+    /// Repeated updates within one compiler job are merged, with
+    /// [`NativeDependencyState::Conservative`] dominating. The cache applies the resulting
+    /// classification as a replacement for this compiler version and profile only.
     /// Returns whether this was the source's first update in the request.
     pub fn update(&mut self, file: PathBuf, state: Option<NativeDependencyState>) -> bool {
         let first_update = self.processed_sources.insert(file.clone());
+        let context = self.active_context.clone().expect("preprocessor context must be set");
+        let (processed, dependencies) = self.updates.contexts.entry(context).or_default();
+        processed.insert(file.clone());
         if let Some(state) = state {
-            merge_native_dependencies(
-                &mut self.native_dependencies,
-                NativeDependencies::from([(file, state)]),
-            );
+            merge_native_dependencies(dependencies, NativeDependencies::from([(file, state)]));
         }
         first_update
     }
 
-    fn into_native_dependencies(self) -> NativeDependencies {
-        self.native_dependencies
+    fn into_updates(self) -> NativeDependencyUpdates {
+        self.updates
     }
 }
 
 #[cfg(test)]
 mod native_dependency_tests {
     use super::{
-        NativeDependencies, NativeDependencyState, PreprocessorState, merge_native_dependencies,
+        NativeDependencies, NativeDependencyState, PreprocessorState, Version,
+        merge_native_dependencies,
     };
-    use std::{collections::BTreeSet, path::PathBuf};
+    use std::{
+        collections::{BTreeSet, HashSet},
+        path::PathBuf,
+    };
 
     fn known(paths: &[&str]) -> NativeDependencyState {
         NativeDependencyState::Known(paths.iter().map(PathBuf::from).collect::<BTreeSet<_>>())
@@ -251,46 +314,39 @@ mod native_dependency_tests {
     }
 
     #[test]
-    fn preprocessor_state_preserves_entries_and_merges_jobs() {
+    fn preprocessor_state_replaces_one_context_and_merges_job_updates() {
         let cleared = PathBuf::from("cleared.sol");
         let merged = PathBuf::from("merged.sol");
-        let mut state = PreprocessorState::new(NativeDependencies::from([
-            (cleared.clone(), known(&["old.sol"])),
-            (merged.clone(), known(&["old.sol"])),
-        ]));
+        let mut state = PreprocessorState::new();
+        state.set_context(Version::new(0, 8, 30), "default".to_owned());
 
         assert!(state.update(cleared.clone(), None));
         assert!(state.update(merged.clone(), Some(known(&["a.sol"]))));
         assert!(!state.update(merged.clone(), Some(NativeDependencyState::Conservative)));
 
+        let updates = state.into_updates();
+        let (processed, dependencies) =
+            &updates.contexts[&(Version::new(0, 8, 30), "default".to_owned())];
+        assert_eq!(processed, &HashSet::from([cleared, merged.clone()]));
         assert_eq!(
-            state.into_native_dependencies(),
-            NativeDependencies::from([
-                (cleared, known(&["old.sol"])),
-                (merged, NativeDependencyState::Conservative),
-            ])
+            dependencies,
+            &NativeDependencies::from([(merged, NativeDependencyState::Conservative)])
         );
     }
 
     #[test]
-    fn preprocessor_state_preserves_clean_optimized_dependency_across_jobs() {
-        let file = PathBuf::from("dependency.sol");
-        let dirty = PathBuf::from("test.sol");
-        let mut state = PreprocessorState::new(NativeDependencies::from([
-            (file.clone(), NativeDependencyState::Conservative),
-            (dirty.clone(), known(&["old.sol"])),
-        ]));
+    fn preprocessor_state_keeps_contexts_separate_and_first_update_request_wide() {
+        let file = PathBuf::from("test.sol");
+        let mut state = PreprocessorState::new();
+        state.set_context(Version::new(0, 8, 29), "default".to_owned());
+        assert!(state.update(file.clone(), Some(known(&["a.sol"]))));
 
-        assert!(state.update(file.clone(), None));
-        assert!(!state.update(file.clone(), None));
-        assert!(state.update(dirty.clone(), None));
-        assert_eq!(
-            state.into_native_dependencies(),
-            NativeDependencies::from([
-                (file, NativeDependencyState::Conservative),
-                (dirty, known(&["old.sol"])),
-            ])
-        );
+        state.set_context(Version::new(0, 8, 30), "optimized".to_owned());
+        assert!(!state.update(file, None));
+
+        let updates = state.into_updates();
+        assert_eq!(updates.contexts.len(), 2);
+        assert_eq!(updates.contexts.values().map(|(files, _)| files.len()).sum::<usize>(), 2);
     }
 }
 
@@ -463,7 +519,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
         } else {
             let PreprocessedState { mut sources, cache, primary_profiles, preprocessor } = state;
             let normal_mocks = cache.mocks();
-            let normal_native_dependencies = cache.native_dependencies();
+            let normal_native_dependencies = cache.native_dependency_contexts();
             let normal_source_units = cache.preprocessor_source_units();
             let directory = if preprocessed {
                 // Preprocessors can depend on the complete compiler job, including its source
@@ -528,26 +584,39 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
             let mut mocks = cache.mocks();
             mocks.extend(normal_mocks.iter().cloned());
             cache.update_mocks(mocks);
-            let mut native_dependencies = cache.native_dependencies();
-            merge_native_dependencies(&mut native_dependencies, normal_native_dependencies.clone());
-            cache.update_native_dependencies(native_dependencies);
+            let mut native_dependencies = cache.native_dependency_contexts();
+            merge_native_dependency_contexts(
+                &mut native_dependencies,
+                normal_native_dependencies.clone(),
+            );
+            cache.update_native_dependency_contexts(native_dependencies);
             cache.update_preprocessor_source_units(normal_source_units.iter().cloned().collect());
             // A preprocessor can depend on other source units in its compiler job. Reuse a
             // fully cached request, but preserve the original input on any secondary miss.
             let original_sources = preprocessed.then(|| sources.clone());
             let mut preserved_mocks = HashSet::new();
-            let mut preserved_native_dependencies = NativeDependencies::new();
+            let mut preserved_native_dependencies = NativeDependencyContexts::new();
             sources.filter(&mut cache);
             if let Some(original_sources) = original_sources
                 && sources.sources.values().flatten().any(|(_, sources, _)| !sources.is_empty())
             {
                 preserved_mocks = cache.mocks();
-                preserved_native_dependencies = cache.native_dependencies();
+                preserved_native_dependencies = cache.native_dependency_contexts();
                 for (version, sources, (profile, _)) in original_sources.sources.values().flatten()
                 {
                     for (file, source) in sources {
                         preserved_mocks.remove(file);
-                        preserved_native_dependencies.remove(file);
+                        if let Some(versions) = preserved_native_dependencies.get_mut(file) {
+                            if let Some(profiles) = versions.get_mut(version) {
+                                profiles.remove(*profile);
+                                if profiles.is_empty() {
+                                    versions.remove(version);
+                                }
+                            }
+                            if versions.is_empty() {
+                                preserved_native_dependencies.remove(file);
+                            }
+                        }
                         if source.kind == SourceCompilationKind::Complete {
                             cache.invalidate_artifacts(file, version, profile);
                         }
@@ -555,7 +624,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 }
                 sources = original_sources;
                 cache.update_mocks(normal_mocks);
-                cache.update_native_dependencies(normal_native_dependencies);
+                cache.update_native_dependency_contexts(normal_native_dependencies);
             }
             let generation = if !project.no_artifacts
                 && sources.sources.values().flatten().any(|(_, sources, _)| !sources.is_empty())
@@ -581,9 +650,12 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 state.cache.update_mocks(mocks);
             }
             if !preserved_native_dependencies.is_empty() {
-                let mut native_dependencies = state.cache.native_dependencies();
-                merge_native_dependencies(&mut native_dependencies, preserved_native_dependencies);
-                state.cache.update_native_dependencies(native_dependencies);
+                let mut native_dependencies = state.cache.native_dependency_contexts();
+                merge_native_dependency_contexts(
+                    &mut native_dependencies,
+                    preserved_native_dependencies,
+                );
+                state.cache.update_native_dependency_contexts(native_dependencies);
             }
             let mut output = state.write_artifacts_if(write)?.write_cache_if(write)?;
             if let Some(generation) = generation
@@ -909,7 +981,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
         // Get current list of mocks from cache. This will be passed to preprocessors and updated
         // accordingly, then set back in cache.
         let mut mocks = cache.mocks();
-        let mut preprocessor_state = PreprocessorState::new(cache.native_dependencies());
+        let mut preprocessor_state = PreprocessorState::new();
 
         #[cfg(windows)]
         let contextual_roots = {
@@ -979,6 +1051,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                 input.strip_prefix(project.paths.root.as_path());
 
                 if let Some(preprocessor) = preprocessor.as_ref() {
+                    preprocessor_state.set_context(input.version().clone(), profile.to_owned());
                     preprocessor.preprocess_with_dependencies(
                         &project.compiler,
                         &mut input,
@@ -995,7 +1068,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
 
         // Update cache with mocks updated by preprocessors.
         cache.update_mocks(mocks);
-        cache.update_native_dependencies(preprocessor_state.into_native_dependencies());
+        cache.apply_native_dependency_updates(preprocessor_state.into_updates());
 
         let results = if let Some(num_jobs) = jobs_cnt {
             compile_parallel(&project.compiler, jobs, num_jobs)
