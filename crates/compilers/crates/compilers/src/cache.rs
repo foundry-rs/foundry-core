@@ -117,6 +117,69 @@ impl<S: CompilerSettings> CompilerCache<S> {
         self.files.remove(file)
     }
 
+    fn reverse_imports(&self, root: &Path) -> HashMap<PathBuf, Vec<PathBuf>> {
+        let mut importers = HashMap::<PathBuf, Vec<PathBuf>>::new();
+        for (importer, entry) in &self.files {
+            for import in &entry.imports {
+                let import = if import.is_absolute() { import.clone() } else { root.join(import) };
+                importers.entry(import).or_default().push(importer.clone());
+            }
+        }
+        importers
+    }
+
+    fn import_closure(
+        source: &Path,
+        importers: &HashMap<PathBuf, Vec<PathBuf>>,
+    ) -> HashSet<PathBuf> {
+        let mut closure = HashSet::from([source.to_path_buf()]);
+        let mut pending = vec![source.to_path_buf()];
+        while let Some(import) = pending.pop() {
+            for importer in importers.get(&import).into_iter().flatten() {
+                if closure.insert(importer.clone()) {
+                    pending.push(importer.clone());
+                }
+            }
+        }
+        closure
+    }
+
+    fn has_surviving_importer_artifact(
+        &self,
+        source: &Path,
+        version: &Version,
+        profile: &str,
+        importers: &HashMap<PathBuf, Vec<PathBuf>>,
+    ) -> bool {
+        Self::import_closure(source, importers).into_iter().any(|file| {
+            file != source
+                && self.files.get(&file).is_some_and(|entry| entry.contains(version, profile))
+        })
+    }
+
+    /// Removes dependency contexts that cannot describe any surviving cached artifact.
+    fn prune_native_dependency_contexts(&mut self, root: &Path) {
+        if self.native_dependencies.is_empty() {
+            return;
+        }
+        let importers = self.reverse_imports(root);
+
+        let files = &self.files;
+        self.native_dependencies.retain(|source, versions| {
+            let closure = Self::import_closure(source, &importers);
+
+            versions.retain(|version, profiles| {
+                profiles.retain(|profile, _| {
+                    closure.iter().any(|file| {
+                        files.get(file).is_some_and(|entry| entry.contains(version, profile))
+                    })
+                });
+                !profiles.is_empty()
+            });
+            !versions.is_empty()
+        });
+    }
+
     /// How many entries the cache contains where each entry represents a source file
     pub fn len(&self) -> usize {
         self.files.len()
@@ -1514,17 +1577,36 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
     /// Applies classifications from compiler jobs.
     ///
-    /// Recompiled artifacts replace their matching contexts. Observations from optimized inputs
-    /// are merged because newly compiled consumers can embed their transitive native dependencies.
+    /// Recompiled artifacts replace their matching contexts unless a cached importer can still
+    /// embed the old observation. Observations from optimized inputs are merged because newly
+    /// compiled consumers can embed their transitive native dependencies.
     pub fn apply_native_dependency_updates(&mut self, updates: NativeDependencyUpdates) {
         let ArtifactsCache::Cached(cache) = self else { return };
+        if updates.contexts.is_empty() {
+            return;
+        }
+        let importers = cache.cache.reverse_imports(cache.project.root());
         for ((version, profile), updates) in updates.contexts {
             for file in updates.processed {
+                let preserve = cache
+                    .cache
+                    .has_surviving_importer_artifact(&file, &version, &profile, &importers);
                 let versions = cache.cache.native_dependencies.entry(file.clone()).or_default();
                 let profiles = versions.entry(version.clone()).or_default();
-                profiles.remove(&profile);
+                if !preserve {
+                    profiles.remove(&profile);
+                }
                 if let Some(state) = updates.replacements.get(&file) {
-                    profiles.insert(profile.clone(), state.clone());
+                    if preserve && let Some(existing) = profiles.get(&profile).cloned() {
+                        let mut dependencies = NativeDependencies::from([(file.clone(), existing)]);
+                        merge_native_dependencies(
+                            &mut dependencies,
+                            NativeDependencies::from([(file.clone(), state.clone())]),
+                        );
+                        profiles.insert(profile.clone(), dependencies.remove(&file).unwrap());
+                    } else {
+                        profiles.insert(profile.clone(), state.clone());
+                    }
                 }
                 if profiles.is_empty() {
                     versions.remove(&version);
@@ -1689,6 +1771,8 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         for build_info in written_build_infos {
             cache.builds.insert(build_info.id.clone());
         }
+
+        cache.prune_native_dependency_contexts(project.root());
 
         // write to disk
         if write_to_disk {

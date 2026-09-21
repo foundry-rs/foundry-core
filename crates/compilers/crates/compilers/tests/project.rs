@@ -628,7 +628,7 @@ fn preprocessor_state_replaces_only_compiled_profile() {
     optimized.solc.optimizer.runs = Some(10000);
     project.project_mut().additional_settings.insert("optimized".to_string(), optimized);
     project.add_source("Common", "pragma solidity ^0.8.0; contract Common {}").unwrap();
-    let default = project
+    project
         .add_source(
             "Default",
             "pragma solidity ^0.8.0; import './Common.sol'; contract Default is Common {}",
@@ -654,12 +654,21 @@ fn preprocessor_state_replaces_only_compiled_profile() {
         },
     );
 
-    ProjectCompiler::with_sources(project.project(), Source::read_all([default]).unwrap())
+    ProjectCompiler::new(project.project())
         .unwrap()
         .with_preprocessor(ClassifyCommon(true))
         .compile()
         .unwrap()
         .assert_success();
+    // Regenerate only the optimized context while the default artifacts remain cached.
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    for file in [Path::new("src/Common.sol"), Path::new("src/Optimized.sol")] {
+        for (_, profile, artifact) in cache.files[file].artifacts_versions() {
+            if profile == "optimized" {
+                fs::remove_file(project.artifacts_path().join(&artifact.path)).unwrap();
+            }
+        }
+    }
     ProjectCompiler::with_sources(project.project(), Source::read_all([optimized]).unwrap())
         .unwrap()
         .with_preprocessor(ClassifyCommon(false))
@@ -763,6 +772,207 @@ fn retired_profile_drops_native_dependency_context() {
     let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
     cache.join_entries(project.root());
     assert!(!cache.native_dependencies.contains_key(&project.paths().sources.join("Target.sol")));
+}
+
+#[test]
+fn retired_compiler_version_drops_native_dependency_context() {
+    #[derive(Debug)]
+    struct ClassifyConsumer(bool);
+
+    impl Preprocessor<MultiCompiler> for ClassifyConsumer {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> foundry_compilers::error::Result<()> {
+            state.update(
+                paths.root.join("test/Consumer.sol"),
+                self.0.then_some(NativeDependencyState::Conservative),
+            );
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.29");
+    let unrelated = project
+        .add_source("Unrelated", "pragma solidity ^0.8.0; contract Unrelated { uint value = 1; }")
+        .unwrap();
+    let consumer =
+        project.add_test("Consumer", "pragma solidity ^0.8.29; contract Consumer {}").unwrap();
+    let caller = project
+        .add_test(
+            "Caller",
+            "pragma solidity ^0.8.29; import './Consumer.sol'; contract Caller is Consumer {}",
+        )
+        .unwrap();
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    assert!(
+        cache.native_dependencies[Path::new("test/Consumer.sol")]
+            .contains_key(&Version::new(0, 8, 29))
+    );
+
+    // Retire every artifact that could have embedded the old observation.
+    project.set_solc("0.8.30");
+    for file in [&consumer, &caller] {
+        fs::write(file, fs::read_to_string(file).unwrap().replace("^0.8.29", "^0.8.30")).unwrap();
+    }
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    assert!(cache.native_dependencies.is_empty());
+
+    fs::write(unrelated, "pragma solidity ^0.8.0; contract Unrelated { uint value = 2; }").unwrap();
+    let output = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(false))
+        .compile()
+        .unwrap();
+    output.assert_success();
+    assert!(!output.is_unchanged());
+    assert!(output.compiled_artifacts().artifact_files().all(|artifact| {
+        !artifact.file.ends_with("Consumer.sol/Consumer.json")
+            && !artifact.file.ends_with("Caller.sol/Caller.json")
+    }));
+}
+
+#[test]
+fn regenerated_source_preserves_dependency_for_surviving_importer() {
+    #[derive(Debug)]
+    struct PreprocessConsumer(bool);
+
+    impl Preprocessor<MultiCompiler> for PreprocessConsumer {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> foundry_compilers::error::Result<()> {
+            if let MultiCompilerInput::Solc(input) = input
+                && let Some(consumer) = input.input.sources.get_mut(Path::new("test/Consumer.sol"))
+            {
+                state.update(
+                    paths.root.join("test/Consumer.sol"),
+                    self.0.then(|| {
+                        NativeDependencyState::Known(BTreeSet::from([paths
+                            .root
+                            .join("src/Dep.sol")]))
+                    }),
+                );
+                if !self.0 {
+                    // Model a later job whose preprocessing removes the native deployment.
+                    consumer.content = consumer.content.replace("new Dep().value()", "42").into();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    let dep = project.add_source("Dep", "pragma solidity ^0.8.0; contract Dep { function value() public pure returns (uint) { return 1; } }").unwrap();
+    let consumer = project.add_test("Consumer", "pragma solidity ^0.8.0; import '../src/Dep.sol'; contract Consumer { function value() public returns (uint) { return new Dep().value(); } }").unwrap();
+    project.add_test("Caller", "pragma solidity ^0.8.0; import './Consumer.sol'; contract Caller { function value() public returns (uint) { return new Consumer().value(); } }").unwrap();
+    let initial = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(PreprocessConsumer(true))
+        .compile()
+        .unwrap();
+    initial.assert_success();
+    let initial_caller =
+        initial.find_first("Caller").unwrap().get_bytecode_bytes().unwrap().into_owned();
+
+    // Only Consumer's missing artifact is regenerated; Caller still embeds the old Consumer.
+    fs::remove_file(project.artifacts_path().join("Consumer.sol/Consumer.json")).unwrap();
+    let regenerated =
+        ProjectCompiler::with_sources(project.project(), Source::read_all([consumer]).unwrap())
+            .unwrap()
+            .with_preprocessor(PreprocessConsumer(false))
+            .compile()
+            .unwrap();
+    regenerated.assert_success();
+    assert!(
+        regenerated
+            .compiled_artifacts()
+            .artifact_files()
+            .any(|artifact| artifact.file.ends_with("Consumer.sol/Consumer.json"))
+    );
+    assert!(
+        regenerated
+            .compiled_artifacts()
+            .artifact_files()
+            .all(|artifact| !artifact.file.ends_with("Caller.sol/Caller.json"))
+    );
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    assert_eq!(
+        cache.native_dependencies[Path::new("test/Consumer.sol")][&Version::new(0, 8, 30)]["default"],
+        NativeDependencyState::Known(BTreeSet::from([PathBuf::from("src/Dep.sol")]))
+    );
+
+    fs::write(&dep, fs::read_to_string(&dep).unwrap().replace("return 1", "return 2")).unwrap();
+    let incremental = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(PreprocessConsumer(false))
+        .compile()
+        .unwrap();
+    incremental.assert_success();
+    assert!(
+        incremental
+            .compiled_artifacts()
+            .artifact_files()
+            .any(|artifact| artifact.file.ends_with("Caller.sol/Caller.json"))
+    );
+    let incremental_caller =
+        incremental.find_first("Caller").unwrap().get_bytecode_bytes().unwrap().into_owned();
+    assert_ne!(initial_caller, incremental_caller);
+    project.project().cleanup().unwrap();
+    let clean = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(PreprocessConsumer(false))
+        .compile()
+        .unwrap();
+    clean.assert_success();
+    assert_eq!(
+        &incremental_caller,
+        clean.find_first("Caller").unwrap().get_bytecode_bytes().unwrap().as_ref()
+    );
 }
 
 #[test]

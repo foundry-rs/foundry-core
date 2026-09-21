@@ -237,6 +237,7 @@ pub fn merge_native_dependencies(
 /// Native dependency state accumulated across every compiler job in one request.
 #[derive(Debug, Default)]
 pub struct PreprocessorState {
+    untracked: bool,
     active_context: Option<(Version, String)>,
     active_replacements: HashSet<PathBuf>,
     updates: NativeDependencyUpdates,
@@ -246,6 +247,11 @@ pub struct PreprocessorState {
 impl PreprocessorState {
     fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates state for direct preprocessor calls that do not update a compiler cache.
+    pub fn untracked() -> Self {
+        Self { untracked: true, ..Default::default() }
     }
 
     fn set_context(&mut self, version: Version, profile: String, replacements: &[PathBuf]) {
@@ -261,10 +267,12 @@ impl PreprocessorState {
     /// Returns whether this was the source's first update in the request.
     pub fn update(&mut self, file: PathBuf, state: Option<NativeDependencyState>) -> bool {
         let first_update = self.processed_sources.insert(file.clone());
+        if self.untracked {
+            return first_update;
+        }
+        let context = self.active_context.clone().expect("preprocessor context must be set");
         if !self.active_replacements.contains(&file) {
             if let Some(state) = state {
-                let context =
-                    self.active_context.clone().expect("preprocessor context must be set");
                 let updates = self.updates.contexts.entry(context).or_default();
                 merge_native_dependencies(
                     &mut updates.observations,
@@ -273,7 +281,6 @@ impl PreprocessorState {
             }
             return first_update;
         }
-        let context = self.active_context.clone().expect("preprocessor context must be set");
         let updates = self.updates.contexts.entry(context).or_default();
         updates.processed.insert(file.clone());
         if let Some(state) = state {
@@ -395,6 +402,16 @@ mod native_dependency_tests {
         state.set_context(Version::new(0, 8, 30), "default".to_owned(), &[]);
 
         assert!(state.update(file, None));
+        assert!(state.into_updates().contexts.is_empty());
+    }
+
+    #[test]
+    fn untracked_preprocessor_state_only_tracks_first_update() {
+        let file = PathBuf::from("test.sol");
+        let mut state = PreprocessorState::untracked();
+
+        assert!(state.update(file.clone(), Some(known(&["dependency.sol"]))));
+        assert!(!state.update(file, Some(NativeDependencyState::Conservative)));
         assert!(state.into_updates().contexts.is_empty());
     }
 }
@@ -1121,6 +1138,15 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
 
         // Update cache with mocks updated by preprocessors.
         cache.update_mocks(mocks);
+        // Recompiled artifacts do not keep old observations alive through importer contexts.
+        // Retire them before applying updates; the cache is only persisted on success.
+        if preprocessor.is_some() {
+            for (input, profile, actually_dirty) in &jobs {
+                for file in actually_dirty {
+                    cache.invalidate_artifacts(file, input.version(), profile);
+                }
+            }
+        }
         cache.apply_native_dependency_updates(preprocessor_state.into_updates());
 
         let results = if let Some(num_jobs) = jobs_cnt {
