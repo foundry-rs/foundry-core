@@ -231,6 +231,7 @@ pub fn merge_native_dependencies(
 #[derive(Debug, Default)]
 pub struct PreprocessorState {
     active_context: Option<(Version, String)>,
+    active_replacements: HashSet<PathBuf>,
     updates: NativeDependencyUpdates,
     processed_sources: HashSet<PathBuf>,
 }
@@ -240,8 +241,9 @@ impl PreprocessorState {
         Self::default()
     }
 
-    fn set_context(&mut self, version: Version, profile: String) {
+    fn set_context(&mut self, version: Version, profile: String, replacements: &[PathBuf]) {
         self.active_context = Some((version, profile));
+        self.active_replacements = replacements.iter().cloned().collect();
     }
 
     /// Updates one source's classification for a compiler job.
@@ -252,6 +254,9 @@ impl PreprocessorState {
     /// Returns whether this was the source's first update in the request.
     pub fn update(&mut self, file: PathBuf, state: Option<NativeDependencyState>) -> bool {
         let first_update = self.processed_sources.insert(file.clone());
+        if !self.active_replacements.contains(&file) {
+            return first_update;
+        }
         let context = self.active_context.clone().expect("preprocessor context must be set");
         let (processed, dependencies) = self.updates.contexts.entry(context).or_default();
         processed.insert(file.clone());
@@ -318,7 +323,11 @@ mod native_dependency_tests {
         let cleared = PathBuf::from("cleared.sol");
         let merged = PathBuf::from("merged.sol");
         let mut state = PreprocessorState::new();
-        state.set_context(Version::new(0, 8, 30), "default".to_owned());
+        state.set_context(
+            Version::new(0, 8, 30),
+            "default".to_owned(),
+            &[cleared.clone(), merged.clone()],
+        );
 
         assert!(state.update(cleared.clone(), None));
         assert!(state.update(merged.clone(), Some(known(&["a.sol"]))));
@@ -338,15 +347,33 @@ mod native_dependency_tests {
     fn preprocessor_state_keeps_contexts_separate_and_first_update_request_wide() {
         let file = PathBuf::from("test.sol");
         let mut state = PreprocessorState::new();
-        state.set_context(Version::new(0, 8, 29), "default".to_owned());
+        state.set_context(
+            Version::new(0, 8, 29),
+            "default".to_owned(),
+            std::slice::from_ref(&file),
+        );
         assert!(state.update(file.clone(), Some(known(&["a.sol"]))));
 
-        state.set_context(Version::new(0, 8, 30), "optimized".to_owned());
+        state.set_context(
+            Version::new(0, 8, 30),
+            "optimized".to_owned(),
+            std::slice::from_ref(&file),
+        );
         assert!(!state.update(file, None));
 
         let updates = state.into_updates();
         assert_eq!(updates.contexts.len(), 2);
         assert_eq!(updates.contexts.values().map(|(files, _)| files.len()).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn preprocessor_state_ignores_updates_for_surviving_artifacts() {
+        let file = PathBuf::from("optimized.sol");
+        let mut state = PreprocessorState::new();
+        state.set_context(Version::new(0, 8, 30), "default".to_owned(), &[]);
+
+        assert!(state.update(file, None));
+        assert!(state.into_updates().contexts.is_empty());
     }
 }
 
@@ -1051,7 +1078,11 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                 input.strip_prefix(project.paths.root.as_path());
 
                 if let Some(preprocessor) = preprocessor.as_ref() {
-                    preprocessor_state.set_context(input.version().clone(), profile.to_owned());
+                    preprocessor_state.set_context(
+                        input.version().clone(),
+                        profile.to_owned(),
+                        &actually_dirty,
+                    );
                     preprocessor.preprocess_with_dependencies(
                         &project.compiler,
                         &mut input,

@@ -687,6 +687,111 @@ fn preprocessor_state_replaces_only_compiled_profile() {
 }
 
 #[test]
+fn preprocessor_state_preserves_dependency_for_optimized_import() {
+    #[derive(Debug)]
+    struct ClassifyConsumer(bool);
+
+    impl Preprocessor<MultiCompiler> for ClassifyConsumer {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> foundry_compilers::error::Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> foundry_compilers::error::Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            if input.input.sources.contains_key(Path::new("src/Consumer.sol")) {
+                state.update(
+                    paths.root.join("src/Consumer.sol"),
+                    self.0.then(|| {
+                        NativeDependencyState::Known(BTreeSet::from([paths
+                            .root
+                            .join("src/Dep.sol")]))
+                    }),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Dep", "pragma solidity ^0.8.0; contract Dep {}").unwrap();
+    project
+        .add_source(
+            "Consumer",
+            "pragma solidity ^0.8.0; import './Dep.sol'; contract Consumer is Dep {}",
+        )
+        .unwrap();
+    let importer = project
+        .add_source(
+            "Importer",
+            "pragma solidity ^0.8.0; import './Consumer.sol'; contract Importer { function consume(Consumer) public {} }",
+        )
+        .unwrap();
+
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(true))
+        .compile()
+        .unwrap()
+        .assert_success();
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    cache.join_entries(project.root());
+    assert_eq!(
+        cache
+            .native_dependencies
+            .get(&project.paths().sources.join("Consumer.sol"))
+            .and_then(|versions| versions.get(&Version::new(0, 8, 30)))
+            .and_then(|profiles| profiles.get("default")),
+        Some(&NativeDependencyState::Known(BTreeSet::from([project
+            .paths()
+            .sources
+            .join("Dep.sol")]))),
+        "initial classification was not cached: {:?}",
+        cache.native_dependencies
+    );
+
+    fs::write(
+        importer,
+        "pragma solidity ^0.8.0; import './Consumer.sol'; contract Importer { function consume(Consumer) public {} function changed() public {} }",
+    )
+    .unwrap();
+    ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ClassifyConsumer(false))
+        .compile()
+        .unwrap()
+        .assert_success();
+
+    let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    cache.join_entries(project.root());
+    assert_eq!(
+        cache
+            .native_dependencies
+            .get(&project.paths().sources.join("Consumer.sol"))
+            .and_then(|versions| versions.get(&Version::new(0, 8, 30)))
+            .and_then(|profiles| profiles.get("default")),
+        Some(&NativeDependencyState::Known(BTreeSet::from([project
+            .paths()
+            .sources
+            .join("Dep.sol")])))
+    );
+}
+
+#[test]
 fn abi_cache_prunes_obsolete_contexts_and_preserves_valid_filters() {
     #[derive(Debug)]
     struct Noop;
