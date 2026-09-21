@@ -27,7 +27,7 @@ use foundry_compilers_artifacts::{
     UserDocNotice, output_selection::OutputSelection, remappings::Remapping,
 };
 use foundry_compilers_core::{
-    error::SolcError,
+    error::{Result, SolcError},
     utils::{self, RuntimeOrHandle, canonicalize},
 };
 use semver::Version;
@@ -597,7 +597,7 @@ fn preprocessor_state_replaces_only_compiled_profile() {
             _: &mut MultiCompilerInput,
             _: &ProjectPathsConfig<MultiCompilerLanguage>,
             _: &mut HashSet<PathBuf>,
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -609,7 +609,7 @@ fn preprocessor_state_replaces_only_compiled_profile() {
             _: &mut HashSet<PathBuf>,
             state: &mut PreprocessorState,
             _: &[PathBuf],
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
             if input.input.sources.contains_key(Path::new("src/Common.sol")) {
                 state.update(
@@ -707,7 +707,7 @@ fn retired_profile_drops_native_dependency_context() {
             _: &mut MultiCompilerInput,
             _: &ProjectPathsConfig<MultiCompilerLanguage>,
             _: &mut HashSet<PathBuf>,
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -719,7 +719,7 @@ fn retired_profile_drops_native_dependency_context() {
             _: &mut HashSet<PathBuf>,
             state: &mut PreprocessorState,
             _: &[PathBuf],
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
             if input.input.sources.contains_key(Path::new("src/Target.sol")) {
                 state.update(
@@ -786,7 +786,7 @@ fn retired_compiler_version_drops_native_dependency_context() {
             _: &mut MultiCompilerInput,
             _: &ProjectPathsConfig<MultiCompilerLanguage>,
             _: &mut HashSet<PathBuf>,
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -798,7 +798,7 @@ fn retired_compiler_version_drops_native_dependency_context() {
             _: &mut HashSet<PathBuf>,
             state: &mut PreprocessorState,
             _: &[PathBuf],
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             state.update(
                 paths.root.join("test/Consumer.sol"),
                 self.0.then_some(NativeDependencyState::Conservative),
@@ -872,7 +872,7 @@ fn regenerated_source_preserves_dependency_for_surviving_importer() {
             _: &mut MultiCompilerInput,
             _: &ProjectPathsConfig<MultiCompilerLanguage>,
             _: &mut HashSet<PathBuf>,
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -884,7 +884,7 @@ fn regenerated_source_preserves_dependency_for_surviving_importer() {
             _: &mut HashSet<PathBuf>,
             state: &mut PreprocessorState,
             _: &[PathBuf],
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             if let MultiCompilerInput::Solc(input) = input
                 && let Some(consumer) = input.input.sources.get_mut(Path::new("test/Consumer.sol"))
             {
@@ -987,7 +987,7 @@ fn preprocessor_state_preserves_dependency_for_optimized_import() {
             _: &mut MultiCompilerInput,
             _: &ProjectPathsConfig<MultiCompilerLanguage>,
             _: &mut HashSet<PathBuf>,
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -999,7 +999,7 @@ fn preprocessor_state_preserves_dependency_for_optimized_import() {
             _: &mut HashSet<PathBuf>,
             state: &mut PreprocessorState,
             _: &[PathBuf],
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
             if input.input.sources.contains_key(Path::new("src/Consumer.sol")) {
                 state.update(
@@ -1092,7 +1092,7 @@ fn conservative_dependency_recompiles_after_repeated_sparse_edits() {
             _: &mut MultiCompilerInput,
             _: &ProjectPathsConfig<MultiCompilerLanguage>,
             _: &mut HashSet<PathBuf>,
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -1104,7 +1104,7 @@ fn conservative_dependency_recompiles_after_repeated_sparse_edits() {
             _: &mut HashSet<PathBuf>,
             state: &mut PreprocessorState,
             _: &[PathBuf],
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
             if input.input.sources.contains_key(Path::new("test/Consumer.sol")) {
                 state.update(
@@ -1167,7 +1167,7 @@ fn optimized_import_observations_invalidate_new_consumers() {
             _: &mut MultiCompilerInput,
             _: &ProjectPathsConfig<MultiCompilerLanguage>,
             _: &mut HashSet<PathBuf>,
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -1179,7 +1179,7 @@ fn optimized_import_observations_invalidate_new_consumers() {
             _: &mut HashSet<PathBuf>,
             state: &mut PreprocessorState,
             _: &[PathBuf],
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
             if self.0 && input.input.sources.contains_key(Path::new("test/Caller.sol")) {
                 state.update(
@@ -6239,7 +6239,7 @@ fn preprocessor_version_invalidates_cache() {
             _input: &mut MultiCompilerInput,
             _paths: &ProjectPathsConfig<MultiCompilerLanguage>,
             _mocks: &mut HashSet<PathBuf>,
-        ) -> foundry_compilers::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
     }

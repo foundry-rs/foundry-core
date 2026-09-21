@@ -120,7 +120,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::path::Path;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
     fmt::Debug,
     path::PathBuf,
     time::Instant,
@@ -139,6 +139,17 @@ pub enum NativeDependencyState {
     Conservative,
 }
 
+impl NativeDependencyState {
+    /// Merges observations, with conservative classifications dominating exact dependencies.
+    pub(crate) fn merge(&mut self, incoming: Self) {
+        match (self, incoming) {
+            (Self::Conservative, _) => {}
+            (state, Self::Conservative) => *state = Self::Conservative,
+            (Self::Known(dependencies), Self::Known(incoming)) => dependencies.extend(incoming),
+        }
+    }
+}
+
 /// Native bytecode dependency classifications keyed by the source that embeds them.
 ///
 /// An absent entry means that preprocessing proved the source has no native dependencies.
@@ -147,6 +158,19 @@ pub type NativeDependencies = BTreeMap<PathBuf, NativeDependencyState>;
 /// Native bytecode dependency classifications keyed by source, compiler version, and profile.
 pub type NativeDependencyContexts =
     BTreeMap<PathBuf, BTreeMap<Version, BTreeMap<String, NativeDependencyState>>>;
+
+/// Updates produced by preprocessing compiler jobs in one request.
+#[derive(Debug, Default)]
+pub struct NativeDependencyUpdates {
+    pub(crate) contexts: BTreeMap<(Version, String), NativeDependencyContextUpdates>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct NativeDependencyContextUpdates {
+    pub(crate) processed: HashSet<PathBuf>,
+    pub(crate) replacements: NativeDependencies,
+    pub(crate) observations: NativeDependencies,
+}
 
 /// Merges cached contexts without replacing independently cached artifacts.
 pub fn merge_native_dependency_contexts(
@@ -159,18 +183,10 @@ pub fn merge_native_dependency_contexts(
                 let current =
                     contexts.entry(file.clone()).or_default().entry(version.clone()).or_default();
                 match current.entry(profile) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
+                    Entry::Vacant(entry) => {
                         entry.insert(state);
                     }
-                    std::collections::btree_map::Entry::Occupied(mut entry) => {
-                        let mut dependencies =
-                            NativeDependencies::from([(file.clone(), entry.get().clone())]);
-                        merge_native_dependencies(
-                            &mut dependencies,
-                            NativeDependencies::from([(file.clone(), state)]),
-                        );
-                        *entry.get_mut() = dependencies.remove(&file).unwrap();
-                    }
+                    Entry::Occupied(mut entry) => entry.get_mut().merge(state),
                 }
             }
         }
@@ -193,19 +209,6 @@ pub fn collapse_native_dependency_contexts(
     dependencies
 }
 
-/// Updates produced by preprocessing compiler jobs in one request.
-#[derive(Debug, Default)]
-pub struct NativeDependencyUpdates {
-    pub(crate) contexts: BTreeMap<(Version, String), NativeDependencyContextUpdates>,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct NativeDependencyContextUpdates {
-    pub(crate) processed: HashSet<PathBuf>,
-    pub(crate) replacements: NativeDependencies,
-    pub(crate) observations: NativeDependencies,
-}
-
 /// Merges classifications from compiler jobs, with conservative entries dominating exact edges.
 pub fn merge_native_dependencies(
     dependencies: &mut NativeDependencies,
@@ -213,23 +216,10 @@ pub fn merge_native_dependencies(
 ) {
     for (file, incoming) in incoming {
         match dependencies.entry(file) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
+            Entry::Vacant(entry) => {
                 entry.insert(incoming);
             }
-            std::collections::btree_map::Entry::Occupied(mut entry) => match entry.get_mut() {
-                NativeDependencyState::Conservative => {}
-                state @ NativeDependencyState::Known(_) => match incoming {
-                    NativeDependencyState::Conservative => {
-                        *state = NativeDependencyState::Conservative;
-                    }
-                    NativeDependencyState::Known(incoming) => {
-                        let NativeDependencyState::Known(dependencies) = state else {
-                            unreachable!()
-                        };
-                        dependencies.extend(incoming);
-                    }
-                },
-            },
+            Entry::Occupied(mut entry) => entry.get_mut().merge(incoming),
         }
     }
 }
@@ -245,10 +235,6 @@ pub struct PreprocessorState {
 }
 
 impl PreprocessorState {
-    fn new() -> Self {
-        Self::default()
-    }
-
     /// Creates state for direct preprocessor calls that do not update a compiler cache.
     pub fn untracked() -> Self {
         Self { untracked: true, ..Default::default() }
@@ -294,125 +280,6 @@ impl PreprocessorState {
 
     fn into_updates(self) -> NativeDependencyUpdates {
         self.updates
-    }
-}
-
-#[cfg(test)]
-mod native_dependency_tests {
-    use super::{
-        NativeDependencies, NativeDependencyState, PreprocessorState, Version,
-        merge_native_dependencies,
-    };
-    use std::{
-        collections::{BTreeSet, HashSet},
-        path::PathBuf,
-    };
-
-    fn known(paths: &[&str]) -> NativeDependencyState {
-        NativeDependencyState::Known(paths.iter().map(PathBuf::from).collect::<BTreeSet<_>>())
-    }
-
-    #[test]
-    fn exact_dependencies_are_unioned() {
-        let file = PathBuf::from("test.sol");
-        let mut dependencies = NativeDependencies::from([(file.clone(), known(&["a.sol"]))]);
-
-        merge_native_dependencies(
-            &mut dependencies,
-            NativeDependencies::from([(file.clone(), known(&["b.sol"]))]),
-        );
-
-        assert_eq!(dependencies, NativeDependencies::from([(file, known(&["a.sol", "b.sol"]))]));
-    }
-
-    #[test]
-    fn conservative_classification_dominates_in_either_order() {
-        let file = PathBuf::from("test.sol");
-        for (first, second) in [
-            (NativeDependencyState::Conservative, known(&["a.sol"])),
-            (known(&["a.sol"]), NativeDependencyState::Conservative),
-        ] {
-            let mut dependencies = NativeDependencies::from([(file.clone(), first)]);
-            merge_native_dependencies(
-                &mut dependencies,
-                NativeDependencies::from([(file.clone(), second)]),
-            );
-            assert_eq!(
-                dependencies,
-                NativeDependencies::from([(file.clone(), NativeDependencyState::Conservative)])
-            );
-        }
-    }
-
-    #[test]
-    fn preprocessor_state_replaces_one_context_and_merges_job_updates() {
-        let cleared = PathBuf::from("cleared.sol");
-        let merged = PathBuf::from("merged.sol");
-        let mut state = PreprocessorState::new();
-        state.set_context(
-            Version::new(0, 8, 30),
-            "default".to_owned(),
-            &[cleared.clone(), merged.clone()],
-        );
-
-        assert!(state.update(cleared.clone(), None));
-        assert!(state.update(merged.clone(), Some(known(&["a.sol"]))));
-        assert!(!state.update(merged.clone(), Some(NativeDependencyState::Conservative)));
-
-        let updates = state.into_updates();
-        let updates = &updates.contexts[&(Version::new(0, 8, 30), "default".to_owned())];
-        assert_eq!(updates.processed, HashSet::from([cleared, merged.clone()]));
-        assert_eq!(
-            updates.replacements,
-            NativeDependencies::from([(merged, NativeDependencyState::Conservative)])
-        );
-        assert!(updates.observations.is_empty());
-    }
-
-    #[test]
-    fn preprocessor_state_keeps_contexts_separate_and_first_update_request_wide() {
-        let file = PathBuf::from("test.sol");
-        let mut state = PreprocessorState::new();
-        state.set_context(
-            Version::new(0, 8, 29),
-            "default".to_owned(),
-            std::slice::from_ref(&file),
-        );
-        assert!(state.update(file.clone(), Some(known(&["a.sol"]))));
-
-        state.set_context(
-            Version::new(0, 8, 30),
-            "optimized".to_owned(),
-            std::slice::from_ref(&file),
-        );
-        assert!(!state.update(file, None));
-
-        let updates = state.into_updates();
-        assert_eq!(updates.contexts.len(), 2);
-        assert_eq!(
-            updates.contexts.values().map(|updates| updates.processed.len()).sum::<usize>(),
-            2
-        );
-    }
-
-    #[test]
-    fn preprocessor_state_does_not_clear_surviving_artifacts() {
-        let file = PathBuf::from("optimized.sol");
-        let mut state = PreprocessorState::new();
-        state.set_context(Version::new(0, 8, 30), "default".to_owned(), &[]);
-
-        assert!(state.update(file, None));
-        assert!(state.into_updates().contexts.is_empty());
-    }
-
-    #[test]
-    fn untracked_preprocessor_state_only_tracks_first_update() {
-        let file = PathBuf::from("test.sol");
-        let mut state = PreprocessorState::untracked();
-
-        assert!(state.update(file.clone(), Some(known(&["dependency.sol"]))));
-        assert!(!state.update(file, Some(NativeDependencyState::Conservative)));
-        assert!(state.into_updates().contexts.is_empty());
     }
 }
 
@@ -1047,7 +914,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
         // Get current list of mocks from cache. This will be passed to preprocessors and updated
         // accordingly, then set back in cache.
         let mut mocks = cache.mocks();
-        let mut preprocessor_state = PreprocessorState::new();
+        let mut preprocessor_state = PreprocessorState::default();
 
         #[cfg(windows)]
         let contextual_roots = {
@@ -1324,18 +1191,119 @@ fn compile_parallel<'a, C: Compiler>(
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "project-util", feature = "svm-solc"))]
 mod tests {
-    use std::path::Path;
+    use super::*;
+    use std::slice;
 
-    use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
-
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     use crate::{
         MinimalCombinedArtifacts, compilers::multi::MultiCompiler, project_util::TempProject,
     };
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
+    use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
+    use std::path::Path;
 
-    use super::*;
+    fn known(paths: &[&str]) -> NativeDependencyState {
+        NativeDependencyState::Known(paths.iter().map(PathBuf::from).collect::<BTreeSet<_>>())
+    }
 
+    #[test]
+    fn exact_dependencies_are_unioned() {
+        let file = PathBuf::from("test.sol");
+        let mut dependencies = NativeDependencies::from([(file.clone(), known(&["a.sol"]))]);
+
+        merge_native_dependencies(
+            &mut dependencies,
+            NativeDependencies::from([(file.clone(), known(&["b.sol"]))]),
+        );
+
+        assert_eq!(dependencies, NativeDependencies::from([(file, known(&["a.sol", "b.sol"]))]));
+    }
+
+    #[test]
+    fn conservative_classification_dominates_in_either_order() {
+        let file = PathBuf::from("test.sol");
+        for (first, second) in [
+            (NativeDependencyState::Conservative, known(&["a.sol"])),
+            (known(&["a.sol"]), NativeDependencyState::Conservative),
+        ] {
+            let mut dependencies = NativeDependencies::from([(file.clone(), first)]);
+            merge_native_dependencies(
+                &mut dependencies,
+                NativeDependencies::from([(file.clone(), second)]),
+            );
+            assert_eq!(
+                dependencies,
+                NativeDependencies::from([(file.clone(), NativeDependencyState::Conservative)])
+            );
+        }
+    }
+
+    #[test]
+    fn preprocessor_state_replaces_one_context_and_merges_job_updates() {
+        let cleared = PathBuf::from("cleared.sol");
+        let merged = PathBuf::from("merged.sol");
+        let mut state = PreprocessorState::default();
+        state.set_context(
+            Version::new(0, 8, 30),
+            "default".to_owned(),
+            &[cleared.clone(), merged.clone()],
+        );
+
+        assert!(state.update(cleared.clone(), None));
+        assert!(state.update(merged.clone(), Some(known(&["a.sol"]))));
+        assert!(!state.update(merged.clone(), Some(NativeDependencyState::Conservative)));
+
+        let updates = state.into_updates();
+        let updates = &updates.contexts[&(Version::new(0, 8, 30), "default".to_owned())];
+        assert_eq!(updates.processed, HashSet::from([cleared, merged.clone()]));
+        assert_eq!(
+            updates.replacements,
+            NativeDependencies::from([(merged, NativeDependencyState::Conservative)])
+        );
+        assert!(updates.observations.is_empty());
+    }
+
+    #[test]
+    fn preprocessor_state_keeps_contexts_separate_and_first_update_request_wide() {
+        let file = PathBuf::from("test.sol");
+        let mut state = PreprocessorState::default();
+        state.set_context(Version::new(0, 8, 29), "default".to_owned(), slice::from_ref(&file));
+        assert!(state.update(file.clone(), Some(known(&["a.sol"]))));
+
+        state.set_context(Version::new(0, 8, 30), "optimized".to_owned(), slice::from_ref(&file));
+        assert!(!state.update(file, None));
+
+        let updates = state.into_updates();
+        assert_eq!(updates.contexts.len(), 2);
+        assert_eq!(
+            updates.contexts.values().map(|updates| updates.processed.len()).sum::<usize>(),
+            2
+        );
+    }
+
+    #[test]
+    fn preprocessor_state_does_not_clear_surviving_artifacts() {
+        let file = PathBuf::from("optimized.sol");
+        let mut state = PreprocessorState::default();
+        state.set_context(Version::new(0, 8, 30), "default".to_owned(), &[]);
+
+        assert!(state.update(file, None));
+        assert!(state.into_updates().contexts.is_empty());
+    }
+
+    #[test]
+    fn untracked_preprocessor_state_only_tracks_first_update() {
+        let file = PathBuf::from("test.sol");
+        let mut state = PreprocessorState::untracked();
+
+        assert!(state.update(file.clone(), Some(known(&["dependency.sol"]))));
+        assert!(!state.update(file, Some(NativeDependencyState::Conservative)));
+        assert!(state.into_updates().contexts.is_empty());
+    }
+
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -1343,7 +1311,7 @@ mod tests {
             .ok();
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "project-util", feature = "svm-solc"))]
     #[test]
     fn external_source_unit_is_relative_to_project_root() {
         let root = Path::new(r"C:\workspace\utils");
@@ -1356,7 +1324,7 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "project-util", feature = "svm-solc"))]
     #[test]
     fn project_source_unit_remains_absolute() {
         let root = Path::new(r"C:\workspace\utils");
@@ -1370,6 +1338,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_preprocess() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/dapp-sample");
         let project = Project::builder()
@@ -1389,6 +1358,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_detect_cached_files() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/dapp-sample");
         let paths = ProjectPathsConfig::builder().sources(root.join("src")).lib(root.join("lib"));
@@ -1404,6 +1374,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_recompile_with_optimized_output() {
         let tmp = TempProject::<MultiCompiler, ConfigurableArtifacts>::dapptools().unwrap();
 
@@ -1512,6 +1483,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_compile_real_project() {
         init_tracing();
         let paths = ProjectPathsConfig::builder()
@@ -1524,6 +1496,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn extra_output_cached() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/dapp-sample");
         let paths = ProjectPathsConfig::builder().sources(root.join("src")).lib(root.join("lib"));
@@ -1545,6 +1518,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_compile_leftovers_after_sparse() {
         let mut tmp = TempProject::<MultiCompiler, ConfigurableArtifacts>::dapptools().unwrap();
 

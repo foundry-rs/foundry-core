@@ -7,8 +7,8 @@ use crate::{
     compilers::{Compiler, CompilerSettings, Language},
     output::Builds,
     project::{
-        NativeDependencies, NativeDependencyContexts, NativeDependencyState,
-        NativeDependencyUpdates, collapse_native_dependency_contexts, merge_native_dependencies,
+        NativeDependencyContexts, NativeDependencyState, NativeDependencyUpdates,
+        collapse_native_dependency_contexts,
     },
     resolver::GraphEdges,
 };
@@ -24,7 +24,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::{BTreeSet, HashMap, HashSet, btree_map::BTreeMap, hash_map},
-    fs,
+    fs, mem,
     path::{Path, PathBuf},
     time::{Duration, UNIX_EPOCH},
 };
@@ -73,24 +73,6 @@ pub struct CompilerCache<S = Settings> {
 impl<S> CompilerCache<S> {
     /// Creates a new empty cache.
     pub fn new(format: String, paths: ProjectPaths, preprocessed: bool) -> Self {
-        Self::new_with_preprocessor(
-            format,
-            paths,
-            preprocessed,
-            0,
-            Default::default(),
-            Default::default(),
-        )
-    }
-
-    fn new_with_preprocessor(
-        format: String,
-        paths: ProjectPaths,
-        preprocessed: bool,
-        preprocessor_version: u64,
-        preprocessor_source_units: BTreeSet<PathBuf>,
-        remappings: Vec<Remapping>,
-    ) -> Self {
         Self {
             format,
             paths,
@@ -98,9 +80,9 @@ impl<S> CompilerCache<S> {
             builds: Default::default(),
             profiles: Default::default(),
             preprocessed,
-            preprocessor_version,
-            preprocessor_source_units,
-            remappings,
+            preprocessor_version: 0,
+            preprocessor_source_units: Default::default(),
+            remappings: Default::default(),
             mocks: Default::default(),
             native_dependencies: Default::default(),
         }
@@ -291,38 +273,21 @@ impl<S: CompilerSettings> CompilerCache<S> {
     /// Sets the `CacheEntry`'s file paths to `root` adjoined to `self.file`.
     #[instrument(skip_all)]
     pub fn join_entries(&mut self, root: &Path) -> &mut Self {
-        self.files = std::mem::take(&mut self.files)
+        self.files = mem::take(&mut self.files)
             .into_iter()
             .map(|(path, entry)| (root.join(path), entry))
             .collect();
-        self.native_dependencies = std::mem::take(&mut self.native_dependencies)
+        self.native_dependencies = mem::take(&mut self.native_dependencies)
             .into_iter()
-            .map(|(file, versions)| {
-                let versions = versions
-                    .into_iter()
-                    .map(|(version, profiles)| {
-                        let profiles = profiles
+            .map(|(file, mut versions)| {
+                for state in versions.values_mut().flat_map(BTreeMap::values_mut) {
+                    if let NativeDependencyState::Known(dependencies) = state {
+                        *dependencies = mem::take(dependencies)
                             .into_iter()
-                            .map(|(profile, state)| {
-                                let state = match state {
-                                    NativeDependencyState::Known(dependencies) => {
-                                        NativeDependencyState::Known(
-                                            dependencies
-                                                .into_iter()
-                                                .map(|path| root.join(path))
-                                                .collect(),
-                                        )
-                                    }
-                                    NativeDependencyState::Conservative => {
-                                        NativeDependencyState::Conservative
-                                    }
-                                };
-                                (profile, state)
-                            })
+                            .map(|path| root.join(path))
                             .collect();
-                        (version, profiles)
-                    })
-                    .collect();
+                    }
+                }
                 (root.join(file), versions)
             })
             .collect();
@@ -332,44 +297,22 @@ impl<S: CompilerSettings> CompilerCache<S> {
     /// Removes `base` from all `CacheEntry` paths
     #[instrument(skip_all)]
     pub fn strip_entries_prefix(&mut self, base: &Path) -> &mut Self {
-        self.files = std::mem::take(&mut self.files)
+        self.files = mem::take(&mut self.files)
             .into_iter()
             .map(|(path, entry)| (path.strip_prefix(base).map(Into::into).unwrap_or(path), entry))
             .collect();
-        self.native_dependencies = std::mem::take(&mut self.native_dependencies)
+        self.native_dependencies = mem::take(&mut self.native_dependencies)
             .into_iter()
-            .map(|(file, versions)| {
-                let file = file.strip_prefix(base).map(Into::into).unwrap_or(file);
-                let versions = versions
-                    .into_iter()
-                    .map(|(version, profiles)| {
-                        let profiles = profiles
+            .map(|(file, mut versions)| {
+                for state in versions.values_mut().flat_map(BTreeMap::values_mut) {
+                    if let NativeDependencyState::Known(dependencies) = state {
+                        *dependencies = mem::take(dependencies)
                             .into_iter()
-                            .map(|(profile, state)| {
-                                let state = match state {
-                                    NativeDependencyState::Known(dependencies) => {
-                                        NativeDependencyState::Known(
-                                            dependencies
-                                                .into_iter()
-                                                .map(|path| {
-                                                    path.strip_prefix(base)
-                                                        .map(Into::into)
-                                                        .unwrap_or(path)
-                                                })
-                                                .collect(),
-                                        )
-                                    }
-                                    NativeDependencyState::Conservative => {
-                                        NativeDependencyState::Conservative
-                                    }
-                                };
-                                (profile, state)
-                            })
+                            .map(|path| path.strip_prefix(base).map(Into::into).unwrap_or(path))
                             .collect();
-                        (version, profiles)
-                    })
-                    .collect();
-                (file, versions)
+                    }
+                }
+                (file.strip_prefix(base).map(Into::into).unwrap_or(file), versions)
             })
             .collect();
         self
@@ -1398,14 +1341,12 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
             // new empty cache
             (
-                CompilerCache::new_with_preprocessor(
-                    Default::default(),
-                    paths,
-                    preprocessed,
+                CompilerCache {
                     preprocessor_version,
-                    current_source_units.clone(),
-                    project.paths.remappings.clone(),
-                ),
+                    preprocessor_source_units: current_source_units.clone(),
+                    remappings: project.paths.remappings.clone(),
+                    ..CompilerCache::new(Default::default(), paths, preprocessed)
+                },
                 false,
             )
         }
@@ -1597,13 +1538,8 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                     profiles.remove(&profile);
                 }
                 if let Some(state) = updates.replacements.get(&file) {
-                    if preserve && let Some(existing) = profiles.get(&profile).cloned() {
-                        let mut dependencies = NativeDependencies::from([(file.clone(), existing)]);
-                        merge_native_dependencies(
-                            &mut dependencies,
-                            NativeDependencies::from([(file.clone(), state.clone())]),
-                        );
-                        profiles.insert(profile.clone(), dependencies.remove(&file).unwrap());
+                    if preserve && let Some(existing) = profiles.get_mut(&profile) {
+                        existing.merge(state.clone());
                     } else {
                         profiles.insert(profile.clone(), state.clone());
                     }
@@ -1623,13 +1559,8 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                     .or_default()
                     .entry(version.clone())
                     .or_default();
-                if let Some(existing) = current.get(&profile).cloned() {
-                    let mut dependencies = NativeDependencies::from([(file.clone(), existing)]);
-                    merge_native_dependencies(
-                        &mut dependencies,
-                        NativeDependencies::from([(file.clone(), state)]),
-                    );
-                    current.insert(profile.clone(), dependencies.remove(&file).unwrap());
+                if let Some(existing) = current.get_mut(&profile) {
+                    existing.merge(state);
                 } else {
                     current.insert(profile.clone(), state);
                 }
