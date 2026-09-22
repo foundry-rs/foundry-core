@@ -1,22 +1,6 @@
 use super::{yul::*, *};
 
 pub trait Visitor {
-    fn visit_yul_block(&mut self, _node: &YulBlock) {}
-    fn visit_yul_statement(&mut self, _node: &YulStatement) {}
-    fn visit_yul_expression(&mut self, _node: &YulExpression) {}
-    fn visit_yul_assignment(&mut self, _node: &YulAssignment) {}
-    fn visit_yul_function_call(&mut self, _node: &YulFunctionCall) {}
-    fn visit_yul_identifier(&mut self, _node: &YulIdentifier) {}
-    fn visit_yul_literal(&mut self, _node: &YulLiteral) {}
-    fn visit_yul_expression_statement(&mut self, _node: &YulExpressionStatement) {}
-    fn visit_yul_for_loop(&mut self, _node: &YulForLoop) {}
-    fn visit_yul_function_definition(&mut self, _node: &YulFunctionDefinition) {}
-    fn visit_yul_typed_name(&mut self, _node: &YulTypedName) {}
-    fn visit_yul_if(&mut self, _node: &YulIf) {}
-    fn visit_yul_switch(&mut self, _node: &YulSwitch) {}
-    fn visit_yul_case(&mut self, _node: &YulCase) {}
-    fn visit_yul_variable_declaration(&mut self, _node: &YulVariableDeclaration) {}
-
     fn visit_source_unit(&mut self, _source_unit: &SourceUnit) {}
     fn visit_import_directive(&mut self, _directive: &ImportDirective) {}
     fn visit_pragma_directive(&mut self, _directive: &PragmaDirective) {}
@@ -68,6 +52,22 @@ pub trait Visitor {
     fn visit_modifier_invocation(&mut self, _invocation: &ModifierInvocation) {}
     fn visit_inline_assembly(&mut self, _assembly: &InlineAssembly) {}
     fn visit_external_assembly_reference(&mut self, _ref: &ExternalInlineAssemblyReference) {}
+
+    fn visit_yul_block(&mut self, _node: &YulBlock) {}
+    fn visit_yul_statement(&mut self, _node: &YulStatement) {}
+    fn visit_yul_expression(&mut self, _node: &YulExpression) {}
+    fn visit_yul_assignment(&mut self, _node: &YulAssignment) {}
+    fn visit_yul_function_call(&mut self, _node: &YulFunctionCall) {}
+    fn visit_yul_identifier(&mut self, _node: &YulIdentifier) {}
+    fn visit_yul_literal(&mut self, _node: &YulLiteral) {}
+    fn visit_yul_expression_statement(&mut self, _node: &YulExpressionStatement) {}
+    fn visit_yul_for_loop(&mut self, _node: &YulForLoop) {}
+    fn visit_yul_function_definition(&mut self, _node: &YulFunctionDefinition) {}
+    fn visit_yul_typed_name(&mut self, _node: &YulTypedName) {}
+    fn visit_yul_if(&mut self, _node: &YulIf) {}
+    fn visit_yul_switch(&mut self, _node: &YulSwitch) {}
+    fn visit_yul_case(&mut self, _node: &YulCase) {}
+    fn visit_yul_variable_declaration(&mut self, _node: &YulVariableDeclaration) {}
 }
 
 pub trait Walk {
