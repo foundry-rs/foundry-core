@@ -6,7 +6,7 @@ use crate::{
     resolver::parse::SolData,
 };
 use foundry_compilers_artifacts::{
-    ast::{visitor::Visitor, *},
+    ast::{visitor::Visitor, yul::*, *},
     output_selection::OutputSelection,
     sources::{Source, Sources},
 };
@@ -15,7 +15,6 @@ use foundry_compilers_core::{
     utils,
 };
 use itertools::Itertools;
-use solar::parse::{Cursor, lexer::token::RawTokenKind};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
@@ -59,28 +58,28 @@ struct ReferencesCollector {
     references: HashMap<isize, HashSet<ItemLocation>>,
 }
 
-struct ScopedNamesCollector<'a> {
+struct ScopedNamesCollector {
     source_unit: usize,
-    source: &'a str,
     names: HashSet<String>,
 }
 
-impl Visitor for ScopedNamesCollector<'_> {
+impl Visitor for ScopedNamesCollector {
     fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration) {
         if declaration.scope != Some(self.source_unit) {
             self.names.insert(declaration.name.clone());
         }
     }
 
-    fn visit_inline_assembly(&mut self, assembly: &InlineAssembly) {
-        let start = assembly.src.start.unwrap();
-        let source = &self.source[start..start + assembly.src.length.unwrap()];
-        self.names.extend(
-            Cursor::new(source)
-                .with_position()
-                .filter(|(_, token)| token.kind == RawTokenKind::Ident)
-                .map(|(start, token)| source[start..start + token.len as usize].to_owned()),
-        );
+    fn visit_yul_typed_name(&mut self, name: &YulTypedName) {
+        self.names.insert(name.name.clone());
+    }
+
+    fn visit_yul_function_definition(&mut self, function: &YulFunctionDefinition) {
+        self.names.insert(function.name.clone());
+    }
+
+    fn visit_yul_identifier(&mut self, identifier: &YulIdentifier) {
+        self.names.insert(identifier.name.clone());
     }
 }
 
@@ -139,6 +138,41 @@ impl Visitor for ReferencesCollector {
         }
 
         self.process_referenced_declaration(reference.declaration as isize, &src);
+    }
+}
+
+struct ImportQualifiersCollector<'a> {
+    imports: &'a HashSet<usize>,
+    removals: &'a mut BTreeSet<(usize, usize, String)>,
+}
+
+impl Visitor for ImportQualifiersCollector<'_> {
+    fn visit_member_access(&mut self, access: &MemberAccess) {
+        let (id, start) = match &access.expression {
+            Expression::Identifier(identifier) => {
+                (identifier.referenced_declaration, identifier.src.start)
+            }
+            Expression::MemberAccess(member) => (
+                member.referenced_declaration,
+                member
+                    .src
+                    .start
+                    .zip(member.src.length)
+                    .map(|(start, len)| start + len - member.member_name.len()),
+            ),
+            _ => return,
+        };
+        if let Some(id) = id
+            && self.imports.contains(&(id as usize))
+            && let Some(start) = start
+            && let (Some(access_start), Some(len)) = (access.src.start, access.src.length)
+        {
+            self.removals.insert((
+                start,
+                access_start + len - access.member_name.len(),
+                String::new(),
+            ));
+        }
     }
 }
 
@@ -389,28 +423,21 @@ impl Flattener {
         let references = self.collect_references();
         let mut scoped_names = ScopedNamesCollector {
             source_unit: 0,
-            source: "",
             names: self
                 .collect_contract_level_definitions()
                 .into_values()
                 .map(|(name, _)| name.clone())
                 .collect(),
         };
-        for (path, ast) in &self.asts {
+        for (_, ast) in &self.asts {
             scoped_names.source_unit = ast.id;
-            scoped_names.source = &self.sources[path].content;
             ast.walk(&mut scoped_names);
         }
         // Reserve identifiers in every scope, including unreferenced declarations.
-        let used_names = self
-            .sources
-            .values()
-            .flat_map(|source| {
-                Cursor::new(&source.content)
-                    .with_position()
-                    .filter(|(_, token)| token.kind == RawTokenKind::Ident)
-                    .map(|(start, token)| &source.content[start..start + token.len as usize])
-            })
+        let used_names = top_level_definitions
+            .keys()
+            .map(|&name| name.as_str())
+            .chain(scoped_names.names.iter().map(String::as_str))
             .collect::<HashSet<_>>();
         let signatures = self
             .asts
@@ -540,27 +567,12 @@ impl Flattener {
             })
             .collect::<HashSet<_>>();
 
-        let references = self.collect_references();
-
-        for (id, locs) in references {
-            if !imports_ids.contains(&(id as usize)) {
-                continue;
-            }
-
-            for loc in locs {
-                let source = &self.sources[&loc.path].content;
-                if let Some((offset, token)) = Cursor::new(&source[loc.end..])
-                    .with_position()
-                    .find(|(_, token)| !token.kind.is_trivial())
-                    && token.kind == RawTokenKind::Dot
-                {
-                    updates.entry(loc.path).or_default().insert((
-                        loc.start,
-                        loc.end + offset + token.len as usize,
-                        String::new(),
-                    ));
-                }
-            }
+        for (path, ast) in &self.asts {
+            let mut collector = ImportQualifiersCollector {
+                imports: &imports_ids,
+                removals: updates.entry(path.clone()).or_default(),
+            };
+            ast.walk(&mut collector);
         }
     }
 

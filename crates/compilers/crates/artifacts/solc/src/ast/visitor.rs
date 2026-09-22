@@ -1,6 +1,22 @@
-use super::*;
+use super::{yul::*, *};
 
 pub trait Visitor {
+    fn visit_yul_block(&mut self, _node: &YulBlock) {}
+    fn visit_yul_statement(&mut self, _node: &YulStatement) {}
+    fn visit_yul_expression(&mut self, _node: &YulExpression) {}
+    fn visit_yul_assignment(&mut self, _node: &YulAssignment) {}
+    fn visit_yul_function_call(&mut self, _node: &YulFunctionCall) {}
+    fn visit_yul_identifier(&mut self, _node: &YulIdentifier) {}
+    fn visit_yul_literal(&mut self, _node: &YulLiteral) {}
+    fn visit_yul_expression_statement(&mut self, _node: &YulExpressionStatement) {}
+    fn visit_yul_for_loop(&mut self, _node: &YulForLoop) {}
+    fn visit_yul_function_definition(&mut self, _node: &YulFunctionDefinition) {}
+    fn visit_yul_typed_name(&mut self, _node: &YulTypedName) {}
+    fn visit_yul_if(&mut self, _node: &YulIf) {}
+    fn visit_yul_switch(&mut self, _node: &YulSwitch) {}
+    fn visit_yul_case(&mut self, _node: &YulCase) {}
+    fn visit_yul_variable_declaration(&mut self, _node: &YulVariableDeclaration) {}
+
     fn visit_source_unit(&mut self, _source_unit: &SourceUnit) {}
     fn visit_import_directive(&mut self, _directive: &ImportDirective) {}
     fn visit_pragma_directive(&mut self, _directive: &PragmaDirective) {}
@@ -534,6 +550,9 @@ impl_walk!(ModifierInvocation, visit_modifier_invocation, |invocation, visitor| 
 });
 
 impl_walk!(InlineAssembly, visit_inline_assembly, |assembly, visitor| {
+    if let Some(ast) = &assembly.ast {
+        ast.walk(visitor);
+    }
     assembly.external_references.iter().for_each(|reference| {
         reference.walk(visitor);
     });
@@ -624,3 +643,86 @@ impl_walk!(UsingForFunctionItem, |item, visitor| {
 impl_walk!(OverloadedOperator, |operator, visitor| {
     operator.definition.walk(visitor);
 });
+
+impl_walk!(YulStatement, visit_yul_statement, |statement, visitor| {
+    match statement {
+        YulStatement::YulAssignment(node) => node.walk(visitor),
+        YulStatement::YulBlock(node) => node.walk(visitor),
+        YulStatement::YulExpressionStatement(node) => node.walk(visitor),
+        YulStatement::YulForLoop(node) => node.walk(visitor),
+        YulStatement::YulFunctionDefinition(node) => node.walk(visitor),
+        YulStatement::YulIf(node) => node.walk(visitor),
+        YulStatement::YulSwitch(node) => node.walk(visitor),
+        YulStatement::YulVariableDeclaration(node) => node.walk(visitor),
+        YulStatement::YulBreak(_) | YulStatement::YulContinue(_) | YulStatement::YulLeave(_) => {}
+    }
+});
+
+impl_walk!(YulExpression, visit_yul_expression, |expression, visitor| {
+    match expression {
+        YulExpression::YulFunctionCall(node) => node.walk(visitor),
+        YulExpression::YulIdentifier(node) => node.walk(visitor),
+        YulExpression::YulLiteral(node) => node.walk(visitor),
+    }
+});
+
+impl_walk!(YulBlock, visit_yul_block, |node, visitor| {
+    node.statements.iter().for_each(|node| node.walk(visitor));
+});
+
+impl_walk!(YulAssignment, visit_yul_assignment, |node, visitor| {
+    node.variable_names.iter().for_each(|node| node.walk(visitor));
+    node.value.walk(visitor);
+});
+
+impl_walk!(YulFunctionCall, visit_yul_function_call, |node, visitor| {
+    node.arguments.iter().for_each(|node| node.walk(visitor));
+    node.function_name.walk(visitor);
+});
+
+impl_walk!(YulExpressionStatement, visit_yul_expression_statement, |node, visitor| {
+    node.expression.walk(visitor);
+});
+
+impl_walk!(YulForLoop, visit_yul_for_loop, |node, visitor| {
+    node.pre.walk(visitor);
+    node.condition.walk(visitor);
+    node.post.walk(visitor);
+    node.body.walk(visitor);
+});
+
+impl_walk!(YulFunctionDefinition, visit_yul_function_definition, |node, visitor| {
+    node.parameters.iter().for_each(|node| node.walk(visitor));
+    node.return_variables.iter().for_each(|node| node.walk(visitor));
+    node.body.walk(visitor);
+});
+
+impl_walk!(YulIf, visit_yul_if, |node, visitor| {
+    node.condition.walk(visitor);
+    node.body.walk(visitor);
+});
+
+impl_walk!(YulSwitch, visit_yul_switch, |node, visitor| {
+    node.cases.iter().for_each(|node| node.walk(visitor));
+    node.expression.walk(visitor);
+});
+
+impl_walk!(YulCase, visit_yul_case, |node, visitor| {
+    node.body.walk(visitor);
+    if let YulCaseValue::YulLiteral(value) = &node.value {
+        value.walk(visitor);
+    }
+});
+
+impl_walk!(YulVariableDeclaration, visit_yul_variable_declaration, |node, visitor| {
+    node.variables.iter().for_each(|node| node.walk(visitor));
+    if let Some(value) = &node.value {
+        value.walk(visitor);
+    }
+});
+
+impl_walk!(YulIdentifier, visit_yul_identifier);
+
+impl_walk!(YulLiteral, visit_yul_literal);
+
+impl_walk!(YulTypedName, visit_yul_typed_name);
