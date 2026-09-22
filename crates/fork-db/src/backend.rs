@@ -8,7 +8,7 @@ use crate::{
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::U256Map};
+use alloy_primitives::{Address, B256, Bytes, U64, U256, keccak256, map::U256Map};
 use alloy_provider::{
     DynProvider, Network, Provider,
     network::{AnyNetwork, BlockResponse, primitives::HeaderResponse},
@@ -44,6 +44,27 @@ use std::{
     },
 };
 use tokio::select;
+
+/// Keep state reads hash-addressed without relying on the bare-hash extension to EIP-1898.
+/// Moonbeam parses bare hashes as block numbers, while Rootstock rejects a boolean
+/// `requireCanonical`. An explicit hash object with the optional flag omitted supports both.
+#[derive(Clone, Copy, Debug)]
+struct StateBlockId(BlockId);
+
+impl Serialize for StateBlockId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let BlockId::Hash(hash) = self.0
+            && hash.require_canonical.is_none()
+        {
+            use serde::ser::SerializeStruct;
+            let mut object = serializer.serialize_struct("StateBlockId", 1)?;
+            object.serialize_field("blockHash", &hash.block_hash)?;
+            object.end()
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
 
 /// Logged when an error is indicative that the user is trying to fork from a non-archive node.
 pub const NON_ARCHIVE_NODE_WARNING: &str = "\
@@ -342,8 +363,10 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 let block_id = self.block_id.unwrap_or_default();
                 let fut = Box::pin(async move {
                     let storage = provider
-                        .get_storage_at(address, idx)
-                        .block_id(block_id)
+                        .raw_request(
+                            "eth_getStorageAt".into(),
+                            (address, idx, StateBlockId(block_id)),
+                        )
                         .await
                         .map_err(Into::into);
                     (storage, address, idx)
@@ -363,9 +386,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         let policy = self.account_fetch_policy;
         let fut = async move {
             if policy == AccountFetchPolicy::RequireAccountInfo {
-                return provider
-                    .get_account_info(address)
-                    .block_id(block_id)
+                return Self::fetch_account_info(&provider, address, block_id)
                     .await
                     .map(|info| (info.balance, info.nonce, info.code))
                     .wrap_err("fork account policy requires eth_getAccountInfo");
@@ -375,16 +396,10 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             match initial_mode {
                 ACCOUNT_FETCH_UNCHECKED => {
                     // single request for accountinfo object
-                    let acc_info_fut =
-                        provider.get_account_info(address).block_id(block_id).into_future();
+                    let acc_info_fut = Self::fetch_account_info(&provider, address, block_id);
 
                     // tri request for account info
-                    let balance_fut =
-                        provider.get_balance(address).block_id(block_id).into_future();
-                    let nonce_fut =
-                        provider.get_transaction_count(address).block_id(block_id).into_future();
-                    let code_fut = provider.get_code_at(address).block_id(block_id).into_future();
-                    let triple_fut = futures::future::try_join3(balance_fut, nonce_fut, code_fut);
+                    let triple_fut = Self::fetch_account_separately(&provider, address, block_id);
                     pin_mut!(acc_info_fut, triple_fut);
 
                     select! {
@@ -408,17 +423,14 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                                     mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
                                     Ok((balance, nonce, code))
                                 }
-                                Err(err) => Err(err.into())
+                                Err(err) => Err(err)
                             }
                         }
                     }
                 }
 
                 ACCOUNT_FETCH_SUPPORTS_ACC_INFO => {
-                    let mut res = provider
-                        .get_account_info(address)
-                        .block_id(block_id)
-                        .into_future()
+                    let mut res = Self::fetch_account_info(&provider, address, block_id)
                         .await
                         .map(|info| (info.balance, info.nonce, info.code));
 
@@ -427,28 +439,14 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                     if res.is_err() {
                         mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
 
-                        let balance_fut =
-                            provider.get_balance(address).block_id(block_id).into_future();
-                        let nonce_fut = provider
-                            .get_transaction_count(address)
-                            .block_id(block_id)
-                            .into_future();
-                        let code_fut =
-                            provider.get_code_at(address).block_id(block_id).into_future();
-                        res = futures::future::try_join3(balance_fut, nonce_fut, code_fut).await;
+                        res = Self::fetch_account_separately(&provider, address, block_id).await;
                     }
 
                     Ok(res?)
                 }
 
                 ACCOUNT_FETCH_SEPARATE_REQUESTS => {
-                    let balance_fut =
-                        provider.get_balance(address).block_id(block_id).into_future();
-                    let nonce_fut =
-                        provider.get_transaction_count(address).block_id(block_id).into_future();
-                    let code_fut = provider.get_code_at(address).block_id(block_id).into_future();
-
-                    Ok(futures::future::try_join3(balance_fut, nonce_fut, code_fut).await?)
+                    Self::fetch_account_separately(&provider, address, block_id).await
                 }
 
                 _ => unreachable!("Invalid account fetch mode"),
@@ -459,6 +457,31 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             let result = fut.await;
             (result, address)
         }))
+    }
+
+    async fn fetch_account_info(
+        provider: &DynProvider<N>,
+        address: Address,
+        block_id: BlockId,
+    ) -> eyre::Result<alloy_rpc_types::AccountInfo> {
+        Ok(provider
+            .raw_request("eth_getAccountInfo".into(), (address, StateBlockId(block_id)))
+            .await?)
+    }
+
+    async fn fetch_account_separately(
+        provider: &DynProvider<N>,
+        address: Address,
+        block_id: BlockId,
+    ) -> eyre::Result<(U256, u64, Bytes)> {
+        let params = (address, StateBlockId(block_id));
+        let (balance, nonce, code): (U256, U64, Bytes) = futures::future::try_join3(
+            provider.raw_request("eth_getBalance".into(), params),
+            provider.raw_request("eth_getTransactionCount".into(), params),
+            provider.raw_request("eth_getCode".into(), params),
+        )
+        .await?;
+        Ok((balance, nonce.to(), code))
     }
 
     /// process a request for an account
@@ -532,7 +555,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         let code = Bytes::from(code);
         let params = serde_json::json!([
             { "to": address, "data": code },
-            block_id.unwrap_or_else(BlockId::latest),
+            StateBlockId(block_id.unwrap_or_else(BlockId::latest)),
             { address.to_string(): { "code": code } },
         ]);
         let output: Bytes = provider
@@ -557,7 +580,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 "to": Address::with_last_byte(0x64),
                 "data": "0x051038f2", // arbOSVersion()
             },
-            block_id.unwrap_or_else(BlockId::latest),
+            StateBlockId(block_id.unwrap_or_else(BlockId::latest)),
         ]);
         let output = provider
             .raw_request::<_, Bytes>("eth_call".into(), params)
@@ -1320,6 +1343,72 @@ mod tests {
             .with_fork_identity(anchor_hash, B256::with_last_byte(1))
     }
 
+    #[test]
+    fn state_block_id_preserves_hash_objects_numbers_and_tags() {
+        let hash = B256::with_last_byte(1);
+        assert_eq!(
+            serde_json::to_value(StateBlockId(hash.into())).unwrap(),
+            serde_json::json!({"blockHash": hash})
+        );
+        for block in [
+            BlockId::number(123),
+            BlockId::latest(),
+            BlockId::pending(),
+            BlockId::safe(),
+            BlockId::finalized(),
+            BlockId::earliest(),
+            BlockId::from((hash, Some(false))),
+            BlockId::from((hash, Some(true))),
+        ] {
+            assert_eq!(
+                serde_json::to_value(StateBlockId(block)).unwrap(),
+                serde_json::to_value(block).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exact_anchor_account_requests_use_hash_objects_without_canonical_flag() {
+        for (policy, mode, reject_account_info) in [
+            (AccountFetchPolicy::RequireAccountInfo, ACCOUNT_FETCH_UNCHECKED, false),
+            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_UNCHECKED, false),
+            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_UNCHECKED, true),
+            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_SUPPORTS_ACC_INFO, false),
+            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_SUPPORTS_ACC_INFO, true),
+            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_SEPARATE_REQUESTS, true),
+        ] {
+            let (endpoint, stop, server) = account_policy_server(reject_account_info);
+            let hash = B256::with_last_byte(1);
+            let provider = get_http_provider(&endpoint);
+            let db = BlockchainDb::new(
+                exact_meta(&endpoint, hash).with_account_fetch_policy(policy),
+                None,
+            );
+            let (backend, handler) =
+                SharedBackend::new_with_anchor(provider, db, ForkBlock::new(123, hash)).unwrap();
+            handler.account_fetch_mode.store(mode, Ordering::Relaxed);
+            tokio::spawn(handler);
+            for address in [Address::with_last_byte(1), Address::with_last_byte(2)] {
+                let account = backend.basic_ref(address).unwrap().unwrap();
+                assert_eq!(account.nonce, 7);
+                assert_eq!(account.code.unwrap().original_bytes(), Bytes::from_static(&[0x60, 0]));
+                if reject_account_info {
+                    assert_eq!(account.balance, U256::from(65535));
+                } else if policy == AccountFetchPolicy::RequireAccountInfo {
+                    assert_eq!(account.balance, U256::from(42));
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+            let requests = server.join().unwrap();
+            assert!(!requests.is_empty());
+            for request in requests {
+                // Exact equality rejects both Moonbeam's ambiguous bare-hash form and
+                // Rootstock's unsupported boolean (or null) requireCanonical field.
+                assert_eq!(request["params"][1], serde_json::json!({"blockHash": hash}));
+            }
+        }
+    }
+
     /// Serves deliberately inconsistent balances from the two account RPC paths.
     fn account_policy_server(
         reject_account_info: bool,
@@ -1384,7 +1473,7 @@ mod tests {
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests.iter().all(|r| r["method"] == "eth_getAccountInfo"));
-        assert_eq!(requests[0]["params"], serde_json::json!([address, BlockId::from(hash)]));
+        assert_eq!(requests[0]["params"], serde_json::json!([address, {"blockHash": hash}]));
         assert_eq!(requests[1]["params"][1], "0x7b");
     }
 
@@ -1598,7 +1687,7 @@ mod tests {
             let mut storage_request = server.recv().unwrap();
             let storage: Request = serde_json::from_reader(storage_request.as_reader()).unwrap();
             assert_eq!(storage.method, "eth_getStorageAt");
-            assert_eq!(storage.params[2], anchor_hash.to_string());
+            assert_eq!(storage.params[2], serde_json::json!({"blockHash": anchor_hash}));
             storage_request
                 .respond(Response::from_string(
                     serde_json::json!({
@@ -2010,7 +2099,7 @@ mod tests {
             let mut request = server.recv().unwrap();
             let rpc_request: Request = serde_json::from_reader(request.as_reader()).unwrap();
             assert_eq!(rpc_request.method, "eth_call");
-            assert_eq!(rpc_request.params[1], anchor_hash.to_string());
+            assert_eq!(rpc_request.params[1], serde_json::json!({"blockHash": anchor_hash}));
             assert_eq!(
                 rpc_request.params[0]["data"],
                 format!("0x7f{:064x}4060005260206000f3", U256::from(99))

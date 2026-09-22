@@ -116,10 +116,11 @@ use foundry_compilers_artifacts::{Contract, sources::SourceCompilationKind};
 use foundry_compilers_core::error::{Result, SolcError};
 use rayon::prelude::*;
 use semver::Version;
+use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::path::Path;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
     fmt::Debug,
     path::PathBuf,
     time::Instant,
@@ -128,11 +129,171 @@ use std::{
 /// A set of different Solc installations with their version and the sources to be compiled
 pub(crate) type VersionedSources<'a, L, S> = HashMap<L, Vec<(Version, Sources, (&'a str, &'a S))>>;
 
+/// Native bytecode dependency classification for a preprocessed source.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "dependencies")]
+pub enum NativeDependencyState {
+    /// Exact source paths whose implementation bytecode remains embedded.
+    Known(BTreeSet<PathBuf>),
+    /// Analysis was incomplete, so any project source change must invalidate the source.
+    Conservative,
+}
+
+impl NativeDependencyState {
+    /// Merges observations, with conservative classifications dominating exact dependencies.
+    pub(crate) fn merge(&mut self, incoming: Self) {
+        match (self, incoming) {
+            (Self::Conservative, _) => {}
+            (state, Self::Conservative) => *state = Self::Conservative,
+            (Self::Known(dependencies), Self::Known(incoming)) => dependencies.extend(incoming),
+        }
+    }
+}
+
+/// Native bytecode dependency classifications keyed by the source that embeds them.
+///
+/// An absent entry means that preprocessing proved the source has no native dependencies.
+pub type NativeDependencies = BTreeMap<PathBuf, NativeDependencyState>;
+
+/// Native bytecode dependency classifications keyed by source, compiler version, and profile.
+pub type NativeDependencyContexts =
+    BTreeMap<PathBuf, BTreeMap<Version, BTreeMap<String, NativeDependencyState>>>;
+
+/// Updates produced by preprocessing compiler jobs in one request.
+#[derive(Debug, Default)]
+pub struct NativeDependencyUpdates {
+    pub(crate) contexts: BTreeMap<(Version, String), NativeDependencyContextUpdates>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct NativeDependencyContextUpdates {
+    pub(crate) processed: HashSet<PathBuf>,
+    pub(crate) replacements: NativeDependencies,
+    pub(crate) observations: NativeDependencies,
+}
+
+/// Merges cached contexts without replacing independently cached artifacts.
+pub fn merge_native_dependency_contexts(
+    contexts: &mut NativeDependencyContexts,
+    incoming: NativeDependencyContexts,
+) {
+    for (file, versions) in incoming {
+        for (version, profiles) in versions {
+            for (profile, state) in profiles {
+                let current =
+                    contexts.entry(file.clone()).or_default().entry(version.clone()).or_default();
+                match current.entry(profile) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(state);
+                    }
+                    Entry::Occupied(mut entry) => entry.get_mut().merge(state),
+                }
+            }
+        }
+    }
+}
+
+/// Collapses artifact-specific contexts into source-level invalidation classifications.
+pub fn collapse_native_dependency_contexts(
+    contexts: &NativeDependencyContexts,
+) -> NativeDependencies {
+    let mut dependencies = NativeDependencies::new();
+    for (file, versions) in contexts {
+        for state in versions.values().flat_map(BTreeMap::values) {
+            merge_native_dependencies(
+                &mut dependencies,
+                NativeDependencies::from([(file.clone(), state.clone())]),
+            );
+        }
+    }
+    dependencies
+}
+
+/// Merges classifications from compiler jobs, with conservative entries dominating exact edges.
+pub fn merge_native_dependencies(
+    dependencies: &mut NativeDependencies,
+    incoming: NativeDependencies,
+) {
+    for (file, incoming) in incoming {
+        match dependencies.entry(file) {
+            Entry::Vacant(entry) => {
+                entry.insert(incoming);
+            }
+            Entry::Occupied(mut entry) => entry.get_mut().merge(incoming),
+        }
+    }
+}
+
+/// Native dependency state accumulated across every compiler job in one request.
+#[derive(Debug, Default)]
+pub struct PreprocessorState {
+    untracked: bool,
+    active_context: Option<(Version, String)>,
+    active_replacements: HashSet<PathBuf>,
+    updates: NativeDependencyUpdates,
+    processed_sources: HashSet<PathBuf>,
+}
+
+impl PreprocessorState {
+    /// Creates state for direct preprocessor calls that do not update a compiler cache.
+    pub fn untracked() -> Self {
+        Self { untracked: true, ..Default::default() }
+    }
+
+    fn set_context(&mut self, version: Version, profile: String, replacements: &[PathBuf]) {
+        self.active_context = Some((version, profile));
+        self.active_replacements = replacements.iter().cloned().collect();
+    }
+
+    /// Updates one source's classification for a compiler job.
+    ///
+    /// Repeated updates within one compiler job are merged, with
+    /// [`NativeDependencyState::Conservative`] dominating. The cache applies the resulting
+    /// classification as a replacement for this compiler version and profile only.
+    /// Returns whether this was the source's first update in the request.
+    pub fn update(&mut self, file: PathBuf, state: Option<NativeDependencyState>) -> bool {
+        let first_update = self.processed_sources.insert(file.clone());
+        if self.untracked {
+            return first_update;
+        }
+        let context = self.active_context.clone().expect("preprocessor context must be set");
+        if !self.active_replacements.contains(&file) {
+            if let Some(state) = state {
+                let updates = self.updates.contexts.entry(context).or_default();
+                merge_native_dependencies(
+                    &mut updates.observations,
+                    NativeDependencies::from([(file, state)]),
+                );
+            }
+            return first_update;
+        }
+        let updates = self.updates.contexts.entry(context).or_default();
+        updates.processed.insert(file.clone());
+        if let Some(state) = state {
+            merge_native_dependencies(
+                &mut updates.replacements,
+                NativeDependencies::from([(file, state)]),
+            );
+        }
+        first_update
+    }
+
+    fn into_updates(self) -> NativeDependencyUpdates {
+        self.updates
+    }
+}
+
 /// Invoked before the actual compiler invocation and can override the input.
 ///
-/// Updates the list of identified cached mocks (if any) to be stored in cache and updates the
-/// compiler input.
+/// Updates cached dependency classifications and the compiler input.
 pub trait Preprocessor<C: Compiler>: Debug {
+    /// Version of the preprocessor's cache policy.
+    ///
+    /// Incrementing this invalidates caches produced by an older policy.
+    fn cache_version(&self) -> u64 {
+        0
+    }
+
     fn preprocess(
         &self,
         compiler: &C,
@@ -140,6 +301,19 @@ pub trait Preprocessor<C: Compiler>: Debug {
         paths: &ProjectPathsConfig<C::Language>,
         mocks: &mut HashSet<PathBuf>,
     ) -> Result<()>;
+
+    /// Preprocesses compiler input and updates native bytecode dependency edges.
+    fn preprocess_with_dependencies(
+        &self,
+        compiler: &C,
+        input: &mut C::Input,
+        paths: &ProjectPathsConfig<C::Language>,
+        mocks: &mut HashSet<PathBuf>,
+        _state: &mut PreprocessorState,
+        _source_units: &[PathBuf],
+    ) -> Result<()> {
+        self.preprocess(compiler, input, paths, mocks)
+    }
 }
 
 #[derive(Debug)]
@@ -240,7 +414,9 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         // which is unix style `/`
         sources.slash_paths();
 
-        let mut cache = ArtifactsCache::new(project, edges, preprocessor.is_some())?;
+        let preprocessor_version =
+            preprocessor.as_ref().map(|preprocessor| preprocessor.cache_version());
+        let mut cache = ArtifactsCache::new(project, edges, preprocessor_version)?;
         // retain and compile only dirty sources and all their imports
         sources.filter(&mut cache);
 
@@ -276,6 +452,8 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
         } else {
             let PreprocessedState { mut sources, cache, primary_profiles, preprocessor } = state;
             let normal_mocks = cache.mocks();
+            let normal_native_dependencies = cache.native_dependency_contexts();
+            let normal_source_units = cache.preprocessor_source_units();
             let directory = if preprocessed {
                 // Preprocessors can depend on the complete compiler job, including its source
                 // units. Separate storage keeps alternating filtered requests independent.
@@ -300,7 +478,12 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 jobs.sort_unstable();
                 let mut mocks = normal_mocks.iter().collect::<Vec<_>>();
                 mocks.sort_unstable();
-                let identity = serde_json::to_vec(&(jobs, mocks))?;
+                let identity = serde_json::to_vec(&(
+                    jobs,
+                    mocks,
+                    &normal_native_dependencies,
+                    &normal_source_units,
+                ))?;
                 project.abi_cache_path().join(foundry_compilers_core::utils::unique_hash(identity))
             } else {
                 project.abi_cache_path().join("default")
@@ -323,28 +506,50 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 };
             let (normal_artifacts, normal_builds, edges) =
                 cache.consume(&Artifacts::default(), &Vec::new(), false)?;
+            let secondary_preprocessor_version =
+                preprocessor.as_ref().map(|preprocessor| preprocessor.cache_version());
             let mut cache = ArtifactsCache::with_storage(
                 project,
                 edges,
-                preprocessed,
+                secondary_preprocessor_version,
                 Some(store.paths(&project.paths)),
             )?;
             let mut mocks = cache.mocks();
             mocks.extend(normal_mocks.iter().cloned());
             cache.update_mocks(mocks);
+            let mut native_dependencies = cache.native_dependency_contexts();
+            merge_native_dependency_contexts(
+                &mut native_dependencies,
+                normal_native_dependencies.clone(),
+            );
+            cache.update_native_dependency_contexts(native_dependencies);
+            cache.update_preprocessor_source_units(normal_source_units.iter().cloned().collect());
             // A preprocessor can depend on other source units in its compiler job. Reuse a
             // fully cached request, but preserve the original input on any secondary miss.
             let original_sources = preprocessed.then(|| sources.clone());
             let mut preserved_mocks = HashSet::new();
+            let mut preserved_native_dependencies = NativeDependencyContexts::new();
             sources.filter(&mut cache);
             if let Some(original_sources) = original_sources
                 && sources.sources.values().flatten().any(|(_, sources, _)| !sources.is_empty())
             {
                 preserved_mocks = cache.mocks();
+                preserved_native_dependencies = cache.native_dependency_contexts();
                 for (version, sources, (profile, _)) in original_sources.sources.values().flatten()
                 {
                     for (file, source) in sources {
                         preserved_mocks.remove(file);
+                        if let Some(versions) = preserved_native_dependencies.get_mut(file) {
+                            if let Some(profiles) = versions.get_mut(version) {
+                                profiles.remove(*profile);
+                                if profiles.is_empty() {
+                                    versions.remove(version);
+                                }
+                            }
+                            if versions.is_empty() {
+                                preserved_native_dependencies.remove(file);
+                            }
+                        }
                         if source.kind == SourceCompilationKind::Complete {
                             cache.invalidate_artifacts(file, version, profile);
                         }
@@ -352,6 +557,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 }
                 sources = original_sources;
                 cache.update_mocks(normal_mocks);
+                cache.update_native_dependency_contexts(normal_native_dependencies);
             }
             let generation = if !project.no_artifacts
                 && sources.sources.values().flatten().any(|(_, sources, _)| !sources.is_empty())
@@ -375,6 +581,14 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 let mut mocks = state.cache.mocks();
                 mocks.extend(preserved_mocks);
                 state.cache.update_mocks(mocks);
+            }
+            if !preserved_native_dependencies.is_empty() {
+                let mut native_dependencies = state.cache.native_dependency_contexts();
+                merge_native_dependency_contexts(
+                    &mut native_dependencies,
+                    preserved_native_dependencies,
+                );
+                state.cache.update_native_dependency_contexts(native_dependencies);
             }
             let mut output = state.write_artifacts_if(write)?.write_cache_if(write)?;
             if let Some(generation) = generation
@@ -687,6 +901,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
     ) -> Result<AggregatedCompilerOutput<C>> {
         let project = cache.project();
         let graph = cache.graph();
+        let source_units = cache.preprocessor_source_units();
 
         let jobs_cnt = self.jobs;
 
@@ -699,6 +914,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
         // Get current list of mocks from cache. This will be passed to preprocessors and updated
         // accordingly, then set back in cache.
         let mut mocks = cache.mocks();
+        let mut preprocessor_state = PreprocessorState::default();
 
         #[cfg(windows)]
         let contextual_roots = {
@@ -768,11 +984,18 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                 input.strip_prefix(project.paths.root.as_path());
 
                 if let Some(preprocessor) = preprocessor.as_ref() {
-                    preprocessor.preprocess(
+                    preprocessor_state.set_context(
+                        input.version().clone(),
+                        profile.to_owned(),
+                        &actually_dirty,
+                    );
+                    preprocessor.preprocess_with_dependencies(
                         &project.compiler,
                         &mut input,
                         &project.paths,
                         &mut mocks,
+                        &mut preprocessor_state,
+                        &source_units,
                     )?;
                 }
 
@@ -782,6 +1005,16 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
 
         // Update cache with mocks updated by preprocessors.
         cache.update_mocks(mocks);
+        // Recompiled artifacts do not keep old observations alive through importer contexts.
+        // Retire them before applying updates; the cache is only persisted on success.
+        if preprocessor.is_some() {
+            for (input, profile, actually_dirty) in &jobs {
+                for file in actually_dirty {
+                    cache.invalidate_artifacts(file, input.version(), profile);
+                }
+            }
+        }
+        cache.apply_native_dependency_updates(preprocessor_state.into_updates());
 
         let results = if let Some(num_jobs) = jobs_cnt {
             compile_parallel(&project.compiler, jobs, num_jobs)
@@ -958,18 +1191,119 @@ fn compile_parallel<'a, C: Compiler>(
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "project-util", feature = "svm-solc"))]
 mod tests {
-    use std::path::Path;
+    use super::*;
+    use std::slice;
 
-    use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
-
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     use crate::{
         MinimalCombinedArtifacts, compilers::multi::MultiCompiler, project_util::TempProject,
     };
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
+    use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
+    use std::path::Path;
 
-    use super::*;
+    fn known(paths: &[&str]) -> NativeDependencyState {
+        NativeDependencyState::Known(paths.iter().map(PathBuf::from).collect::<BTreeSet<_>>())
+    }
 
+    #[test]
+    fn exact_dependencies_are_unioned() {
+        let file = PathBuf::from("test.sol");
+        let mut dependencies = NativeDependencies::from([(file.clone(), known(&["a.sol"]))]);
+
+        merge_native_dependencies(
+            &mut dependencies,
+            NativeDependencies::from([(file.clone(), known(&["b.sol"]))]),
+        );
+
+        assert_eq!(dependencies, NativeDependencies::from([(file, known(&["a.sol", "b.sol"]))]));
+    }
+
+    #[test]
+    fn conservative_classification_dominates_in_either_order() {
+        let file = PathBuf::from("test.sol");
+        for (first, second) in [
+            (NativeDependencyState::Conservative, known(&["a.sol"])),
+            (known(&["a.sol"]), NativeDependencyState::Conservative),
+        ] {
+            let mut dependencies = NativeDependencies::from([(file.clone(), first)]);
+            merge_native_dependencies(
+                &mut dependencies,
+                NativeDependencies::from([(file.clone(), second)]),
+            );
+            assert_eq!(
+                dependencies,
+                NativeDependencies::from([(file.clone(), NativeDependencyState::Conservative)])
+            );
+        }
+    }
+
+    #[test]
+    fn preprocessor_state_replaces_one_context_and_merges_job_updates() {
+        let cleared = PathBuf::from("cleared.sol");
+        let merged = PathBuf::from("merged.sol");
+        let mut state = PreprocessorState::default();
+        state.set_context(
+            Version::new(0, 8, 30),
+            "default".to_owned(),
+            &[cleared.clone(), merged.clone()],
+        );
+
+        assert!(state.update(cleared.clone(), None));
+        assert!(state.update(merged.clone(), Some(known(&["a.sol"]))));
+        assert!(!state.update(merged.clone(), Some(NativeDependencyState::Conservative)));
+
+        let updates = state.into_updates();
+        let updates = &updates.contexts[&(Version::new(0, 8, 30), "default".to_owned())];
+        assert_eq!(updates.processed, HashSet::from([cleared, merged.clone()]));
+        assert_eq!(
+            updates.replacements,
+            NativeDependencies::from([(merged, NativeDependencyState::Conservative)])
+        );
+        assert!(updates.observations.is_empty());
+    }
+
+    #[test]
+    fn preprocessor_state_keeps_contexts_separate_and_first_update_request_wide() {
+        let file = PathBuf::from("test.sol");
+        let mut state = PreprocessorState::default();
+        state.set_context(Version::new(0, 8, 29), "default".to_owned(), slice::from_ref(&file));
+        assert!(state.update(file.clone(), Some(known(&["a.sol"]))));
+
+        state.set_context(Version::new(0, 8, 30), "optimized".to_owned(), slice::from_ref(&file));
+        assert!(!state.update(file, None));
+
+        let updates = state.into_updates();
+        assert_eq!(updates.contexts.len(), 2);
+        assert_eq!(
+            updates.contexts.values().map(|updates| updates.processed.len()).sum::<usize>(),
+            2
+        );
+    }
+
+    #[test]
+    fn preprocessor_state_does_not_clear_surviving_artifacts() {
+        let file = PathBuf::from("optimized.sol");
+        let mut state = PreprocessorState::default();
+        state.set_context(Version::new(0, 8, 30), "default".to_owned(), &[]);
+
+        assert!(state.update(file, None));
+        assert!(state.into_updates().contexts.is_empty());
+    }
+
+    #[test]
+    fn untracked_preprocessor_state_only_tracks_first_update() {
+        let file = PathBuf::from("test.sol");
+        let mut state = PreprocessorState::untracked();
+
+        assert!(state.update(file.clone(), Some(known(&["dependency.sol"]))));
+        assert!(!state.update(file, Some(NativeDependencyState::Conservative)));
+        assert!(state.into_updates().contexts.is_empty());
+    }
+
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -977,7 +1311,7 @@ mod tests {
             .ok();
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "project-util", feature = "svm-solc"))]
     #[test]
     fn external_source_unit_is_relative_to_project_root() {
         let root = Path::new(r"C:\workspace\utils");
@@ -990,7 +1324,7 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "project-util", feature = "svm-solc"))]
     #[test]
     fn project_source_unit_remains_absolute() {
         let root = Path::new(r"C:\workspace\utils");
@@ -1004,6 +1338,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_preprocess() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/dapp-sample");
         let project = Project::builder()
@@ -1023,6 +1358,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_detect_cached_files() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/dapp-sample");
         let paths = ProjectPathsConfig::builder().sources(root.join("src")).lib(root.join("lib"));
@@ -1038,6 +1374,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_recompile_with_optimized_output() {
         let tmp = TempProject::<MultiCompiler, ConfigurableArtifacts>::dapptools().unwrap();
 
@@ -1146,6 +1483,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_compile_real_project() {
         init_tracing();
         let paths = ProjectPathsConfig::builder()
@@ -1158,6 +1496,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn extra_output_cached() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/dapp-sample");
         let paths = ProjectPathsConfig::builder().sources(root.join("src")).lib(root.join("lib"));
@@ -1179,6 +1518,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     fn can_compile_leftovers_after_sparse() {
         let mut tmp = TempProject::<MultiCompiler, ConfigurableArtifacts>::dapptools().unwrap();
 
