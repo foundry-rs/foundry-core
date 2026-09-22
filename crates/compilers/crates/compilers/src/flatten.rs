@@ -323,14 +323,21 @@ impl Flattener {
     /// 2. We want to find any duplicates and rename them to avoid conflicts.
     ///
     /// Duplicate names receive unused numeric suffixes. Errors and events keep their ABI names
-    /// inside generated libraries, and their references use the qualified names.
+    /// inside generated libraries when duplicated or referenced. Their references use qualified
+    /// names even for singletons to avoid binding to declarations in narrower scopes.
     ///
     /// Returns mapping from top-level declaration id to its name (possibly updated)
     fn rename_top_level_definitions(&self, updates: &mut Updates) -> HashMap<usize, String> {
         let top_level_definitions = self.collect_top_level_definitions();
         let references = self.collect_references();
-        let used_names =
-            top_level_definitions.keys().map(|name| name.as_str()).collect::<HashSet<_>>();
+        // Reserve identifier-like words in every scope, including unreferenced declarations.
+        let used_names = self
+            .sources
+            .values()
+            .flat_map(|source| {
+                source.content.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+            })
+            .collect::<HashSet<_>>();
         let signatures = self
             .asts
             .iter()
@@ -358,7 +365,10 @@ impl Flattener {
 
         for (name, ids) in top_level_definitions {
             let mut definition_name = name.clone();
-            let needs_rename = ids.len() > 1;
+            let needs_rename = ids.len() > 1
+                || ids.iter().any(|(id, _)| {
+                    signatures.contains_key(id) && references.contains_key(&(*id as isize))
+                });
 
             let mut ids = ids.into_iter().collect::<Vec<_>>();
             if needs_rename {
@@ -379,7 +389,7 @@ impl Flattener {
                     }
                 }
                 if needs_rename && let Some(&(start, end)) = signatures.get(id) {
-                    // Preserve ABI names by qualifying colliding errors and events instead.
+                    // Preserve ABI names by qualifying errors and events instead.
                     updates.entry(loc.path.clone()).or_default().extend([
                         (start, start, format!("library {definition_name} {{\n")),
                         (end, end, "\n}".to_string()),

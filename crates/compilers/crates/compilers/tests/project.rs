@@ -6257,3 +6257,83 @@ contract Target {
         abi.errors.values().flatten().map(|error| error.signature()).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn can_flatten_singleton_errors_and_events_with_member_names() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project
+        .add_source(
+            "Declarations",
+            "pragma solidity ^0.8.22; error Failure(uint256 value); event Notice(uint256 value);",
+        )
+        .unwrap();
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+import {Failure as ImportedFailure, Notice as ImportedNotice} from "./Declarations.sol";
+contract Base {
+    error Failure(uint128 value);
+    event Notice(uint128 value);
+}
+contract Target is Base {
+    function run() external {
+        emit ImportedNotice(1);
+        revert ImportedFailure(1);
+    }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    let compiled = project.project().compile_file(path).unwrap();
+    compiled.assert_success();
+    assert_eq!(original_abi, compiled.find_first("Target").unwrap().abi);
+}
+
+#[test]
+fn can_flatten_errors_and_events_with_shadowed_namespace_names() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    for name in ["First", "Second"] {
+        project
+            .add_source(name, "pragma solidity ^0.8.22; error Failure(); event Notice();")
+            .unwrap();
+    }
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+import {Failure as FirstFailure, Notice as FirstNotice} from "./First.sol";
+import {Failure as SecondFailure, Notice as SecondNotice} from "./Second.sol";
+contract Base {
+    uint256 internal Notice_0;
+    uint256 internal Failure_0;
+}
+contract Target is Base {
+    function run(bool first, uint256 Notice_1, uint256 Failure_1) external {
+        uint256 Notice_2 = Notice_1;
+        uint256 Failure_2 = Failure_1;
+        if (first) {
+            emit FirstNotice();
+            revert FirstFailure();
+        }
+        emit SecondNotice();
+        revert SecondFailure();
+    }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    let compiled = project.project().compile_file(path).unwrap();
+    compiled.assert_success();
+    assert_eq!(original_abi, compiled.find_first("Target").unwrap().abi);
+}
