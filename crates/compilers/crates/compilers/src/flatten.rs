@@ -6,7 +6,7 @@ use crate::{
     resolver::parse::SolData,
 };
 use foundry_compilers_artifacts::{
-    ast::{visitor::Visitor, *},
+    ast::{visitor::Visitor, yul::*, *},
     output_selection::OutputSelection,
     sources::{Source, Sources},
 };
@@ -45,7 +45,7 @@ impl ItemLocation {
 }
 
 /// Visitor exploring AST and collecting all references to declarations via `Identifier` and
-/// `IdentifierPath` nodes.
+/// `IdentifierPath` nodes, and legacy `UserDefinedTypeName` nodes.
 ///
 /// It also collects `MemberAccess` parts. So, if we have `X.Y` expression, loc and AST ID will be
 /// saved for Y only.
@@ -56,6 +56,42 @@ impl ItemLocation {
 struct ReferencesCollector {
     path: PathBuf,
     references: HashMap<isize, HashSet<ItemLocation>>,
+}
+
+struct ScopedNamesCollector {
+    source_unit: usize,
+    names: HashSet<String>,
+    assembly_references: HashSet<usize>,
+}
+
+impl Visitor for ScopedNamesCollector {
+    fn visit_identifier(&mut self, identifier: &Identifier) {
+        if identifier.referenced_declaration.is_some_and(|id| id < 0) {
+            self.names.insert(identifier.name.clone());
+        }
+    }
+
+    fn visit_external_assembly_reference(&mut self, reference: &ExternalInlineAssemblyReference) {
+        self.assembly_references.insert(reference.declaration);
+    }
+
+    fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration) {
+        if declaration.scope != Some(self.source_unit) {
+            self.names.insert(declaration.name.clone());
+        }
+    }
+
+    fn visit_yul_typed_name(&mut self, name: &YulTypedName) {
+        self.names.insert(name.name.clone());
+    }
+
+    fn visit_yul_function_definition(&mut self, function: &YulFunctionDefinition) {
+        self.names.insert(function.name.clone());
+    }
+
+    fn visit_yul_identifier(&mut self, identifier: &YulIdentifier) {
+        self.names.insert(identifier.name.clone());
+    }
 }
 
 impl ReferencesCollector {
@@ -75,6 +111,12 @@ impl Visitor for ReferencesCollector {
 
     fn visit_identifier_path(&mut self, path: &IdentifierPath) {
         self.process_referenced_declaration(path.referenced_declaration, &path.src);
+    }
+
+    fn visit_user_defined_type_name(&mut self, type_name: &UserDefinedTypeName) {
+        if type_name.path_node.is_none() {
+            self.process_referenced_declaration(type_name.referenced_declaration, &type_name.src);
+        }
     }
 
     fn visit_member_access(&mut self, access: &MemberAccess) {
@@ -107,6 +149,70 @@ impl Visitor for ReferencesCollector {
         }
 
         self.process_referenced_declaration(reference.declaration as isize, &src);
+    }
+}
+
+struct ImportQualifiersCollector<'a> {
+    imports: &'a HashSet<usize>,
+    removals: &'a mut BTreeSet<(usize, usize, String)>,
+}
+
+impl Visitor for ImportQualifiersCollector<'_> {
+    fn visit_member_access(&mut self, access: &MemberAccess) {
+        let (id, start) = match &access.expression {
+            Expression::Identifier(identifier) => {
+                (identifier.referenced_declaration, identifier.src.start)
+            }
+            Expression::MemberAccess(member) => (
+                member.referenced_declaration,
+                member
+                    .src
+                    .start
+                    .zip(member.src.length)
+                    .map(|(start, len)| start + len - member.member_name.len()),
+            ),
+            _ => return,
+        };
+        if let Some(id) = id
+            && self.imports.contains(&(id as usize))
+            && let Some(start) = start
+            && let (Some(access_start), Some(len)) = (access.src.start, access.src.length)
+        {
+            self.removals.insert((
+                start,
+                access_start + len - access.member_name.len(),
+                String::new(),
+            ));
+        }
+    }
+}
+
+struct ContractNamesCollector<'a> {
+    names: HashMap<isize, &'a str>,
+    replacements: BTreeSet<(usize, usize, String)>,
+}
+
+impl Visitor for ContractNamesCollector<'_> {
+    fn visit_member_access(&mut self, access: &MemberAccess) {
+        if access.member_name == "name"
+            && let Expression::FunctionCall(call) = &access.expression
+            && let Expression::Identifier(function) = &call.expression
+            && function.name == "type"
+        {
+            let id = match call.arguments.as_slice() {
+                [Expression::Identifier(identifier)] => identifier.referenced_declaration,
+                [Expression::MemberAccess(member)] => member.referenced_declaration,
+                _ => None,
+            };
+            if let Some(name) = id.and_then(|id| self.names.get(&id)) {
+                let start = access.src.start.unwrap();
+                self.replacements.insert((
+                    start,
+                    start + access.src.length.unwrap(),
+                    format!("string({})", serde_json::to_string(name).unwrap()),
+                ));
+            }
+        }
     }
 }
 
@@ -283,6 +389,7 @@ impl Flattener {
         self.rename_contract_level_types_references(&top_level_names, &mut updates);
         self.remove_qualified_imports(&mut updates);
         self.update_inheritdocs(&top_level_names, &mut updates);
+        self.preserve_contract_names(&top_level_names, &mut updates);
 
         self.remove_imports(&mut updates);
         let target_pragmas = self.process_pragmas(&mut updates);
@@ -316,40 +423,101 @@ impl Flattener {
     /// 1. We want to rename all aliased or qualified imports.
     /// 2. We want to find any duplicates and rename them to avoid conflicts.
     ///
-    /// If we find more than 1 declaration with the same name, it's name is getting changed.
-    /// Two Counter contracts will be renamed to Counter_0 and Counter_1
+    /// Names colliding with declarations or builtins receive unused numeric suffixes.
+    /// Assembly references also receive suffixes to avoid Yul builtins.
+    /// Errors and events keep their ABI names
+    /// inside generated libraries when duplicated or referenced. Their references use qualified
+    /// names even for singletons to avoid binding to declarations in narrower scopes.
     ///
     /// Returns mapping from top-level declaration id to its name (possibly updated)
     fn rename_top_level_definitions(&self, updates: &mut Updates) -> HashMap<usize, String> {
         let top_level_definitions = self.collect_top_level_definitions();
         let references = self.collect_references();
+        let mut scoped_names = ScopedNamesCollector {
+            source_unit: 0,
+            assembly_references: HashSet::new(),
+            names: self
+                .collect_contract_level_definitions()
+                .into_values()
+                .map(|(name, _)| name.clone())
+                .collect(),
+        };
+        for (_, ast) in &self.asts {
+            scoped_names.source_unit = ast.id;
+            ast.walk(&mut scoped_names);
+        }
+        // Reserve identifiers in every scope, including unreferenced declarations.
+        let used_names = top_level_definitions
+            .keys()
+            .map(|&name| name.as_str())
+            .chain(scoped_names.names.iter().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let signatures = self
+            .asts
+            .iter()
+            .flat_map(|(_, ast)| {
+                ast.nodes.iter().filter_map(|node| {
+                    let (id, src, documentation) = match node {
+                        SourceUnitPart::ErrorDefinition(error) => {
+                            (error.id, &error.src, &error.documentation)
+                        }
+                        SourceUnitPart::EventDefinition(event) => {
+                            (event.id, &event.src, &event.documentation)
+                        }
+                        _ => return None,
+                    };
+                    let start = match documentation {
+                        Some(Documentation::Structured(doc)) => doc.src.start.or(src.start),
+                        _ => src.start,
+                    };
+                    Some((id, (start.unwrap(), src.start.unwrap() + src.length.unwrap())))
+                })
+            })
+            .collect::<HashMap<_, _>>();
 
         let mut top_level_names = HashMap::new();
 
         for (name, ids) in top_level_definitions {
             let mut definition_name = name.clone();
-            let needs_rename = ids.len() > 1;
+            let needs_rename = ids.len() > 1
+                || scoped_names.names.contains(name.as_str())
+                || ids.iter().any(|(id, _)| {
+                    scoped_names.assembly_references.contains(id)
+                        || (signatures.contains_key(id) && references.contains_key(&(*id as isize)))
+                });
 
             let mut ids = ids.into_iter().collect::<Vec<_>>();
             if needs_rename {
-                // `loc.path` is expected to be different for each id because there can't be 2
-                // top-level declarations with the same name in the same file.
-                //
-                // Sorting by index loc.path and loc.start in sorted files to make the renaming
-                // process deterministic.
+                // Sort by source order and declaration offset to keep renaming deterministic.
                 ids.sort_by_key(|(_, loc)| {
                     (self.ordered_sources.iter().position(|p| p == &loc.path).unwrap(), loc.start)
                 });
             }
-            for (i, (id, loc)) in ids.iter().enumerate() {
+            let mut suffix = 0;
+            for (id, loc) in &ids {
                 if needs_rename {
-                    definition_name = format!("{name}_{i}");
+                    loop {
+                        definition_name = format!("{name}_{suffix}");
+                        suffix += 1;
+                        if !used_names.contains(definition_name.as_str()) {
+                            break;
+                        }
+                    }
                 }
-                updates.entry(loc.path.clone()).or_default().insert((
-                    loc.start,
-                    loc.end,
-                    definition_name.clone(),
-                ));
+                if needs_rename && let Some(&(start, end)) = signatures.get(id) {
+                    // Preserve ABI names by qualifying errors and events instead.
+                    updates.entry(loc.path.clone()).or_default().extend([
+                        (start, start, format!("library {definition_name} {{\n")),
+                        (end, end, "\n}".to_string()),
+                    ]);
+                    definition_name = format!("{definition_name}.{name}");
+                } else {
+                    updates.entry(loc.path.clone()).or_default().insert((
+                        loc.start,
+                        loc.end,
+                        definition_name.clone(),
+                    ));
+                }
                 if let Some(references) = references.get(&(*id as isize)) {
                     for loc in references {
                         updates.entry(loc.path.clone()).or_default().insert((
@@ -366,19 +534,41 @@ impl Flattener {
         top_level_names
     }
 
-    /// This is not very clean, but in most cases effective enough method to remove qualified
-    /// imports from sources.
-    ///
-    /// Every qualified import part is an `Identifier` with `referencedDeclaration` field matching
-    /// ID of one of the import directives.
-    ///
-    /// This approach works by firstly collecting all IDs of import directives, and then looks for
-    /// any references of them. Once the reference is found, it's full length is getting removed
-    /// from source + 1 character ('.')
-    ///
-    /// This should work correctly for vast majority of cases, however there are situations for
-    /// which such approach won't work, most of which are related to code being formatted in an
-    /// uncommon way.
+    /// Preserves `type(C).name` when the contract declaration was renamed.
+    fn preserve_contract_names(
+        &self,
+        top_level_names: &HashMap<usize, String>,
+        updates: &mut Updates,
+    ) {
+        let mut collector = ContractNamesCollector {
+            names: self
+                .asts
+                .iter()
+                .flat_map(|(_, ast)| &ast.nodes)
+                .filter_map(|node| {
+                    if let SourceUnitPart::ContractDefinition(contract) = node
+                        && top_level_names.get(&contract.id) != Some(&contract.name)
+                    {
+                        Some((contract.id as isize, contract.name.as_str()))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            replacements: BTreeSet::new(),
+        };
+        for (path, ast) in &self.asts {
+            ast.walk(&mut collector);
+            let updates = updates.entry(path.clone()).or_default();
+            for (start, end, replacement) in std::mem::take(&mut collector.replacements) {
+                // Replacing the whole expression supersedes edits to identifiers inside it.
+                updates.retain(|(s, e, _)| *s < start || *e > end);
+                updates.insert((start, end, replacement));
+            }
+        }
+    }
+
+    /// Removes namespace references and their following dot, including intervening trivia.
     fn remove_qualified_imports(&self, updates: &mut Updates) {
         let imports_ids = self
             .asts
@@ -391,27 +581,19 @@ impl Flattener {
             })
             .collect::<HashSet<_>>();
 
-        let references = self.collect_references();
-
-        for (id, locs) in references {
-            if !imports_ids.contains(&(id as usize)) {
-                continue;
-            }
-
-            for loc in locs {
-                updates.entry(loc.path).or_default().insert((
-                    loc.start,
-                    loc.end + 1,
-                    String::new(),
-                ));
-            }
+        for (path, ast) in &self.asts {
+            let mut collector = ImportQualifiersCollector {
+                imports: &imports_ids,
+                removals: updates.entry(path.clone()).or_default(),
+            };
+            ast.walk(&mut collector);
         }
     }
 
     /// Here we are going through all references to items defined in scope of contracts and updating
     /// them to be using correct parent contract name.
     ///
-    /// This will only operate on references from `IdentifierPath` nodes.
+    /// This operates on references from `IdentifierPath` and legacy `UserDefinedTypeName` nodes.
     fn rename_contract_level_types_references(
         &self,
         top_level_names: &HashMap<usize, String>,
@@ -579,6 +761,12 @@ impl Flattener {
                         SourceUnitPart::FunctionDefinition(func) => {
                             Some((&func.name, func.id, &func.src, &func.name_location))
                         }
+                        SourceUnitPart::ErrorDefinition(error) => {
+                            Some((&error.name, error.id, &error.src, &error.name_location))
+                        }
+                        SourceUnitPart::EventDefinition(event) => {
+                            Some((&event.name, event.id, &event.src, &event.name_location))
+                        }
                         SourceUnitPart::VariableDeclaration(var) => {
                             Some((&var.name, var.id, &var.src, &var.name_location))
                         }
@@ -647,6 +835,9 @@ impl Flattener {
                     }
                     ContractDefinitionPart::FunctionDefinition(function) => {
                         Some((function.id, (&function.name, contract_id)))
+                    }
+                    ContractDefinitionPart::ModifierDefinition(modifier) => {
+                        Some((modifier.id, (&modifier.name, contract_id)))
                     }
                     ContractDefinitionPart::VariableDeclaration(variable) => {
                         Some((variable.id, (&variable.name, contract_id)))
@@ -871,13 +1062,15 @@ fn collect_semantic_sources(
             }
 
             for alias in &import.symbol_aliases {
-                let mut ids = alias
-                    .foreign
+                let IdentifierOrId::Identifier(foreign) = &alias.foreign else {
+                    return None;
+                };
+                let mut ids = foreign
                     .overloaded_declarations
                     .iter()
                     .map(|id| usize::try_from(*id).ok())
                     .collect::<Option<HashSet<_>>>()?;
-                if let Some(id) = alias.foreign.referenced_declaration
+                if let Some(id) = foreign.referenced_declaration
                     && let Ok(id) = usize::try_from(id)
                 {
                     ids.insert(id);
@@ -885,7 +1078,7 @@ fn collect_semantic_sources(
                 if ids.is_empty() {
                     let imported_path = source_units.get(&import.source_unit)?;
                     let imported_ast = asts_by_path.get(imported_path)?;
-                    ids.extend(imported_ast.exported_symbols.get(&alias.foreign.name)?);
+                    ids.extend(imported_ast.exported_symbols.get(&foreign.name)?);
                 }
                 if ids.is_empty() {
                     return None;

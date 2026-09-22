@@ -6725,3 +6725,702 @@ contract Test is PBTSimple {
         );
     }
 }
+
+#[test]
+fn can_flatten_aliased_errors_and_events() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    for source in ["First", "Second"] {
+        project
+            .add_source(source, "pragma solidity ^0.8.22; error Failure(); event Success();")
+            .unwrap();
+    }
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+import {Failure as FirstFailure, Success as FirstSuccess} from "./First.sol";
+import {Failure as SecondFailure, Success as SecondSuccess} from "./Second.sol";
+contract Target {
+    function run(bool first) external {
+        if (first) {
+            emit FirstSuccess();
+            revert FirstFailure();
+        }
+        emit SecondSuccess();
+        revert SecondFailure();
+    }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
+    let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let flattened = project.add_source("Flattened", result).unwrap();
+    let compiled = project.project().compile_file(flattened).unwrap();
+    compiled.assert_success();
+    assert_eq!(original_abi, compiled.find_first("Target").unwrap().abi);
+}
+
+#[test]
+fn can_flatten_with_existing_renamed_identifier() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project
+        .add_source("First", "pragma solidity ^0.8.15; contract Token {} contract Token_0 {}")
+        .unwrap();
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.15;
+import {Token as FirstToken, Token_0} from "./First.sol";
+contract Token {}
+contract Target is FirstToken, Token, Token_0 {}
+"#,
+        )
+        .unwrap();
+    let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[test]
+#[ignore = "set FLATTEN_CORPUS to a JSON manifest of roots, remappings, settings, solc, and targets"]
+fn can_flatten_contract_corpus() {
+    let manifest = PathBuf::from(env::var("FLATTEN_CORPUS").unwrap());
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    let mut results = Vec::new();
+    for entry in entries {
+        let root = PathBuf::from(entry["root"].as_str().unwrap());
+        let paths = ProjectPathsConfig::builder()
+            .root(&root)
+            .libs([root.join("lib"), root.join("node_modules")])
+            .remappings(
+                entry["remappings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.as_str().unwrap().parse::<Remapping>().unwrap()),
+            )
+            .build()
+            .unwrap();
+        let mut compiler = MultiCompiler::default();
+        if let Some(version) = entry["solc"].as_str() {
+            compiler.solc = Some(SolcCompiler::Specific(
+                Solc::find_or_install(&version.parse().unwrap()).unwrap(),
+            ));
+        }
+        let mut project =
+            Project::builder().paths(paths).ephemeral().no_artifacts().build(compiler).unwrap();
+        project.settings.solc.settings = serde_json::from_value(entry["settings"].clone()).unwrap();
+        project.settings.solc.output_selection = OutputSelection::ast_output_selection();
+        let output = tempfile::tempdir_in(&root).unwrap();
+        let mut targets = entry["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|target| root.join(target.as_str().unwrap()))
+            .collect::<Vec<_>>();
+        assert!(!targets.is_empty());
+        if entry["aggregate"].as_bool().unwrap_or_default() {
+            let imports = targets
+                .iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    format!(
+                        "import * as Source{i} from \"{}\";\n",
+                        path.strip_prefix(&root).unwrap().display()
+                    )
+                })
+                .collect::<String>();
+            let aggregate = output.path().join("Aggregate.sol");
+            fs::write(
+                &aggregate,
+                format!("pragma solidity {};\n{imports}", entry["solc"].as_str().unwrap()),
+            )
+            .unwrap();
+            targets = vec![aggregate];
+        }
+        for target in targets {
+            let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let flattener = match Flattener::new(project.clone(), &target) {
+                    Ok(flattener) => flattener,
+                    Err(err) => {
+                        let status = match project.compile_file(&target) {
+                            Ok(output) if !output.has_compiler_errors() => "setup",
+                            _ => "input",
+                        };
+                        return (status, err.to_string());
+                    }
+                };
+                let flattened = flattener.flatten();
+                let path = output.path().join("Flattened.sol");
+                fs::write(&path, &flattened).unwrap();
+                match project.compile_file(&path) {
+                    Ok(compiled) if !compiled.has_compiler_errors() => ("ok", String::new()),
+                    result => {
+                        fs::write(
+                            manifest.parent().unwrap().join(format!(
+                                "{}-failure-{}.sol",
+                                root.file_name().unwrap().to_string_lossy(),
+                                results.len()
+                            )),
+                            flattened,
+                        )
+                        .unwrap();
+                        (
+                            "output",
+                            match result {
+                                Ok(compiled) => compiled.to_string(),
+                                Err(err) => err.to_string(),
+                            },
+                        )
+                    }
+                }
+            }));
+            let (status, error) = attempt.unwrap_or_else(|err| {
+                (
+                    "panic",
+                    err.downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_default(),
+                )
+            });
+            eprintln!("{status}: {}", target.display());
+            results.push(serde_json::json!({"target":target,"status":status,"error":error}));
+        }
+    }
+    fs::write(
+        manifest.with_extension("results.json"),
+        serde_json::to_vec_pretty(&results).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        results.iter().all(|result| result["status"] == "ok"),
+        "see {}",
+        manifest.with_extension("results.json").display()
+    );
+}
+
+#[test]
+fn can_flatten_legacy_type_references() {
+    for version in ["0.5.17", "0.6.12", "0.7.6"] {
+        let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.add_source("First", format!("pragma solidity {version}; contract Kind {{ struct Item {{ uint value; }} enum State {{ A }} }}")).unwrap();
+        let target = project
+            .add_source(
+                "Target",
+                format!(
+                    r#"pragma solidity {version};
+import {{Kind as Alias}} from "./First.sol";
+contract Kind {{}}
+contract Target is Alias {{
+    function run(Alias first) public pure returns (Alias) {{
+        Alias.Item memory item = Alias.Item(1);
+        Alias.State state = Alias.State.A;
+        return first;
+    }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+        let flattened = project.add_source("Flattened", result).unwrap();
+        project.project().compile_file(flattened).unwrap().assert_success();
+    }
+}
+
+#[test]
+fn can_flatten_overloaded_events_without_changing_abi() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+/// @param value The number.
+event Notice(uint256 indexed value);
+/// @param value The address.
+event Notice(address value) anonymous;
+contract Notice_0 {}
+contract Target {
+    function run() external {
+        emit Notice(uint256(1));
+        emit Notice(address(1));
+    }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    let compiled = project.project().compile_file(path).unwrap();
+    compiled.assert_success();
+    assert_eq!(original_abi, compiled.find_first("Target").unwrap().abi);
+}
+
+#[test]
+fn can_flatten_legacy_error_signatures() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    for name in ["First", "Second"] {
+        project
+            .add_source(
+                name,
+                r#"pragma solidity 0.8.4;
+struct Value { uint256 number; }
+/// @param value The failing value.
+error Failure(Value value);
+"#,
+            )
+            .unwrap();
+    }
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity 0.8.4;
+import {Failure as FirstFailure, Value as FirstValue} from "./First.sol";
+import {Failure as SecondFailure, Value as SecondValue} from "./Second.sol";
+contract Target {
+    function run(bool first) external pure {
+        if (first) revert FirstFailure(FirstValue(1));
+        revert SecondFailure(SecondValue(2));
+    }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    let compiled = project.project().compile_file(path).unwrap();
+    compiled.assert_success();
+    let abi = compiled.find_first("Target").unwrap().abi.as_ref().unwrap();
+    assert_eq!(
+        original_abi
+            .unwrap()
+            .errors
+            .values()
+            .flatten()
+            .map(|error| error.signature())
+            .collect::<Vec<_>>(),
+        abi.errors.values().flatten().map(|error| error.signature()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn can_flatten_singleton_errors_and_events_with_member_names() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project
+        .add_source(
+            "Declarations",
+            "pragma solidity ^0.8.22; error Failure(uint256 value); event Notice(uint256 value);",
+        )
+        .unwrap();
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+import {Failure as ImportedFailure, Notice as ImportedNotice} from "./Declarations.sol";
+contract Base {
+    error Failure(uint128 value);
+    event Notice(uint128 value);
+}
+contract Target is Base {
+    function run() external {
+        emit ImportedNotice(1);
+        revert ImportedFailure(1);
+    }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    let compiled = project.project().compile_file(path).unwrap();
+    compiled.assert_success();
+    assert_eq!(original_abi, compiled.find_first("Target").unwrap().abi);
+}
+
+#[test]
+fn can_flatten_errors_and_events_with_shadowed_namespace_names() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    for name in ["First", "Second"] {
+        project
+            .add_source(name, "pragma solidity ^0.8.22; error Failure(); event Notice();")
+            .unwrap();
+    }
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+import {Failure as FirstFailure, Notice as FirstNotice} from "./First.sol";
+import {Failure as SecondFailure, Notice as SecondNotice} from "./Second.sol";
+contract Base {
+    uint256 internal Notice_0;
+    uint256 internal Failure_0;
+}
+contract Target is Base {
+    function run(bool first, uint256 Notice_1, uint256 Failure_1) external {
+        uint256 Notice_2 = Notice_1;
+        uint256 Failure_2 = Failure_1;
+        if (first) {
+            emit FirstNotice();
+            revert FirstFailure();
+        }
+        emit SecondNotice();
+        revert SecondFailure();
+    }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    let compiled = project.project().compile_file(path).unwrap();
+    compiled.assert_success();
+    assert_eq!(original_abi, compiled.find_first("Target").unwrap().abi);
+}
+
+#[test]
+fn can_flatten_singleton_value_alias_shadowing() {
+    for (declaration, member, expression) in [
+        ("uint256 constant value = 7;", "uint256 constant value = 9;", "original"),
+        (
+            "function value() pure returns (uint256) { return 7; }",
+            "function value() internal pure returns (uint256) { return 9; }",
+            "original()",
+        ),
+        (
+            "function value() pure returns (uint256) { return 7; }",
+            "modifier value() { _; }",
+            "original()",
+        ),
+    ] {
+        let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.project_mut().settings.solc.metadata = Some(BytecodeHash::None.into());
+        project
+            .add_source("Declaration", format!("pragma solidity ^0.8.22; {declaration}"))
+            .unwrap();
+        let target = project
+            .add_source(
+                "Target",
+                format!(
+                    r#"pragma solidity ^0.8.22;
+import {{value as original}} from "./Declaration.sol";
+contract Target {{
+    {member}
+    function run() external pure returns (uint256) {{ return {expression}; }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        let original = project.project().compile_file(&target).unwrap();
+        original.assert_success();
+        let original_code = original
+            .find_first("Target")
+            .unwrap()
+            .get_deployed_bytecode_bytes()
+            .unwrap()
+            .into_owned();
+        let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+        let path = project.add_source("Flattened", flattened).unwrap();
+        let compiled = project.project().compile_file(path).unwrap();
+        compiled.assert_success();
+        assert_eq!(
+            original_code,
+            compiled
+                .find_first("Target")
+                .unwrap()
+                .get_deployed_bytecode_bytes()
+                .unwrap()
+                .into_owned(),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn can_flatten_singleton_type_alias_shadowing() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project
+        .add_source("Declaration", "pragma solidity ^0.8.22; struct Value { uint256 original; }")
+        .unwrap();
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+import {Value as OriginalValue} from "./Declaration.sol";
+contract Target {
+    struct Value { uint256 different; }
+    function run() external pure returns (uint256) {
+        OriginalValue memory data = OriginalValue({original: 7});
+        return data.original;
+    }
+}
+"#,
+        )
+        .unwrap();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    project.project().compile_file(path).unwrap().assert_success();
+}
+
+#[test]
+fn can_flatten_qualified_import_with_trivia() {
+    for reference in [
+        "Namespace.Inner.Failure",
+        "Namespace /* . */ . Inner // .\n . Failure",
+        "Namespace /* λ. */ . /* Inner. */ Inner . /* Failure. */ Failure",
+        "Namespace\n . Inner\r\n . Failure",
+    ] {
+        let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.add_source("Declaration", "pragma solidity ^0.8.22; error Failure();").unwrap();
+        project
+            .add_source(
+                "Reexport",
+                r#"pragma solidity ^0.8.22; import * as Inner from "./Declaration.sol";"#,
+            )
+            .unwrap();
+        let target = project
+            .add_source(
+                "Target",
+                format!(
+                    r#"pragma solidity ^0.8.22;
+import * as Namespace from "./Reexport.sol";
+contract Target {{
+    function run() external pure {{
+        revert {reference}();
+    }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+        let path = project.add_source("Flattened", flattened).unwrap();
+        project.project().compile_file(path).unwrap().assert_success();
+    }
+}
+
+#[test]
+fn can_flatten_singleton_alias_in_local_scope() {
+    for (parameters, statement) in [("uint256 value", ""), ("", "uint256 value = 9;")] {
+        let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.project_mut().settings.solc.metadata = Some(BytecodeHash::None.into());
+        project
+            .add_source("Declaration", "pragma solidity ^0.8.22; uint256 constant value = 7;")
+            .unwrap();
+        let target = project
+            .add_source(
+                "Target",
+                format!(
+                    r#"pragma solidity ^0.8.22;
+import {{value as original}} from "./Declaration.sol";
+contract Target {{
+    function run({parameters}) external pure returns (uint256) {{
+        {statement}
+        return original;
+    }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        let original = project.project().compile_file(&target).unwrap();
+        original.assert_success();
+        let original_code = original
+            .find_first("Target")
+            .unwrap()
+            .get_deployed_bytecode_bytes()
+            .unwrap()
+            .into_owned();
+        let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+        let path = project.add_source("Flattened", flattened).unwrap();
+        let compiled = project.project().compile_file(path).unwrap();
+        compiled.assert_success();
+        assert_eq!(
+            original_code,
+            compiled
+                .find_first("Target")
+                .unwrap()
+                .get_deployed_bytecode_bytes()
+                .unwrap()
+                .into_owned()
+        );
+    }
+}
+
+#[test]
+fn can_flatten_preserve_contract_type_name() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.project_mut().settings.solc.optimizer.enabled = Some(true);
+    project.project_mut().settings.solc.metadata = Some(BytecodeHash::None.into());
+    project.add_source("First", "pragma solidity ^0.8.22; contract Token {}").unwrap();
+    project.add_source("Second", "pragma solidity ^0.8.22; contract Token {}").unwrap();
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+import {Token as FirstToken} from "./First.sol";
+import * as Second from "./Second.sol";
+contract Target {
+    function first() external pure returns (string memory) { return type(FirstToken).name; }
+    function second() external pure returns (string memory) { return type(Second.Token).name; }
+    function choose(string memory) internal pure returns (uint256) { return 1; }
+    function choose(bytes32) internal pure returns (uint256) { return 2; }
+    function overloaded() external pure returns (uint256) { return choose(type(Second.Token).name); }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_code =
+        original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap().into_owned();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    let compiled = project.project().compile_file(path).unwrap();
+    compiled.assert_success();
+    assert_eq!(
+        original_code,
+        compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap().into_owned()
+    );
+}
+
+#[test]
+fn can_flatten_singleton_alias_in_assembly_scope() {
+    for assembly in [
+        "let value := 9 result := add(original, value)",
+        "{ let value := 9 result := add(original, value) }",
+        "if original { let value := 9 result := add(original, value) }",
+        "switch original case 7 { let value := 9 result := add(original, value) } default { result := original }",
+        "for { let value := 0 } lt(value, 1) { value := add(value, 1) } { result := add(original, value) }",
+        "for { let i := 0 } lt(i, 1) { let value := original i := add(i, value) } { let value := 9 result := add(original, value) }",
+        "function value() -> r { r := original } result := value()",
+        "function f(value) -> r { r := add(original, value) } result := f(9)",
+        "function f() -> value { value := original } result := f()",
+        "let value := 9 let value_0 := 11 result := add(original, add(value, value_0))",
+        "let value let value_0 let value_1 result := original",
+        "function value() {} result := original",
+        "function f(value) -> out { out := original } result := f(9)",
+        "function f() -> value { value := original leave } result := f()",
+        "function f() -> value, value_0 { value := original value_0 := 9 } let a, b := f() result := add(a, b)",
+        "let value := 9 switch original case 7 { result := original } default { let value_0 result := add(original, value) }",
+        "for { let value := 0 } lt(value, 3) { value := add(value, 1) } { if eq(value, 0) { continue } result := original break }",
+    ] {
+        let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.project_mut().settings.solc.metadata = Some(BytecodeHash::None.into());
+        project
+            .add_source("Declaration", "pragma solidity ^0.8.22; uint256 constant value = 7;")
+            .unwrap();
+        let target = project
+            .add_source(
+                "Target",
+                format!(
+                    r#"pragma solidity ^0.8.22;
+import {{value as original}} from "./Declaration.sol";
+contract Target {{
+    function run() external pure returns (uint256 result) {{
+        assembly {{
+            {assembly}
+        }}
+    }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        let original = project.project().compile_file(&target).unwrap();
+        original.assert_success();
+        let original_code = original
+            .find_first("Target")
+            .unwrap()
+            .get_deployed_bytecode_bytes()
+            .unwrap()
+            .into_owned();
+        let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+        let path = project.add_source("Flattened", flattened).unwrap();
+        let compiled = project.project().compile_file(path).unwrap();
+        compiled.assert_success();
+        assert_eq!(
+            original_code,
+            compiled
+                .find_first("Target")
+                .unwrap()
+                .get_deployed_bytecode_bytes()
+                .unwrap()
+                .into_owned()
+        );
+    }
+}
+
+#[test]
+fn can_flatten_builtin_aliases() {
+    for (name, body) in [
+        ("add", "assembly { result := original }"),
+        ("mload", "assembly { result := original }"),
+        ("gas", "assembly { result := original }"),
+        ("block", "result = original + block.number;"),
+        ("msg", "result = original + msg.value;"),
+        ("block", "result = block.number;"),
+        ("msg", "result = msg.value;"),
+    ] {
+        let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.project_mut().settings.solc.metadata = Some(BytecodeHash::None.into());
+        project
+            .add_source(
+                "Declaration",
+                format!("pragma solidity ^0.8.22; uint256 constant {name} = 7;"),
+            )
+            .unwrap();
+        let target = project
+            .add_source(
+                "Target",
+                format!(
+                    r#"pragma solidity ^0.8.22;
+import {{{name} as original}} from "./Declaration.sol";
+contract Target {{
+    function run() external payable returns (uint256 result) {{ {body} }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        let original = project.project().compile_file(&target).unwrap();
+        original.assert_success();
+        let original_code = original
+            .find_first("Target")
+            .unwrap()
+            .get_deployed_bytecode_bytes()
+            .unwrap()
+            .into_owned();
+        let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+        let path = project.add_source("Flattened", flattened).unwrap();
+        let compiled = project.project().compile_file(path).unwrap();
+        compiled.assert_success();
+        assert_eq!(
+            original_code,
+            compiled
+                .find_first("Target")
+                .unwrap()
+                .get_deployed_bytecode_bytes()
+                .unwrap()
+                .into_owned(),
+            "{name}"
+        );
+    }
+}
