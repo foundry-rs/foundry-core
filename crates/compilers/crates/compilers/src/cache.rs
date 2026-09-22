@@ -1318,7 +1318,14 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 && cache.paths == paths
                 && preprocessed == cache.preprocessed
                 && preprocessor_version == cache.preprocessor_version
-                && project.paths.remappings == cache.remappings
+                // Compare the serialized compiler form: remapping serialization normalizes
+                // Windows separators and trailing slashes. Keep order significant.
+                && project
+                    .paths
+                    .remappings
+                    .iter()
+                    .map(ToString::to_string)
+                    .eq(cache.remappings.iter().map(ToString::to_string))
             {
                 let previous_source_units = cache.preprocessor_source_units.clone();
                 cache.preprocessor_source_units.retain(|path| {
@@ -1751,8 +1758,11 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
 #[cfg(test)]
 mod tests {
-    use super::CompilerCache;
-    use crate::{project::NativeDependencyState, solc::SolcSettings};
+    use super::{ArtifactsCache, CompilerCache};
+    use crate::{
+        Graph, Project, ProjectPathsConfig, project::NativeDependencyState, solc::SolcSettings,
+    };
+    use foundry_compilers_artifacts::remappings::Remapping;
     use semver::Version;
     use std::{
         collections::{BTreeMap, BTreeSet, HashSet},
@@ -1763,6 +1773,61 @@ mod tests {
         state: NativeDependencyState,
     ) -> BTreeMap<Version, BTreeMap<String, NativeDependencyState>> {
         BTreeMap::from([(Version::new(0, 8, 30), BTreeMap::from([("default".to_owned(), state)]))])
+    }
+
+    #[test]
+    fn cached_remappings_survive_serialization() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ProjectPathsConfig::builder().no_remappings().build_with_root(root.path());
+        let mut project = Project::builder().paths(paths).build(Default::default()).unwrap();
+        // Set these after building the project so Windows separators are not normalized upfront.
+        // Missing trailing slashes also exercise serialization normalization on Unix.
+        let remappings = vec![
+            Remapping {
+                context: Some(PathBuf::from("src").join("nested").display().to_string()),
+                name: "dep/".into(),
+                path: root.path().join("lib").join("a").display().to_string(),
+            },
+            Remapping { context: None, name: "dep/".into(), path: "lib/b".into() },
+        ];
+        project.paths.remappings = remappings.clone();
+        let (_, edges) =
+            Graph::resolve_sources(&project.paths, Default::default()).unwrap().into_sources();
+        let ArtifactsCache::Cached(mut original) =
+            ArtifactsCache::new(&project, edges.clone(), None).unwrap()
+        else {
+            panic!("expected persistent cache");
+        };
+        original.cache.profiles.insert("cached-profile".into(), Default::default());
+        original.cache.write(&project.paths.cache).unwrap();
+
+        let ArtifactsCache::Cached(reloaded) =
+            ArtifactsCache::new(&project, edges.clone(), None).unwrap()
+        else {
+            panic!("expected persistent cache");
+        };
+        assert!(reloaded.cache.profiles.contains_key("cached-profile"));
+
+        // Reordering, retargeting, recontextualizing, renaming, or removing a remapping must
+        // still invalidate the persisted import graph.
+        for change in 0..5 {
+            project.paths.remappings = remappings.clone();
+            match change {
+                0 => project.paths.remappings.swap(0, 1),
+                1 => project.paths.remappings[0].path = "lib/changed".into(),
+                2 => project.paths.remappings[0].context = Some("test/".into()),
+                3 => project.paths.remappings[0].name = "other/".into(),
+                _ => {
+                    project.paths.remappings.pop();
+                }
+            }
+            let ArtifactsCache::Cached(reloaded) =
+                ArtifactsCache::new(&project, edges.clone(), None).unwrap()
+            else {
+                panic!("expected persistent cache");
+            };
+            assert!(reloaded.cache.profiles.is_empty(), "remapping change {change}");
+        }
     }
 
     #[test]
