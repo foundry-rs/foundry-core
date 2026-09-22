@@ -15,6 +15,7 @@ use foundry_compilers_core::{
     utils,
 };
 use itertools::Itertools;
+use solar::parse::{Cursor, lexer::token::RawTokenKind};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
@@ -56,6 +57,29 @@ impl ItemLocation {
 struct ReferencesCollector {
     path: PathBuf,
     references: HashMap<isize, HashSet<ItemLocation>>,
+}
+
+struct ScopedNamesCollector<'a> {
+    source_unit: usize,
+    source: &'a str,
+    names: HashSet<String>,
+}
+
+impl Visitor for ScopedNamesCollector<'_> {
+    fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration) {
+        if declaration.scope != Some(self.source_unit) {
+            self.names.insert(declaration.name.clone());
+        }
+    }
+
+    fn visit_inline_assembly(&mut self, assembly: &InlineAssembly) {
+        let start = assembly.src.start.unwrap();
+        let source = &self.source[start..start + assembly.src.length.unwrap()];
+        self.names.extend(Cursor::new(source).with_position().filter_map(|(start, token)| {
+            (token.kind == RawTokenKind::Ident)
+                .then(|| source[start..start + token.len as usize].to_owned())
+        }));
+    }
 }
 
 impl ReferencesCollector {
@@ -113,6 +137,35 @@ impl Visitor for ReferencesCollector {
         }
 
         self.process_referenced_declaration(reference.declaration as isize, &src);
+    }
+}
+
+struct ContractNamesCollector<'a> {
+    names: HashMap<isize, &'a str>,
+    replacements: BTreeSet<(usize, usize, String)>,
+}
+
+impl Visitor for ContractNamesCollector<'_> {
+    fn visit_member_access(&mut self, access: &MemberAccess) {
+        if access.member_name == "name"
+            && let Expression::FunctionCall(call) = &access.expression
+            && let Expression::Identifier(function) = &call.expression
+            && function.name == "type"
+        {
+            let id = match call.arguments.as_slice() {
+                [Expression::Identifier(identifier)] => identifier.referenced_declaration,
+                [Expression::MemberAccess(member)] => member.referenced_declaration,
+                _ => None,
+            };
+            if let Some(name) = id.and_then(|id| self.names.get(&id)) {
+                let start = access.src.start.unwrap();
+                self.replacements.insert((
+                    start,
+                    start + access.src.length.unwrap(),
+                    format!("string({})", serde_json::to_string(name).unwrap()),
+                ));
+            }
+        }
     }
 }
 
@@ -289,6 +342,7 @@ impl Flattener {
         self.rename_contract_level_types_references(&top_level_names, &mut updates);
         self.remove_qualified_imports(&mut updates);
         self.update_inheritdocs(&top_level_names, &mut updates);
+        self.preserve_contract_names(&top_level_names, &mut updates);
 
         self.remove_imports(&mut updates);
         let target_pragmas = self.process_pragmas(&mut updates);
@@ -322,7 +376,8 @@ impl Flattener {
     /// 1. We want to rename all aliased or qualified imports.
     /// 2. We want to find any duplicates and rename them to avoid conflicts.
     ///
-    /// Duplicate names receive unused numeric suffixes. Errors and events keep their ABI names
+    /// Names colliding with top-level or scoped declarations receive unused numeric suffixes.
+    /// Errors and events keep their ABI names
     /// inside generated libraries when duplicated or referenced. Their references use qualified
     /// names even for singletons to avoid binding to declarations in narrower scopes.
     ///
@@ -330,12 +385,29 @@ impl Flattener {
     fn rename_top_level_definitions(&self, updates: &mut Updates) -> HashMap<usize, String> {
         let top_level_definitions = self.collect_top_level_definitions();
         let references = self.collect_references();
-        // Reserve identifier-like words in every scope, including unreferenced declarations.
+        let mut scoped_names = ScopedNamesCollector {
+            source_unit: 0,
+            source: "",
+            names: self
+                .collect_contract_level_definitions()
+                .into_values()
+                .map(|(name, _)| name.clone())
+                .collect(),
+        };
+        for (path, ast) in &self.asts {
+            scoped_names.source_unit = ast.id;
+            scoped_names.source = &self.sources[path].content;
+            ast.walk(&mut scoped_names);
+        }
+        // Reserve identifiers in every scope, including unreferenced declarations.
         let used_names = self
             .sources
             .values()
             .flat_map(|source| {
-                source.content.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+                Cursor::new(&source.content).with_position().filter_map(|(start, token)| {
+                    (token.kind == RawTokenKind::Ident)
+                        .then(|| &source.content[start..start + token.len as usize])
+                })
             })
             .collect::<HashSet<_>>();
         let signatures = self
@@ -367,7 +439,8 @@ impl Flattener {
             let mut definition_name = name.clone();
             let needs_rename = ids.len() > 1
                 || ids.iter().any(|(id, _)| {
-                    signatures.contains_key(id) && references.contains_key(&(*id as isize))
+                    (signatures.contains_key(id) || scoped_names.names.contains(name.as_str()))
+                        && references.contains_key(&(*id as isize))
                 });
 
             let mut ids = ids.into_iter().collect::<Vec<_>>();
@@ -418,19 +491,41 @@ impl Flattener {
         top_level_names
     }
 
-    /// This is not very clean, but in most cases effective enough method to remove qualified
-    /// imports from sources.
-    ///
-    /// Every qualified import part is an `Identifier` with `referencedDeclaration` field matching
-    /// ID of one of the import directives.
-    ///
-    /// This approach works by firstly collecting all IDs of import directives, and then looks for
-    /// any references of them. Once the reference is found, it's full length is getting removed
-    /// from source + 1 character ('.')
-    ///
-    /// This should work correctly for vast majority of cases, however there are situations for
-    /// which such approach won't work, most of which are related to code being formatted in an
-    /// uncommon way.
+    /// Preserves `type(C).name` when the contract declaration was renamed.
+    fn preserve_contract_names(
+        &self,
+        top_level_names: &HashMap<usize, String>,
+        updates: &mut Updates,
+    ) {
+        let mut collector = ContractNamesCollector {
+            names: self
+                .asts
+                .iter()
+                .flat_map(|(_, ast)| &ast.nodes)
+                .filter_map(|node| {
+                    if let SourceUnitPart::ContractDefinition(contract) = node
+                        && top_level_names.get(&contract.id) != Some(&contract.name)
+                    {
+                        Some((contract.id as isize, contract.name.as_str()))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            replacements: BTreeSet::new(),
+        };
+        for (path, ast) in &self.asts {
+            ast.walk(&mut collector);
+            let updates = updates.entry(path.clone()).or_default();
+            for (start, end, replacement) in std::mem::take(&mut collector.replacements) {
+                // Replacing the whole expression supersedes edits to identifiers inside it.
+                updates.retain(|(s, e, _)| *s < start || *e > end);
+                updates.insert((start, end, replacement));
+            }
+        }
+    }
+
+    /// Removes namespace references and their following dot, including intervening trivia.
     fn remove_qualified_imports(&self, updates: &mut Updates) {
         let imports_ids = self
             .asts
@@ -451,11 +546,18 @@ impl Flattener {
             }
 
             for loc in locs {
-                updates.entry(loc.path).or_default().insert((
-                    loc.start,
-                    loc.end + 1,
-                    String::new(),
-                ));
+                let source = &self.sources[&loc.path].content;
+                if let Some((offset, token)) = Cursor::new(&source[loc.end..])
+                    .with_position()
+                    .find(|(_, token)| !token.kind.is_trivial())
+                    && token.kind == RawTokenKind::Dot
+                {
+                    updates.entry(loc.path).or_default().insert((
+                        loc.start,
+                        loc.end + offset + token.len as usize,
+                        String::new(),
+                    ));
+                }
             }
         }
     }
@@ -705,6 +807,9 @@ impl Flattener {
                     }
                     ContractDefinitionPart::FunctionDefinition(function) => {
                         Some((function.id, (&function.name, contract_id)))
+                    }
+                    ContractDefinitionPart::ModifierDefinition(modifier) => {
+                        Some((modifier.id, (&modifier.name, contract_id)))
                     }
                     ContractDefinitionPart::VariableDeclaration(variable) => {
                         Some((variable.id, (&variable.name, contract_id)))
