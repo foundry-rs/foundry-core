@@ -4,219 +4,62 @@ Guidance for AI coding agents working in this repository.
 
 ## Project Overview
 
-Foundry is a fast, portable, modular toolkit for Ethereum application development,
-written in Rust.
-
-- `forge`: build, test, fuzz, debug, lint, and deploy Solidity contracts
-- `cast`: command-line utilities for EVM contracts, transactions, and chain data
-- `anvil`: local Ethereum development node
-- `chisel`: Solidity REPL
-
-The repository is a Cargo workspace. Core crates live under `crates/`, Solidity
-fixtures and integration test projects live under `testdata/`, and the
-[developer documentation](docs/dev/README.md) defines documentation ownership
-and indexes maintained cross-crate guides.
+foundry-core is a Rust workspace of standalone compiler, block explorer,
+fork database, and wallet libraries.
 
 ## Commands
 
 ```bash
-cargo build --workspace                               # Build the workspace
-cargo nextest run --workspace                         # Run tests
-cargo +nightly fmt --all                              # Format Rust code
-cargo +nightly fmt --all -- --check                   # Check Rust formatting
-cargo +nightly clippy --workspace --all-targets --all-features # Lint Rust code
-cargo deny check                                      # Check dependencies
-cargo shear                                           # Check unused dependencies
+cargo build --workspace --locked
+cargo fmt --all
+cargo clippy --workspace --all-targets --all-features --locked
+cargo nextest run --workspace --locked
+cargo test --workspace --doc --all-features --locked
 ```
-
-Rust formatting uses nightly.
 
 ## Architecture
 
-- `crates/forge`: Forge CLI and test/build workflows
-- `crates/cast`: Cast CLI commands
-- `crates/anvil`: local Ethereum node
-- `crates/chisel`: Solidity REPL
-- `crates/cheatcodes`: Forge cheatcode definitions and implementations
-- `crates/common`: shared CLI, shell, compile, and terminal utilities
-- `crates/config`: Foundry configuration
-- `crates/debugger`: debugger support
-- `crates/lint`: Solidity linter
-- `crates/script`: script execution support
-- `crates/verify`: contract verification support
-
-Foundry's EVM execution tooling is built around `revm`. Cheatcodes are calls to
-the fixed cheatcode address and are dispatched through the cheatcode inspector.
-For custom network work, follow the ownership, state-lifecycle, tool-dispatch,
-and CI checklist in [`docs/dev/networks.md`](docs/dev/networks.md).
-
-For symbolic execution work under `crates/evm/symbolic`, read
-`crates/evm/symbolic/AGENTS.md` before editing.
+- `crates/compilers/`: compiler abstraction, artifacts, and compiler utilities.
+- `crates/block-explorers/`: Etherscan and other block explorer API clients.
+- `crates/fork-db/`: fork database and remote state access.
+- `crates/wallets/`: wallet management and signing.
 
 ## Testing
 
-- Add tests for code changes that fix behavior or add functionality.
-- Use focused unit tests for small pure logic.
-- Use integration tests for CLI behavior and larger workflows.
-- Tests that use forking must contain `fork` in their name.
-- Forge integration fixtures live under `testdata/`.
-- Lint rule tests live under `crates/lint/testdata/` with blessed `.stderr`
-  output.
-
-For CLI and integration tests:
-
-- Put Forge CLI coverage under `crates/forge/tests/cli/` and Cast CLI coverage
-  under `crates/cast/tests/cli/`.
-- Use the existing `forgetest!`, `forgetest_init!`, and `casttest!` macros to
-  create isolated test projects and command handles.
-- Assert command output with snapbox helpers such as `assert_success()`,
-  `assert_failure()`, `stdout_eq(str![...])`, `stderr_eq(str![...])`, and
-  `assert_empty_stdout()`.
-- For JSON output, use `assert_json_stdout(...)` or `assert_json_stderr(...)`
-  so comparisons are parsed as JSON and unordered where appropriate.
-- Prefer full output snapshots with redactions over ad hoc `String::contains`
-  checks or manual `serde_json::Value` inspection.
-
-For lint rules:
-
-- Follow `docs/dev/lintrules.md#lint-writing-style` and `crates/lint/docs/README.md` for
-  lint names, diagnostic wording, and reference-page structure.
-- Update `crates/lint/docs/<id>.md` in the same Foundry PR as the lint. The Book's
-  `import:lints` workflow generates the published reference pages and navigation.
-- Add a Solidity test file under `crates/lint/testdata/`.
-- Use `//~WARN:` and `//~NOTE:` annotations for expected diagnostics.
-- Regenerate blessed output with `cargo bless-lints`.
-- Run lint UI tests with `cargo nextest run -p forge --test ui`.
-
-For script work, keep the two execution phases separate: `ScriptArgs::execute`
-runs the script, while on-chain simulation only executes the collected
-broadcastable transactions. `--resume` resumes publishing transactions; it does
-not recreate the original `--broadcast` state.
-
-For fuzz or invariant corpus coverage work, `forge test --showmap-out <DIR>`
-replays persisted corpus entries and writes AFL `showmap`-style coverage files.
-
-## CLI Output
-
-Follow [`docs/dev/output-channels.md`](docs/dev/output-channels.md), the canonical
-stdout/stderr contract. Use the `foundry_common::io` `sh_*` and `prompt!` macros;
-workspace Clippy configuration forbids direct `std::print*` and `std::eprint*`.
+- Add regression coverage in the affected crate's existing tests.
+- Compiler integration tests live in `crates/compilers/crates/compilers/tests/`;
+  fixtures live in `crates/compilers/test-data/`.
+- Reuse existing test helpers and snapshot assertions.
+- Run the affected package's tests first; use the workspace suite for broader changes.
 
 ## Configuration
 
-When adding or changing a `foundry.toml` setting:
-
-1. Define the field and its documentation in `crates/config`, including an
-   explicit default and any required serde behavior. Keep related settings in a
-   dedicated nested config type when they form a coherent section.
-2. Wire the setting through every command that consumes it. If a CLI flag can
-   override the setting, resolve precedence in one shared place and test config,
-   CLI, and combined behavior.
-3. Add focused config parsing and serialization tests. Update the `forge config`
-   and default-config snapshots when the serialized surface changes.
-4. For renamed or moved settings, preserve compatibility when practical and add
-   a targeted deprecation warning that points to the canonical key. Test aliases,
-   profiles, inheritance, environment variables, collisions, and malformed values
-   where those providers are affected.
-5. Document the setting in `foundry-rs/book` under
-   `src/pages/config/reference/`, including its section, type, default, environment
-   variable when supported, behavior, and a valid TOML example. Update the config
-   reference navigation and `default-config.mdx` in the same documentation PR.
-6. Keep CLI option text in the Rust clap definition; the book's CLI reference is
-   generated from command help and should not be edited by hand.
-
-Use the implementation, defaults, and tests as the source of truth. Do not merge
-new user-facing configuration without the corresponding book update.
-
-## Cheatcodes
-
-When adding a cheatcode:
-
-1. Add the Solidity definition in `crates/cheatcodes/spec/src/vm.rs`.
-2. Implement the generated call type in `crates/cheatcodes/`.
-3. Update `spec::Cheatcodes::new` if `Vm` gained a struct, enum, error, or event.
-4. Run `cargo cheats` twice to update generated JSON assets.
-5. Add an integration test under `testdata/default/cheats/`.
-
-Cheatcode functions and structs must be documented and function parameters must
-be named.
+Keep compiler settings and artifact serialization compatible with the supported
+compiler formats. Cover changed defaults and serialization in existing tests.
 
 ## Commit and PR Style
 
-Default format is conventional commits:
-
-```text
-type: description
-type(scope): description
-type(scope)!: breaking description
-```
-
-Use `feat`, `fix`, `perf`, `chore`, `docs`, `test`, or `refactor`. Check recent
-`git log` output before committing to match the repository's current style.
-
-- Use imperative mood.
-- Keep the description under 50 characters when practical.
-- Do not end the description with a period.
-- Include a body for performance changes, bug fixes, and complex changes.
-- For performance changes, include measurements.
-- PR titles should follow the same format as commit messages.
-
-PR descriptions should explain what changed and why in flowing prose. Link
-related issues and PRs when they exist. Include only real measurements, and do
-not include validation/testing boilerplate such as "Validated with", "Tested
-with", or command lists unless explicitly requested. Do not use templates,
-bullet lists, or long essays. When writing PR bodies from scripts, use a file or
-heredoc with real newlines; never pass escaped `\n` sequences.
+Use conventional commits and PR titles: `type: description`, with an optional
+scope. Keep subjects under 50 characters where practical. Explain what changed
+and why in a short PR description; omit templates and validation boilerplate.
+Disclose AI assistance and its scope, as required by `CONTRIBUTING.md`.
 
 ### Performance PRs
 
-When drafting or updating a PR body for a performance-related change, benchmark
-the feature branch against `master` or the user-specified base before writing the
-performance claims.
-
-- Use the local benchmark runners under `benches/` unless the user explicitly
-  asks for GitHub Actions or the Derek/decofe automation.
-- Use `foundry-bench` when the claim is about elapsed time for a Foundry command
-  on an existing Solidity project: `forge build`, cached rebuilds, `forge test`,
-  fuzz-test replay, isolated tests, coverage, or focused symbolic tests.
-- For invariant or campaign-style benchmarking, use `foundry-scfuzzbench`; this
-  is the local equivalent of the `derek bench invariant`/`decofe bench
-  invariant` PR flow, which publishes a `scfuzzbench` event.
-- The local runners do not compare two local refs in one invocation. Run the
-  baseline and candidate separately, with identical benchmark inputs, timeout,
-  worker count, environment, target repository, and output schema.
-- For branch-vs-base PR comparisons, use the profiling profile
-  (`FOUNDRY_BENCH_LOCAL_BUILD_PROFILE=profiling`) rather than an ad hoc debug or
-  release build. Keep ordinary `foundry-bench --versions local` comparisons on
-  the default release distribution profile.
-- Include only benchmarks that exercise the changed path. Do not pad the PR body
-  with unrelated benchmark suites.
-- Report both wall-time results and domain counters when available, for example
-  solver queries, reported solver time, throughput, coverage relscore/relcov,
-  or invariant findings.
-- If results are neutral, noisy, or regress a secondary metric, state that
-  directly. Do not convert noise into a performance claim.
-- Keep the PR body short: one paragraph explaining the optimization and why it
-  is correct, followed by a `### Results` table.
-- Exact benchmark commands and result-table mechanics in `benches/README.md`.
+Compare against `main` or the requested base using the same benchmark inputs and
+build settings. Include only measured results from the affected path.
 
 ## Notes
 
-- The fragment-based changelog workflow has been removed. Do not create or
-  restore `.changelog/` or add changelog fragment files; release notes are
-  generated from pull requests.
-- Use `RUST_LOG=<filter>` for debugging CLI internals, for example
-  `RUST_LOG=forge` or `RUST_LOG=cast`.
-- Do not send spelling-only or grammar-only documentation PRs.
-- Keep release feature lists aligned between the root `Makefile` and release
-  workflows when changing published CLI feature surfaces.
+- Follow the workspace MSRV in `Cargo.toml`.
+- Generate release notes from pull requests; do not add changelog fragments.
 
 ## Code Style
 
-- Comments end with periods (except URLs)
-- Files end with LF and trailing newline
-- Follow existing patterns
-- Never expose secrets
+- Follow existing patterns.
+- Comments end with periods, except URLs.
+- Files use LF and end with a newline.
+- Never expose secrets.
 
 ### Rust
 
