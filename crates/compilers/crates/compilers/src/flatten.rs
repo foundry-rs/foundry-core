@@ -322,15 +322,37 @@ impl Flattener {
     /// 1. We want to rename all aliased or qualified imports.
     /// 2. We want to find any duplicates and rename them to avoid conflicts.
     ///
-    /// If we find more than 1 declaration with the same name, it's name is getting changed.
-    /// Two Counter contracts will be renamed to Counter_0 and Counter_1
+    /// Duplicate names receive unused numeric suffixes. Errors and events keep their ABI names
+    /// inside generated libraries, and their references use the qualified names.
     ///
     /// Returns mapping from top-level declaration id to its name (possibly updated)
     fn rename_top_level_definitions(&self, updates: &mut Updates) -> HashMap<usize, String> {
         let top_level_definitions = self.collect_top_level_definitions();
         let references = self.collect_references();
-        let mut used_names =
-            top_level_definitions.keys().map(|name| (*name).clone()).collect::<HashSet<_>>();
+        let used_names =
+            top_level_definitions.keys().map(|name| name.as_str()).collect::<HashSet<_>>();
+        let signatures = self
+            .asts
+            .iter()
+            .flat_map(|(_, ast)| {
+                ast.nodes.iter().filter_map(|node| {
+                    let (id, src, documentation) = match node {
+                        SourceUnitPart::ErrorDefinition(error) => {
+                            (error.id, &error.src, &error.documentation)
+                        }
+                        SourceUnitPart::EventDefinition(event) => {
+                            (event.id, &event.src, &event.documentation)
+                        }
+                        _ => return None,
+                    };
+                    let start = match documentation {
+                        Some(Documentation::Structured(doc)) => doc.src.start.or(src.start),
+                        _ => src.start,
+                    };
+                    Some((id, (start.unwrap(), src.start.unwrap() + src.length.unwrap())))
+                })
+            })
+            .collect::<HashMap<_, _>>();
 
         let mut top_level_names = HashMap::new();
 
@@ -340,11 +362,7 @@ impl Flattener {
 
             let mut ids = ids.into_iter().collect::<Vec<_>>();
             if needs_rename {
-                // `loc.path` is expected to be different for each id because there can't be 2
-                // top-level declarations with the same name in the same file.
-                //
-                // Sorting by index loc.path and loc.start in sorted files to make the renaming
-                // process deterministic.
+                // Sort by source order and declaration offset to keep renaming deterministic.
                 ids.sort_by_key(|(_, loc)| {
                     (self.ordered_sources.iter().position(|p| p == &loc.path).unwrap(), loc.start)
                 });
@@ -355,16 +373,25 @@ impl Flattener {
                     loop {
                         definition_name = format!("{name}_{suffix}");
                         suffix += 1;
-                        if used_names.insert(definition_name.clone()) {
+                        if !used_names.contains(definition_name.as_str()) {
                             break;
                         }
                     }
                 }
-                updates.entry(loc.path.clone()).or_default().insert((
-                    loc.start,
-                    loc.end,
-                    definition_name.clone(),
-                ));
+                if needs_rename && let Some(&(start, end)) = signatures.get(id) {
+                    // Preserve ABI names by qualifying colliding errors and events instead.
+                    updates.entry(loc.path.clone()).or_default().extend([
+                        (start, start, format!("library {definition_name} {{\n")),
+                        (end, end, "\n}".to_string()),
+                    ]);
+                    definition_name = format!("{definition_name}.{name}");
+                } else {
+                    updates.entry(loc.path.clone()).or_default().insert((
+                        loc.start,
+                        loc.end,
+                        definition_name.clone(),
+                    ));
+                }
                 if let Some(references) = references.get(&(*id as isize)) {
                     for loc in references {
                         updates.entry(loc.path.clone()).or_default().insert((

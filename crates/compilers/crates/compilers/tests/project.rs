@@ -5971,89 +5971,6 @@ contract Test is PBTSimple {
 }
 
 #[test]
-#[ignore = "set OPTIMISM_CONTRACTS_ROOT to contracts-bedrock with forge remappings in remappings.txt"]
-fn can_flatten_optimism_contracts() {
-    let root = canonicalize(env::var("OPTIMISM_CONTRACTS_ROOT").unwrap()).unwrap();
-    let remappings = fs::read_to_string(root.join("remappings.txt"))
-        .unwrap()
-        .lines()
-        .map(|line| line.parse::<Remapping>().unwrap())
-        .collect::<Vec<_>>();
-    let paths = ProjectPathsConfig::builder().root(&root).remappings(remappings).build().unwrap();
-    let mut project = Project::builder()
-        .paths(paths)
-        .ephemeral()
-        .no_artifacts()
-        .build(MultiCompiler::default())
-        .unwrap();
-    project.settings.solc.evm_version = Some(EvmVersion::Cancun);
-    project.settings.solc.output_selection = OutputSelection::ast_output_selection();
-    let mut targets = Source::read_all_from(&root.join("src"), &["sol"])
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    targets
-        .extend(Source::read_all_from(&root.join("interfaces"), &["sol"]).unwrap().keys().cloned());
-    targets.sort();
-    let output = tempfile::tempdir_in(&root).unwrap();
-    project.paths.allowed_paths.insert(output.path().to_path_buf());
-    let graph = Graph::<foundry_compilers::resolver::parse::SolParser>::resolve_sources(
-        &project.paths.clone().with_language::<SolcLanguage>(),
-        Source::read_all(&targets).unwrap(),
-    )
-    .unwrap();
-    let mut aggregates = Vec::new();
-    for patch in [15, 19, 25] {
-        let version = Version::new(0, 8, patch);
-        let aggregate = output.path().join(format!("Aggregate{patch}.sol"));
-        let imports = targets
-            .iter()
-            .filter(|path| {
-                graph.nodes(graph.files()[*path]).all(|node| {
-                    node.data.version_req.as_ref().is_none_or(|req| req.matches(&version))
-                })
-            })
-            .enumerate()
-            .map(|(i, path)| {
-                format!(
-                    "import * as Source{i} from \"{}\";\n",
-                    path.strip_prefix(&root).unwrap().display()
-                )
-            })
-            .collect::<String>();
-        fs::write(&aggregate, format!("pragma solidity {version};\n{imports}")).unwrap();
-        aggregates.push(aggregate);
-    }
-    targets.extend(aggregates);
-    assert!(!targets.is_empty());
-    let mut failures = Vec::new();
-    for target in &targets {
-        eprintln!("Flattening {}", target.display());
-        let result = match Flattener::new(project.clone(), target) {
-            Ok(flattener) => flattener.flatten(),
-            Err(err) => {
-                failures.push(format!("{}: {err}", target.display()));
-                continue;
-            }
-        };
-        let flattened = output.path().join("Flattened.sol");
-        fs::write(&flattened, result).unwrap();
-        let compiled = project.compile_file(&flattened).unwrap();
-        if compiled.has_compiler_errors() {
-            failures.push(format!("{}: {compiled}", target.display()));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "{} failures / {} targets:\n{}",
-        failures.len(),
-        targets.len(),
-        failures.join("\n")
-    );
-}
-
-#[test]
 fn can_flatten_aliased_errors_and_events() {
     let project = TempProject::<MultiCompiler>::dapptools().unwrap();
     for source in ["First", "Second"] {
@@ -6080,9 +5997,14 @@ contract Target {
 "#,
         )
         .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
     let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
     let flattened = project.add_source("Flattened", result).unwrap();
-    project.project().compile_file(flattened).unwrap().assert_success();
+    let compiled = project.project().compile_file(flattened).unwrap();
+    compiled.assert_success();
+    assert_eq!(original_abi, compiled.find_first("Target").unwrap().abi);
 }
 
 #[test]
@@ -6212,13 +6134,13 @@ fn can_flatten_contract_corpus() {
             });
             eprintln!("{status}: {}", target.display());
             results.push(serde_json::json!({"target":target,"status":status,"error":error}));
-            fs::write(
-                manifest.with_extension("results.json"),
-                serde_json::to_vec_pretty(&results).unwrap(),
-            )
-            .unwrap();
         }
     }
+    fs::write(
+        manifest.with_extension("results.json"),
+        serde_json::to_vec_pretty(&results).unwrap(),
+    )
+    .unwrap();
     assert!(
         results.iter().all(|result| result["status"] == "ok"),
         "see {}",
@@ -6253,4 +6175,85 @@ contract Target is Alias {{
         let flattened = project.add_source("Flattened", result).unwrap();
         project.project().compile_file(flattened).unwrap().assert_success();
     }
+}
+
+#[test]
+fn can_flatten_overloaded_events_without_changing_abi() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+/// @param value The number.
+event Notice(uint256 indexed value);
+/// @param value The address.
+event Notice(address value) anonymous;
+contract Notice_0 {}
+contract Target {
+    function run() external {
+        emit Notice(uint256(1));
+        emit Notice(address(1));
+    }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    let compiled = project.project().compile_file(path).unwrap();
+    compiled.assert_success();
+    assert_eq!(original_abi, compiled.find_first("Target").unwrap().abi);
+}
+
+#[test]
+fn can_flatten_legacy_error_signatures() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    for name in ["First", "Second"] {
+        project
+            .add_source(
+                name,
+                r#"pragma solidity 0.8.4;
+struct Value { uint256 number; }
+/// @param value The failing value.
+error Failure(Value value);
+"#,
+            )
+            .unwrap();
+    }
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity 0.8.4;
+import {Failure as FirstFailure, Value as FirstValue} from "./First.sol";
+import {Failure as SecondFailure, Value as SecondValue} from "./Second.sol";
+contract Target {
+    function run(bool first) external pure {
+        if (first) revert FirstFailure(FirstValue(1));
+        revert SecondFailure(SecondValue(2));
+    }
+}
+"#,
+        )
+        .unwrap();
+    let original = project.project().compile_file(&target).unwrap();
+    original.assert_success();
+    let original_abi = original.find_first("Target").unwrap().abi.clone();
+    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let path = project.add_source("Flattened", flattened).unwrap();
+    let compiled = project.project().compile_file(path).unwrap();
+    compiled.assert_success();
+    let abi = compiled.find_first("Target").unwrap().abi.as_ref().unwrap();
+    assert_eq!(
+        original_abi
+            .unwrap()
+            .errors
+            .values()
+            .flatten()
+            .map(|error| error.signature())
+            .collect::<Vec<_>>(),
+        abi.errors.values().flatten().map(|error| error.signature()).collect::<Vec<_>>()
+    );
 }
