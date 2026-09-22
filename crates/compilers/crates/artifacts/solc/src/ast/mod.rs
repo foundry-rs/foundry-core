@@ -1102,10 +1102,18 @@ ast_node!(
 /// Symbol aliases can be defined using the [ImportDirective].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolAlias {
-    pub foreign: Identifier,
+    pub foreign: IdentifierOrId,
     pub local: Option<String>,
     #[serde(default, with = "serde_helpers::display_from_str_opt")]
     pub name_location: Option<SourceLocation>,
+}
+
+/// An identifier node, or its AST ID as emitted by older Solidity compilers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IdentifierOrId {
+    Identifier(Identifier),
+    Id(usize),
 }
 
 ast_node!(

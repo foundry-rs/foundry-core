@@ -5969,3 +5969,288 @@ contract Test is PBTSimple {
         );
     }
 }
+
+#[test]
+#[ignore = "set OPTIMISM_CONTRACTS_ROOT to contracts-bedrock with forge remappings in remappings.txt"]
+fn can_flatten_optimism_contracts() {
+    let root = canonicalize(env::var("OPTIMISM_CONTRACTS_ROOT").unwrap()).unwrap();
+    let remappings = fs::read_to_string(root.join("remappings.txt"))
+        .unwrap()
+        .lines()
+        .map(|line| line.parse::<Remapping>().unwrap())
+        .collect::<Vec<_>>();
+    let paths = ProjectPathsConfig::builder().root(&root).remappings(remappings).build().unwrap();
+    let mut project = Project::builder()
+        .paths(paths)
+        .ephemeral()
+        .no_artifacts()
+        .build(MultiCompiler::default())
+        .unwrap();
+    project.settings.solc.evm_version = Some(EvmVersion::Cancun);
+    project.settings.solc.output_selection = OutputSelection::ast_output_selection();
+    let mut targets = Source::read_all_from(&root.join("src"), &["sol"])
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    targets
+        .extend(Source::read_all_from(&root.join("interfaces"), &["sol"]).unwrap().keys().cloned());
+    targets.sort();
+    let output = tempfile::tempdir_in(&root).unwrap();
+    project.paths.allowed_paths.insert(output.path().to_path_buf());
+    let graph = Graph::<foundry_compilers::resolver::parse::SolParser>::resolve_sources(
+        &project.paths.clone().with_language::<SolcLanguage>(),
+        Source::read_all(&targets).unwrap(),
+    )
+    .unwrap();
+    let mut aggregates = Vec::new();
+    for patch in [15, 19, 25] {
+        let version = Version::new(0, 8, patch);
+        let aggregate = output.path().join(format!("Aggregate{patch}.sol"));
+        let imports = targets
+            .iter()
+            .filter(|path| {
+                graph.nodes(graph.files()[*path]).all(|node| {
+                    node.data.version_req.as_ref().is_none_or(|req| req.matches(&version))
+                })
+            })
+            .enumerate()
+            .map(|(i, path)| {
+                format!(
+                    "import * as Source{i} from \"{}\";\n",
+                    path.strip_prefix(&root).unwrap().display()
+                )
+            })
+            .collect::<String>();
+        fs::write(&aggregate, format!("pragma solidity {version};\n{imports}")).unwrap();
+        aggregates.push(aggregate);
+    }
+    targets.extend(aggregates);
+    assert!(!targets.is_empty());
+    let mut failures = Vec::new();
+    for target in &targets {
+        eprintln!("Flattening {}", target.display());
+        let result = match Flattener::new(project.clone(), target) {
+            Ok(flattener) => flattener.flatten(),
+            Err(err) => {
+                failures.push(format!("{}: {err}", target.display()));
+                continue;
+            }
+        };
+        let flattened = output.path().join("Flattened.sol");
+        fs::write(&flattened, result).unwrap();
+        let compiled = project.compile_file(&flattened).unwrap();
+        if compiled.has_compiler_errors() {
+            failures.push(format!("{}: {compiled}", target.display()));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures / {} targets:\n{}",
+        failures.len(),
+        targets.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn can_flatten_aliased_errors_and_events() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    for source in ["First", "Second"] {
+        project
+            .add_source(source, "pragma solidity ^0.8.22; error Failure(); event Success();")
+            .unwrap();
+    }
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.22;
+import {Failure as FirstFailure, Success as FirstSuccess} from "./First.sol";
+import {Failure as SecondFailure, Success as SecondSuccess} from "./Second.sol";
+contract Target {
+    function run(bool first) external {
+        if (first) {
+            emit FirstSuccess();
+            revert FirstFailure();
+        }
+        emit SecondSuccess();
+        revert SecondFailure();
+    }
+}
+"#,
+        )
+        .unwrap();
+    let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[test]
+fn can_flatten_with_existing_renamed_identifier() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project
+        .add_source("First", "pragma solidity ^0.8.15; contract Token {} contract Token_0 {}")
+        .unwrap();
+    let target = project
+        .add_source(
+            "Target",
+            r#"pragma solidity ^0.8.15;
+import {Token as FirstToken, Token_0} from "./First.sol";
+contract Token {}
+contract Target is FirstToken, Token, Token_0 {}
+"#,
+        )
+        .unwrap();
+    let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[test]
+#[ignore = "set FLATTEN_CORPUS to a JSON manifest of roots, remappings, settings, solc, and targets"]
+fn can_flatten_contract_corpus() {
+    let manifest = PathBuf::from(env::var("FLATTEN_CORPUS").unwrap());
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    let mut results = Vec::new();
+    for entry in entries {
+        let root = PathBuf::from(entry["root"].as_str().unwrap());
+        let paths = ProjectPathsConfig::builder()
+            .root(&root)
+            .libs([root.join("lib"), root.join("node_modules")])
+            .remappings(
+                entry["remappings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.as_str().unwrap().parse::<Remapping>().unwrap()),
+            )
+            .build()
+            .unwrap();
+        let mut compiler = MultiCompiler::default();
+        if let Some(version) = entry["solc"].as_str() {
+            compiler.solc = Some(SolcCompiler::Specific(
+                Solc::find_or_install(&version.parse().unwrap()).unwrap(),
+            ));
+        }
+        let mut project =
+            Project::builder().paths(paths).ephemeral().no_artifacts().build(compiler).unwrap();
+        project.settings.solc.settings = serde_json::from_value(entry["settings"].clone()).unwrap();
+        project.settings.solc.output_selection = OutputSelection::ast_output_selection();
+        let output = tempfile::tempdir_in(&root).unwrap();
+        let mut targets = entry["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|target| root.join(target.as_str().unwrap()))
+            .collect::<Vec<_>>();
+        assert!(!targets.is_empty());
+        if entry["aggregate"].as_bool().unwrap_or_default() {
+            let imports = targets
+                .iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    format!(
+                        "import * as Source{i} from \"{}\";\n",
+                        path.strip_prefix(&root).unwrap().display()
+                    )
+                })
+                .collect::<String>();
+            let aggregate = output.path().join("Aggregate.sol");
+            fs::write(
+                &aggregate,
+                format!("pragma solidity {};\n{imports}", entry["solc"].as_str().unwrap()),
+            )
+            .unwrap();
+            targets = vec![aggregate];
+        }
+        for target in targets {
+            let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let flattener = match Flattener::new(project.clone(), &target) {
+                    Ok(flattener) => flattener,
+                    Err(err) => {
+                        let status = match project.compile_file(&target) {
+                            Ok(output) if !output.has_compiler_errors() => "setup",
+                            _ => "input",
+                        };
+                        return (status, err.to_string());
+                    }
+                };
+                let flattened = flattener.flatten();
+                let path = output.path().join("Flattened.sol");
+                fs::write(&path, &flattened).unwrap();
+                match project.compile_file(&path) {
+                    Ok(compiled) if !compiled.has_compiler_errors() => ("ok", String::new()),
+                    result => {
+                        fs::write(
+                            manifest.parent().unwrap().join(format!(
+                                "{}-failure-{}.sol",
+                                root.file_name().unwrap().to_string_lossy(),
+                                results.len()
+                            )),
+                            flattened,
+                        )
+                        .unwrap();
+                        (
+                            "output",
+                            match result {
+                                Ok(compiled) => compiled.to_string(),
+                                Err(err) => err.to_string(),
+                            },
+                        )
+                    }
+                }
+            }));
+            let (status, error) = attempt.unwrap_or_else(|err| {
+                (
+                    "panic",
+                    err.downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_default(),
+                )
+            });
+            eprintln!("{status}: {}", target.display());
+            results.push(serde_json::json!({"target":target,"status":status,"error":error}));
+            fs::write(
+                manifest.with_extension("results.json"),
+                serde_json::to_vec_pretty(&results).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    assert!(
+        results.iter().all(|result| result["status"] == "ok"),
+        "see {}",
+        manifest.with_extension("results.json").display()
+    );
+}
+
+#[test]
+fn can_flatten_legacy_type_references() {
+    for version in ["0.5.17", "0.6.12", "0.7.6"] {
+        let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.add_source("First", format!("pragma solidity {version}; contract Kind {{ struct Item {{ uint value; }} enum State {{ A }} }}")).unwrap();
+        let target = project
+            .add_source(
+                "Target",
+                format!(
+                    r#"pragma solidity {version};
+import {{Kind as Alias}} from "./First.sol";
+contract Kind {{}}
+contract Target is Alias {{
+    function run(Alias first) public pure returns (Alias) {{
+        Alias.Item memory item = Alias.Item(1);
+        Alias.State state = Alias.State.A;
+        return first;
+    }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+        let flattened = project.add_source("Flattened", result).unwrap();
+        project.project().compile_file(flattened).unwrap().assert_success();
+    }
+}

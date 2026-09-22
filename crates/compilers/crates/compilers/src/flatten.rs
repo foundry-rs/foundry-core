@@ -45,7 +45,7 @@ impl ItemLocation {
 }
 
 /// Visitor exploring AST and collecting all references to declarations via `Identifier` and
-/// `IdentifierPath` nodes.
+/// `IdentifierPath` nodes, and legacy `UserDefinedTypeName` nodes.
 ///
 /// It also collects `MemberAccess` parts. So, if we have `X.Y` expression, loc and AST ID will be
 /// saved for Y only.
@@ -75,6 +75,12 @@ impl Visitor for ReferencesCollector {
 
     fn visit_identifier_path(&mut self, path: &IdentifierPath) {
         self.process_referenced_declaration(path.referenced_declaration, &path.src);
+    }
+
+    fn visit_user_defined_type_name(&mut self, type_name: &UserDefinedTypeName) {
+        if type_name.path_node.is_none() {
+            self.process_referenced_declaration(type_name.referenced_declaration, &type_name.src);
+        }
     }
 
     fn visit_member_access(&mut self, access: &MemberAccess) {
@@ -323,6 +329,8 @@ impl Flattener {
     fn rename_top_level_definitions(&self, updates: &mut Updates) -> HashMap<usize, String> {
         let top_level_definitions = self.collect_top_level_definitions();
         let references = self.collect_references();
+        let mut used_names =
+            top_level_definitions.keys().map(|name| (*name).clone()).collect::<HashSet<_>>();
 
         let mut top_level_names = HashMap::new();
 
@@ -341,9 +349,16 @@ impl Flattener {
                     (self.ordered_sources.iter().position(|p| p == &loc.path).unwrap(), loc.start)
                 });
             }
-            for (i, (id, loc)) in ids.iter().enumerate() {
+            let mut suffix = 0;
+            for (id, loc) in &ids {
                 if needs_rename {
-                    definition_name = format!("{name}_{i}");
+                    loop {
+                        definition_name = format!("{name}_{suffix}");
+                        suffix += 1;
+                        if used_names.insert(definition_name.clone()) {
+                            break;
+                        }
+                    }
                 }
                 updates.entry(loc.path.clone()).or_default().insert((
                     loc.start,
@@ -411,7 +426,7 @@ impl Flattener {
     /// Here we are going through all references to items defined in scope of contracts and updating
     /// them to be using correct parent contract name.
     ///
-    /// This will only operate on references from `IdentifierPath` nodes.
+    /// This operates on references from `IdentifierPath` and legacy `UserDefinedTypeName` nodes.
     fn rename_contract_level_types_references(
         &self,
         top_level_names: &HashMap<usize, String>,
@@ -578,6 +593,12 @@ impl Flattener {
                         }
                         SourceUnitPart::FunctionDefinition(func) => {
                             Some((&func.name, func.id, &func.src, &func.name_location))
+                        }
+                        SourceUnitPart::ErrorDefinition(error) => {
+                            Some((&error.name, error.id, &error.src, &error.name_location))
+                        }
+                        SourceUnitPart::EventDefinition(event) => {
+                            Some((&event.name, event.id, &event.src, &event.name_location))
                         }
                         SourceUnitPart::VariableDeclaration(var) => {
                             Some((&var.name, var.id, &var.src, &var.name_location))
@@ -871,13 +892,15 @@ fn collect_semantic_sources(
             }
 
             for alias in &import.symbol_aliases {
-                let mut ids = alias
-                    .foreign
+                let IdentifierOrId::Identifier(foreign) = &alias.foreign else {
+                    return None;
+                };
+                let mut ids = foreign
                     .overloaded_declarations
                     .iter()
                     .map(|id| usize::try_from(*id).ok())
                     .collect::<Option<HashSet<_>>>()?;
-                if let Some(id) = alias.foreign.referenced_declaration
+                if let Some(id) = foreign.referenced_declaration
                     && let Ok(id) = usize::try_from(id)
                 {
                     ids.insert(id);
@@ -885,7 +908,7 @@ fn collect_semantic_sources(
                 if ids.is_empty() {
                     let imported_path = source_units.get(&import.source_unit)?;
                     let imported_ast = asts_by_path.get(imported_path)?;
-                    ids.extend(imported_ast.exported_symbols.get(&alias.foreign.name)?);
+                    ids.extend(imported_ast.exported_symbols.get(&foreign.name)?);
                 }
                 if ids.is_empty() {
                     return None;
