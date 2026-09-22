@@ -75,10 +75,12 @@ impl Visitor for ScopedNamesCollector<'_> {
     fn visit_inline_assembly(&mut self, assembly: &InlineAssembly) {
         let start = assembly.src.start.unwrap();
         let source = &self.source[start..start + assembly.src.length.unwrap()];
-        self.names.extend(Cursor::new(source).with_position().filter_map(|(start, token)| {
-            (token.kind == RawTokenKind::Ident)
-                .then(|| source[start..start + token.len as usize].to_owned())
-        }));
+        self.names.extend(
+            Cursor::new(source)
+                .with_position()
+                .filter(|(_, token)| token.kind == RawTokenKind::Ident)
+                .map(|(start, token)| source[start..start + token.len as usize].to_owned()),
+        );
     }
 }
 
@@ -404,10 +406,10 @@ impl Flattener {
             .sources
             .values()
             .flat_map(|source| {
-                Cursor::new(&source.content).with_position().filter_map(|(start, token)| {
-                    (token.kind == RawTokenKind::Ident)
-                        .then(|| &source.content[start..start + token.len as usize])
-                })
+                Cursor::new(&source.content)
+                    .with_position()
+                    .filter(|(_, token)| token.kind == RawTokenKind::Ident)
+                    .map(|(start, token)| &source.content[start..start + token.len as usize])
             })
             .collect::<HashSet<_>>();
         let signatures = self
