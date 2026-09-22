@@ -1,6 +1,22 @@
-use super::*;
+use super::{yul::*, *};
 
 pub trait Visitor {
+    fn visit_yul_block(&mut self, _node: &YulBlock) {}
+    fn visit_yul_statement(&mut self, _node: &YulStatement) {}
+    fn visit_yul_expression(&mut self, _node: &YulExpression) {}
+    fn visit_yul_assignment(&mut self, _node: &YulAssignment) {}
+    fn visit_yul_function_call(&mut self, _node: &YulFunctionCall) {}
+    fn visit_yul_identifier(&mut self, _node: &YulIdentifier) {}
+    fn visit_yul_literal(&mut self, _node: &YulLiteral) {}
+    fn visit_yul_expression_statement(&mut self, _node: &YulExpressionStatement) {}
+    fn visit_yul_for_loop(&mut self, _node: &YulForLoop) {}
+    fn visit_yul_function_definition(&mut self, _node: &YulFunctionDefinition) {}
+    fn visit_yul_typed_name(&mut self, _node: &YulTypedName) {}
+    fn visit_yul_if(&mut self, _node: &YulIf) {}
+    fn visit_yul_switch(&mut self, _node: &YulSwitch) {}
+    fn visit_yul_case(&mut self, _node: &YulCase) {}
+    fn visit_yul_variable_declaration(&mut self, _node: &YulVariableDeclaration) {}
+
     fn visit_source_unit(&mut self, _source_unit: &SourceUnit) {}
     fn visit_import_directive(&mut self, _directive: &ImportDirective) {}
     fn visit_pragma_directive(&mut self, _directive: &PragmaDirective) {}
@@ -534,6 +550,9 @@ impl_walk!(ModifierInvocation, visit_modifier_invocation, |invocation, visitor| 
 });
 
 impl_walk!(InlineAssembly, visit_inline_assembly, |assembly, visitor| {
+    if let Some(ast) = &assembly.ast {
+        ast.walk(visitor);
+    }
     assembly.external_references.iter().for_each(|reference| {
         reference.walk(visitor);
     });
@@ -624,3 +643,292 @@ impl_walk!(UsingForFunctionItem, |item, visitor| {
 impl_walk!(OverloadedOperator, |operator, visitor| {
     operator.definition.walk(visitor);
 });
+
+impl_walk!(YulStatement, visit_yul_statement, |statement, visitor| {
+    match statement {
+        YulStatement::YulAssignment(node) => node.walk(visitor),
+        YulStatement::YulBlock(node) => node.walk(visitor),
+        YulStatement::YulExpressionStatement(node) => node.walk(visitor),
+        YulStatement::YulForLoop(node) => node.walk(visitor),
+        YulStatement::YulFunctionDefinition(node) => node.walk(visitor),
+        YulStatement::YulIf(node) => node.walk(visitor),
+        YulStatement::YulSwitch(node) => node.walk(visitor),
+        YulStatement::YulVariableDeclaration(node) => node.walk(visitor),
+        YulStatement::YulBreak(_) | YulStatement::YulContinue(_) | YulStatement::YulLeave(_) => {}
+    }
+});
+
+impl_walk!(YulExpression, visit_yul_expression, |expression, visitor| {
+    match expression {
+        YulExpression::YulFunctionCall(node) => node.walk(visitor),
+        YulExpression::YulIdentifier(node) => node.walk(visitor),
+        YulExpression::YulLiteral(node) => node.walk(visitor),
+    }
+});
+
+impl_walk!(YulBlock, visit_yul_block, |node, visitor| {
+    node.statements.iter().for_each(|node| node.walk(visitor));
+});
+
+impl_walk!(YulAssignment, visit_yul_assignment, |node, visitor| {
+    node.variable_names.iter().for_each(|node| node.walk(visitor));
+    node.value.walk(visitor);
+});
+
+impl_walk!(YulFunctionCall, visit_yul_function_call, |node, visitor| {
+    node.arguments.iter().for_each(|node| node.walk(visitor));
+    node.function_name.walk(visitor);
+});
+
+impl_walk!(YulExpressionStatement, visit_yul_expression_statement, |node, visitor| {
+    node.expression.walk(visitor);
+});
+
+impl_walk!(YulForLoop, visit_yul_for_loop, |node, visitor| {
+    node.pre.walk(visitor);
+    node.condition.walk(visitor);
+    node.post.walk(visitor);
+    node.body.walk(visitor);
+});
+
+impl_walk!(YulFunctionDefinition, visit_yul_function_definition, |node, visitor| {
+    node.parameters.iter().for_each(|node| node.walk(visitor));
+    node.return_variables.iter().for_each(|node| node.walk(visitor));
+    node.body.walk(visitor);
+});
+
+impl_walk!(YulIf, visit_yul_if, |node, visitor| {
+    node.condition.walk(visitor);
+    node.body.walk(visitor);
+});
+
+impl_walk!(YulSwitch, visit_yul_switch, |node, visitor| {
+    node.cases.iter().for_each(|node| node.walk(visitor));
+    node.expression.walk(visitor);
+});
+
+impl_walk!(YulCase, visit_yul_case, |node, visitor| {
+    node.body.walk(visitor);
+    if let YulCaseValue::YulLiteral(value) = &node.value {
+        value.walk(visitor);
+    }
+});
+
+impl_walk!(YulVariableDeclaration, visit_yul_variable_declaration, |node, visitor| {
+    node.variables.iter().for_each(|node| node.walk(visitor));
+    if let Some(value) = &node.value {
+        value.walk(visitor);
+    }
+});
+
+impl_walk!(YulIdentifier, visit_yul_identifier);
+
+impl_walk!(YulLiteral, visit_yul_literal);
+
+impl_walk!(YulTypedName, visit_yul_typed_name);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[derive(Default)]
+    struct YulCollector {
+        nodes: Vec<&'static str>,
+        names: Vec<String>,
+        external_references: Vec<usize>,
+        expressions: usize,
+        statements: usize,
+    }
+
+    impl Visitor for YulCollector {
+        fn visit_yul_block(&mut self, _: &YulBlock) {
+            self.nodes.push("YulBlock");
+        }
+        fn visit_yul_assignment(&mut self, _: &YulAssignment) {
+            self.nodes.push("YulAssignment");
+        }
+        fn visit_yul_function_call(&mut self, _: &YulFunctionCall) {
+            self.nodes.push("YulFunctionCall");
+        }
+        fn visit_yul_literal(&mut self, _: &YulLiteral) {
+            self.nodes.push("YulLiteral");
+        }
+        fn visit_yul_expression_statement(&mut self, _: &YulExpressionStatement) {
+            self.nodes.push("YulExpressionStatement");
+        }
+        fn visit_yul_for_loop(&mut self, _: &YulForLoop) {
+            self.nodes.push("YulForLoop");
+        }
+        fn visit_yul_if(&mut self, _: &YulIf) {
+            self.nodes.push("YulIf");
+        }
+        fn visit_yul_switch(&mut self, _: &YulSwitch) {
+            self.nodes.push("YulSwitch");
+        }
+        fn visit_yul_case(&mut self, _: &YulCase) {
+            self.nodes.push("YulCase");
+        }
+        fn visit_yul_variable_declaration(&mut self, _: &YulVariableDeclaration) {
+            self.nodes.push("YulVariableDeclaration");
+        }
+        fn visit_yul_function_definition(&mut self, node: &YulFunctionDefinition) {
+            self.nodes.push("YulFunctionDefinition");
+            self.names.push(node.name.clone());
+        }
+        fn visit_yul_identifier(&mut self, node: &YulIdentifier) {
+            self.nodes.push("YulIdentifier");
+            self.names.push(node.name.clone());
+        }
+        fn visit_yul_typed_name(&mut self, node: &YulTypedName) {
+            self.nodes.push("YulTypedName");
+            self.names.push(node.name.clone());
+        }
+        fn visit_yul_expression(&mut self, _: &YulExpression) {
+            self.expressions += 1;
+        }
+
+        fn visit_yul_statement(&mut self, statement: &YulStatement) {
+            self.statements += 1;
+            match statement {
+                YulStatement::YulBreak(_) => self.nodes.push("YulBreak"),
+                YulStatement::YulContinue(_) => self.nodes.push("YulContinue"),
+                YulStatement::YulLeave(_) => self.nodes.push("YulLeave"),
+                _ => {}
+            }
+        }
+
+        fn visit_external_assembly_reference(
+            &mut self,
+            reference: &ExternalInlineAssemblyReference,
+        ) {
+            self.external_references.push(reference.declaration);
+        }
+    }
+
+    fn node(kind: &str, fields: Value) -> Value {
+        let mut node = fields;
+        node["nodeType"] = kind.into();
+        node["src"] = "0:1:0".into();
+        node
+    }
+
+    fn identifier(name: &str) -> Value {
+        node("YulIdentifier", json!({ "name": name }))
+    }
+
+    fn block(statements: Vec<Value>) -> Value {
+        node("YulBlock", json!({ "statements": statements }))
+    }
+
+    #[test]
+    fn walks_nested_yul_ast() {
+        let literal = node("YulLiteral", json!({ "kind": "number", "value": "1" }));
+        let call = node(
+            "YulFunctionCall",
+            json!({
+                "functionName": identifier("callee"), "arguments": [identifier("argument"), literal]
+            }),
+        );
+        let assignment = node(
+            "YulAssignment",
+            json!({
+                "variableNames": [identifier("assigned")], "value": call
+            }),
+        );
+        let ast = block(vec![
+            node("YulFunctionDefinition", json!({ "name": "empty", "body": block(vec![]) })),
+            node(
+                "YulVariableDeclaration",
+                json!({
+                    "variables": [node("YulTypedName", json!({ "name": "uninitialized", "type": "" }))]
+                }),
+            ),
+            node(
+                "YulVariableDeclaration",
+                json!({
+                    "variables": [node("YulTypedName", json!({ "name": "initialized", "type": "" }))],
+                    "value": call
+                }),
+            ),
+            node(
+                "YulFunctionDefinition",
+                json!({
+                    "name": "function",
+                    "parameters": [node("YulTypedName", json!({ "name": "parameter", "type": "" }))],
+                    "returnVariables": [node("YulTypedName", json!({ "name": "return", "type": "" }))],
+                    "body": block(vec![assignment.clone(), node("YulLeave", json!({}))])
+                }),
+            ),
+            node(
+                "YulForLoop",
+                json!({
+                    "pre": block(vec![assignment.clone()]), "condition": call,
+                    "post": block(vec![assignment.clone()]),
+                    "body": block(vec![node("YulIf", json!({
+                        "condition": identifier("condition"),
+                        "body": block(vec![node("YulBreak", json!({})), node("YulContinue", json!({}))])
+                    }))])
+                }),
+            ),
+            node(
+                "YulSwitch",
+                json!({
+                    "expression": identifier("switch"),
+                    "cases": [
+                        node("YulCase", json!({ "value": literal, "body": block(vec![assignment.clone()]) })),
+                        node("YulCase", json!({ "value": "default", "body": block(vec![assignment]) }))
+                    ]
+                }),
+            ),
+            block(vec![node("YulExpressionStatement", json!({ "expression": call }))]),
+        ]);
+        let assembly: InlineAssembly = serde_json::from_value(json!({
+            "id": 1, "src": "0:1:0", "AST": ast,
+            "externalReferences": [{ "src": "0:1:0", "declaration": 42, "valueSize": 1 }]
+        }))
+        .unwrap();
+        let mut visitor = YulCollector::default();
+        assembly.walk(&mut visitor);
+
+        let mut expected_nodes = Vec::new();
+        let mut expected_names = Vec::new();
+        let mut pending = vec![&ast];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Object(object) => {
+                    expected_nodes.push(object["nodeType"].as_str().unwrap());
+                    if let Some(name) = object.get("name") {
+                        expected_names.push(name.as_str().unwrap());
+                    }
+                    pending.extend(object.values());
+                }
+                Value::Array(array) => pending.extend(array),
+                _ => {}
+            }
+        }
+        visitor.nodes.sort_unstable();
+        expected_nodes.sort_unstable();
+        assert_eq!(visitor.nodes, expected_nodes);
+        visitor.names.sort_unstable();
+        expected_names.sort_unstable();
+        assert_eq!(visitor.names, expected_names);
+        assert_eq!(visitor.external_references, [42]);
+        assert_eq!(visitor.expressions, 26);
+        assert_eq!(visitor.statements, 17);
+    }
+
+    #[test]
+    fn walks_legacy_assembly_without_yul_ast() {
+        let assembly: InlineAssembly = serde_json::from_value(json!({
+            "id": 1, "src": "0:1:0", "operations": "{ value := 1 }",
+            "externalReferences": [{ "src": "0:1:0", "declaration": 7, "valueSize": 1 }]
+        }))
+        .unwrap();
+        let mut visitor = YulCollector::default();
+        assembly.walk(&mut visitor);
+        assert!(visitor.nodes.is_empty());
+        assert!(visitor.names.is_empty());
+        assert_eq!(visitor.external_references, [7]);
+    }
+}
