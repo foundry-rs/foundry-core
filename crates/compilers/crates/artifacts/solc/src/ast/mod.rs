@@ -1112,7 +1112,7 @@ pub struct SymbolAlias {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IdentifierOrId {
-    Identifier(Identifier),
+    Identifier(Box<Identifier>),
     Id(usize),
 }
 
