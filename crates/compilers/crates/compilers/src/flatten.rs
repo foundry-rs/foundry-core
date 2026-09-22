@@ -61,9 +61,20 @@ struct ReferencesCollector {
 struct ScopedNamesCollector {
     source_unit: usize,
     names: HashSet<String>,
+    assembly_references: HashSet<usize>,
 }
 
 impl Visitor for ScopedNamesCollector {
+    fn visit_identifier(&mut self, identifier: &Identifier) {
+        if identifier.referenced_declaration.is_some_and(|id| id < 0) {
+            self.names.insert(identifier.name.clone());
+        }
+    }
+
+    fn visit_external_assembly_reference(&mut self, reference: &ExternalInlineAssemblyReference) {
+        self.assembly_references.insert(reference.declaration);
+    }
+
     fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration) {
         if declaration.scope != Some(self.source_unit) {
             self.names.insert(declaration.name.clone());
@@ -412,7 +423,8 @@ impl Flattener {
     /// 1. We want to rename all aliased or qualified imports.
     /// 2. We want to find any duplicates and rename them to avoid conflicts.
     ///
-    /// Names colliding with top-level or scoped declarations receive unused numeric suffixes.
+    /// Names colliding with declarations or builtins receive unused numeric suffixes.
+    /// Assembly references also receive suffixes to avoid Yul builtins.
     /// Errors and events keep their ABI names
     /// inside generated libraries when duplicated or referenced. Their references use qualified
     /// names even for singletons to avoid binding to declarations in narrower scopes.
@@ -423,6 +435,7 @@ impl Flattener {
         let references = self.collect_references();
         let mut scoped_names = ScopedNamesCollector {
             source_unit: 0,
+            assembly_references: HashSet::new(),
             names: self
                 .collect_contract_level_definitions()
                 .into_values()
@@ -467,9 +480,10 @@ impl Flattener {
         for (name, ids) in top_level_definitions {
             let mut definition_name = name.clone();
             let needs_rename = ids.len() > 1
+                || scoped_names.names.contains(name.as_str())
                 || ids.iter().any(|(id, _)| {
-                    (signatures.contains_key(id) || scoped_names.names.contains(name.as_str()))
-                        && references.contains_key(&(*id as isize))
+                    scoped_names.assembly_references.contains(id)
+                        || (signatures.contains_key(id) && references.contains_key(&(*id as isize)))
                 });
 
             let mut ids = ids.into_iter().collect::<Vec<_>>();

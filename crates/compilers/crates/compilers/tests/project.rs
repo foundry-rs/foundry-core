@@ -7181,31 +7181,39 @@ contract Target {
 
 #[test]
 fn can_flatten_qualified_import_with_trivia() {
-    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
-    project.add_source("Declaration", "pragma solidity ^0.8.22; error Failure();").unwrap();
-    project
-        .add_source(
-            "Reexport",
-            r#"pragma solidity ^0.8.22; import * as Inner from "./Declaration.sol";"#,
-        )
-        .unwrap();
-    let target = project
-        .add_source(
-            "Target",
-            r#"pragma solidity ^0.8.22;
+    for reference in [
+        "Namespace.Inner.Failure",
+        "Namespace /* . */ . Inner // .\n . Failure",
+        "Namespace /* λ. */ . /* Inner. */ Inner . /* Failure. */ Failure",
+        "Namespace\n . Inner\r\n . Failure",
+    ] {
+        let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.add_source("Declaration", "pragma solidity ^0.8.22; error Failure();").unwrap();
+        project
+            .add_source(
+                "Reexport",
+                r#"pragma solidity ^0.8.22; import * as Inner from "./Declaration.sol";"#,
+            )
+            .unwrap();
+        let target = project
+            .add_source(
+                "Target",
+                format!(
+                    r#"pragma solidity ^0.8.22;
 import * as Namespace from "./Reexport.sol";
-contract Target {
-    function run() external pure {
-        revert Namespace /* . */ . Inner // .
-            . Failure();
+contract Target {{
+    function run() external pure {{
+        revert {reference}();
+    }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+        let path = project.add_source("Flattened", flattened).unwrap();
+        project.project().compile_file(path).unwrap().assert_success();
     }
-}
-"#,
-        )
-        .unwrap();
-    let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
-    let path = project.add_source("Flattened", flattened).unwrap();
-    project.project().compile_file(path).unwrap().assert_success();
 }
 
 #[test]
@@ -7272,6 +7280,9 @@ import * as Second from "./Second.sol";
 contract Target {
     function first() external pure returns (string memory) { return type(FirstToken).name; }
     function second() external pure returns (string memory) { return type(Second.Token).name; }
+    function choose(string memory) internal pure returns (uint256) { return 1; }
+    function choose(bytes32) internal pure returns (uint256) { return 2; }
+    function overloaded() external pure returns (uint256) { return choose(type(Second.Token).name); }
 }
 "#,
         )
@@ -7303,6 +7314,13 @@ fn can_flatten_singleton_alias_in_assembly_scope() {
         "function f(value) -> r { r := add(original, value) } result := f(9)",
         "function f() -> value { value := original } result := f()",
         "let value := 9 let value_0 := 11 result := add(original, add(value, value_0))",
+        "let value let value_0 let value_1 result := original",
+        "function value() {} result := original",
+        "function f(value) -> out { out := original } result := f(9)",
+        "function f() -> value { value := original leave } result := f()",
+        "function f() -> value, value_0 { value := original value_0 := 9 } let a, b := f() result := add(a, b)",
+        "let value := 9 switch original case 7 { result := original } default { let value_0 result := add(original, value) }",
+        "for { let value := 0 } lt(value, 3) { value := add(value, 1) } { if eq(value, 0) { continue } result := original break }",
     ] {
         let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
         project.project_mut().settings.solc.metadata = Some(BytecodeHash::None.into());
@@ -7346,6 +7364,63 @@ contract Target {{
                 .get_deployed_bytecode_bytes()
                 .unwrap()
                 .into_owned()
+        );
+    }
+}
+
+#[test]
+fn can_flatten_builtin_aliases() {
+    for (name, body) in [
+        ("add", "assembly { result := original }"),
+        ("mload", "assembly { result := original }"),
+        ("gas", "assembly { result := original }"),
+        ("block", "result = original + block.number;"),
+        ("msg", "result = original + msg.value;"),
+        ("block", "result = block.number;"),
+        ("msg", "result = msg.value;"),
+    ] {
+        let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+        project.project_mut().settings.solc.metadata = Some(BytecodeHash::None.into());
+        project
+            .add_source(
+                "Declaration",
+                format!("pragma solidity ^0.8.22; uint256 constant {name} = 7;"),
+            )
+            .unwrap();
+        let target = project
+            .add_source(
+                "Target",
+                format!(
+                    r#"pragma solidity ^0.8.22;
+import {{{name} as original}} from "./Declaration.sol";
+contract Target {{
+    function run() external payable returns (uint256 result) {{ {body} }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        let original = project.project().compile_file(&target).unwrap();
+        original.assert_success();
+        let original_code = original
+            .find_first("Target")
+            .unwrap()
+            .get_deployed_bytecode_bytes()
+            .unwrap()
+            .into_owned();
+        let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+        let path = project.add_source("Flattened", flattened).unwrap();
+        let compiled = project.project().compile_file(path).unwrap();
+        compiled.assert_success();
+        assert_eq!(
+            original_code,
+            compiled
+                .find_first("Target")
+                .unwrap()
+                .get_deployed_bytecode_bytes()
+                .unwrap()
+                .into_owned(),
+            "{name}"
         );
     }
 }
