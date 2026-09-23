@@ -1053,15 +1053,15 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             // Calculate content hashes for later comparison.
             self.fill_hashes(&sources, edges.parser());
 
+            let mut imports = ImportMatcher::new(&edges, self.project.root());
+
             // Pre-add all sources that are guaranteed to be dirty
             for file in sources.keys() {
-                let imports = edges
-                    .imports(file)
-                    .into_iter()
-                    .map(|import| strip_prefix(import, self.project.root()).into())
-                    .collect::<BTreeSet<_>>();
                 if self.is_dirty(file, false)
-                    || self.cache.entry(file).is_none_or(|entry| entry.imports != imports)
+                    || self
+                        .cache
+                        .entry(file)
+                        .is_none_or(|entry| !imports.matches(file, &entry.imports))
                 {
                     self.dirty_sources.insert(file.clone());
                 }
@@ -1756,18 +1756,62 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     }
 }
 
+/// Compares cached transitive imports without collecting and sorting owned paths for each source.
+struct ImportMatcher<'a, P: SourceParser> {
+    edges: &'a GraphEdges<P>,
+    paths: Vec<&'a Path>,
+    visited: Vec<bool>,
+    pending: Vec<usize>,
+    touched: Vec<usize>,
+}
+
+impl<'a, P: SourceParser> ImportMatcher<'a, P> {
+    fn new(edges: &'a GraphEdges<P>, root: &Path) -> Self {
+        let paths =
+            edges.files().map(|id| strip_prefix(edges.node_path(id), root)).collect::<Vec<_>>();
+        Self {
+            edges,
+            visited: vec![false; paths.len()],
+            paths,
+            pending: Vec::new(),
+            touched: Vec::new(),
+        }
+    }
+
+    fn matches(&mut self, file: &Path, expected: &BTreeSet<PathBuf>) -> bool {
+        for id in self.touched.drain(..) {
+            self.visited[id] = false;
+        }
+        self.pending.clear();
+        self.enqueue_imports(self.edges.node_id(file));
+
+        while let Some(id) = self.pending.pop() {
+            if !expected.contains(self.paths[id]) {
+                return false;
+            }
+            self.enqueue_imports(id);
+        }
+
+        // Membership alone would miss dependencies that are no longer reachable. Do not mark the
+        // starting node visited up front: a cycle includes the source in its own transitive
+        // imports.
+        self.touched.len() == expected.len()
+    }
+
+    fn enqueue_imports(&mut self, source: usize) {
+        for &id in self.edges.imported_nodes(source) {
+            if !mem::replace(&mut self.visited[id], true) {
+                self.touched.push(id);
+                self.pending.push(id);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactsCache, CompilerCache};
-    use crate::{
-        Graph, Project, ProjectPathsConfig, project::NativeDependencyState, solc::SolcSettings,
-    };
-    use foundry_compilers_artifacts::remappings::Remapping;
-    use semver::Version;
-    use std::{
-        collections::{BTreeMap, BTreeSet, HashSet},
-        path::PathBuf,
-    };
+    use super::*;
+    use crate::{resolver::parse::SolParser, solc::SolcSettings};
 
     fn context(
         state: NativeDependencyState,
@@ -1874,5 +1918,81 @@ mod tests {
             .into_iter()
             .collect()
         );
+    }
+
+    #[test]
+    fn import_matcher_preserves_transitive_sets() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(temp.path().join("External.sol"), "contract External {}").unwrap();
+        fs::write(
+            src.join("A.sol"),
+            "import './B.sol'; import './C.sol'; import '../../External.sol';",
+        )
+        .unwrap();
+        fs::write(src.join("B.sol"), "import './D.sol';").unwrap();
+        fs::write(src.join("C.sol"), "import './D.sol';").unwrap();
+        fs::write(src.join("Isolated.sol"), "contract Isolated {}").unwrap();
+        let paths = ProjectPathsConfig::builder().no_remappings().build_with_root(&root);
+
+        for dependency in ["contract D {}", "import './A.sol';"] {
+            fs::write(src.join("D.sol"), dependency).unwrap();
+            let (sources, edges) = Graph::<SolParser>::resolve(&paths).unwrap().into_sources();
+            assert!(edges.unresolved_imports().is_empty());
+            let mut matcher = ImportMatcher::new(&edges, &root);
+
+            for file in sources.keys() {
+                let expected = edges
+                    .imports(file)
+                    .into_iter()
+                    .map(|import| strip_prefix(import, &root).to_path_buf())
+                    .collect::<BTreeSet<_>>();
+                assert!(matcher.matches(file, &expected), "{}", file.display());
+
+                let mut extra = expected.clone();
+                extra.insert(PathBuf::from("src/Absent.sol"));
+                assert!(!matcher.matches(file, &extra));
+
+                if !expected.is_empty() {
+                    let mut missing = expected.clone();
+                    missing.pop_first();
+                    assert!(!matcher.matches(file, &missing));
+                    missing.insert(PathBuf::from("src/Absent.sol"));
+                    assert_eq!(missing.len(), expected.len());
+                    assert!(!matcher.matches(file, &missing));
+                }
+
+                // A failed comparison must not leave traversal state behind for the next source.
+                assert!(matcher.matches(file, &expected));
+            }
+        }
+    }
+    #[test]
+    fn import_matcher_bounds_pending_on_dense_cycles() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        let imports = (0..16).map(|id| format!("import './C{id}.sol';\n")).collect::<String>();
+        for id in 0..16 {
+            fs::write(src.join(format!("C{id}.sol")), &imports).unwrap();
+        }
+        let paths = ProjectPathsConfig::builder().no_remappings().build_with_root(&root);
+        let (_, edges) = Graph::<SolParser>::resolve(&paths).unwrap().into_sources();
+        assert!(edges.unresolved_imports().is_empty());
+        let expected = (0..16).map(|id| PathBuf::from(format!("src/C{id}.sol"))).collect();
+        let mut matcher = ImportMatcher::new(&edges, &root);
+        let file = src.join("C0.sol");
+
+        matcher.enqueue_imports(edges.node_id(&file));
+        assert_eq!(matcher.pending.len(), 16);
+        while let Some(id) = matcher.pending.pop() {
+            matcher.enqueue_imports(id);
+            assert!(matcher.pending.len() <= 16);
+        }
+        assert_eq!(matcher.touched.len(), 16);
+        assert!(matcher.matches(&file, &expected));
     }
 }

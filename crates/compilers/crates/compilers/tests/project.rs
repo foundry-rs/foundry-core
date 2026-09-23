@@ -1841,6 +1841,48 @@ fn can_compile_dapp_detect_changes_in_resolved_imports() {
 }
 
 #[test]
+fn can_compile_dapp_invalidate_changed_cached_imports() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.add_source("Dep", "pragma solidity ^0.8.10; contract Dep {}").unwrap();
+    project
+        .add_source(
+            "UsesDep",
+            "pragma solidity ^0.8.10; import './Dep.sol'; contract UsesDep is Dep {}",
+        )
+        .unwrap();
+    project.add_source("Unrelated", "pragma solidity ^0.8.10; contract Unrelated {}").unwrap();
+    project.compile().unwrap().assert_success();
+    assert!(project.compile().unwrap().is_unchanged());
+
+    let expected = BTreeSet::from([PathBuf::from("src/Dep.sol")]);
+    for imports in [
+        BTreeSet::new(),
+        BTreeSet::from([PathBuf::from("src/Unrelated.sol")]),
+        BTreeSet::from([PathBuf::from("src/Dep.sol"), PathBuf::from("src/Unrelated.sol")]),
+    ] {
+        let mut cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+        let entry = cache.files.get_mut(Path::new("src/UsesDep.sol")).unwrap();
+        assert_eq!(entry.imports, expected);
+        // Leave source contents, artifacts, settings, and remappings unchanged.
+        entry.imports = imports;
+        cache.write(project.cache_path()).unwrap();
+
+        let compiled = project.compile().unwrap();
+        compiled.assert_success();
+        assert!(!compiled.is_unchanged());
+        assert!(compiled.compiled_artifacts().find_first("UsesDep").is_some());
+        assert!(compiled.compiled_artifacts().find_first("Unrelated").is_none());
+        assert!(compiled.cached_artifacts().find_first("Unrelated").is_some());
+
+        let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+        assert_eq!(cache.files[Path::new("src/UsesDep.sol")].imports, expected);
+        let unchanged = project.compile().unwrap();
+        unchanged.assert_success();
+        assert!(unchanged.is_unchanged());
+    }
+}
+
+#[test]
 fn can_compile_dapp_detect_swapped_remapping_bindings() {
     let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
     let lib = project.paths().libraries[0].clone();
