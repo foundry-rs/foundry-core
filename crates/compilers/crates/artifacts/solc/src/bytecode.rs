@@ -7,7 +7,7 @@ use crate::{
 use alloy_primitives::{Address, Bytes, hex};
 use foundry_compilers_core::utils;
 use serde::{Deserialize, Serialize, Serializer};
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -213,11 +213,10 @@ impl Bytecode {
 }
 
 /// Represents the bytecode of a contracts that might be not fully linked yet.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum BytecodeObject {
     /// Fully linked bytecode object.
-    #[serde(deserialize_with = "serde_helpers::deserialize_bytes")]
     Bytecode(Bytes),
     /// Bytecode as hex string that's not fully linked yet and contains library placeholders.
     #[serde(with = "serde_helpers::string_bytes")]
@@ -375,6 +374,32 @@ impl AsRef<[u8]> for BytecodeObject {
     }
 }
 
+impl<'de> Deserialize<'de> for BytecodeObject {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct BytecodeString<'a>(#[serde(borrow)] Cow<'a, str>);
+
+        let BytecodeString(value) = BytecodeString::deserialize(deserializer)?;
+        // Library placeholders cannot be hex; avoid allocating a decode buffer and an error.
+        if !value.contains('_')
+            && let Ok(bytes) = value.parse()
+        {
+            return Ok(Self::Bytecode(bytes));
+        }
+
+        let value = match value {
+            Cow::Borrowed(value) => value.strip_prefix("0x").unwrap_or(value).to_owned(),
+            Cow::Owned(mut value) => {
+                if value.starts_with("0x") {
+                    value.drain(..2);
+                }
+                value
+            }
+        };
+        Ok(Self::Unlinked(value))
+    }
+}
+
 /// Reference: <https://github.com/argotorg/solidity/blob/965166317bbc2b02067eb87f222a2dce9d24e289/libevmasm/LinkerObject.cpp#L38>
 fn link(unlinked: &mut String, name: &str, addr: Address) {
     const LEN: usize = 40;
@@ -524,6 +549,7 @@ impl From<CompactDeployedBytecode> for DeployedBytecode {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{ConfigurableContractArtifact, ContractBytecode};
 
     #[test]
@@ -547,5 +573,57 @@ mod tests {
         let bytecode: ContractBytecode = contract.into();
         let bytecode = bytecode.unwrap();
         assert!(!bytecode.bytecode.object.is_unlinked());
+    }
+
+    #[test]
+    fn bytecode_deserialization_matches_untagged() {
+        #[derive(Debug, Deserialize)]
+        #[serde(untagged)]
+        enum LegacyBytecode {
+            #[serde(deserialize_with = "serde_helpers::deserialize_bytes")]
+            Bytecode(Bytes),
+            #[serde(with = "serde_helpers::string_bytes")]
+            Unlinked(String),
+        }
+
+        for value in [
+            "",
+            "0x",
+            "0X",
+            "00",
+            "0x00",
+            "0X00",
+            "abcdefABCDEF",
+            "0xabc",
+            "xyz",
+            "0Xxyz",
+            "0x0x00",
+            "0xé",
+            "0x\n",
+            "__Library_______________________________",
+            "0x6000__$1234567890123456789012345678901234$__6000",
+            "0X6000__$1234567890123456789012345678901234$__6000",
+        ] {
+            let json = serde_json::to_string(value).unwrap();
+            let expected = match serde_json::from_str::<LegacyBytecode>(&json).unwrap() {
+                LegacyBytecode::Bytecode(bytes) => BytecodeObject::Bytecode(bytes),
+                LegacyBytecode::Unlinked(value) => BytecodeObject::Unlinked(value),
+            };
+            assert_eq!(serde_json::from_str::<BytecodeObject>(&json).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_slice::<BytecodeObject>(json.as_bytes()).unwrap(),
+                expected
+            );
+            assert_eq!(serde_json::from_value::<BytecodeObject>(value.into()).unwrap(), expected);
+        }
+
+        for json in ["null", "true", "1", "[]", "{}", "[1, 2]"] {
+            assert!(serde_json::from_str::<LegacyBytecode>(json).is_err());
+            assert!(serde_json::from_str::<BytecodeObject>(json).is_err());
+        }
+        assert_eq!(
+            serde_json::from_str::<BytecodeObject>(r#""0x60\u005f\u005f""#).unwrap(),
+            BytecodeObject::Unlinked("60__".into())
+        );
     }
 }

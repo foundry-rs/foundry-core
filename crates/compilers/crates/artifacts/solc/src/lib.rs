@@ -1283,8 +1283,16 @@ impl<'de> Deserialize<'de> for LosslessMetadata {
                 let raw_metadata = value.to_string();
                 Ok(LosslessMetadata { raw_metadata, metadata })
             }
+
+            fn visit_string<E>(self, raw_metadata: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let metadata = serde_json::from_str(&raw_metadata).map_err(E::custom)?;
+                Ok(LosslessMetadata { raw_metadata, metadata })
+            }
         }
-        deserializer.deserialize_str(LosslessMetadataVisitor)
+        deserializer.deserialize_string(LosslessMetadataVisitor)
     }
 }
 
@@ -2415,6 +2423,12 @@ mod tests {
 
         let value = serde_json::to_string(&c).unwrap();
         assert_eq!(s, value);
+
+        let raw = c.metadata.unwrap().raw_metadata;
+        let ptr = raw.as_ptr();
+        let metadata =
+            serde_json::from_value::<LosslessMetadata>(serde_json::Value::String(raw)).unwrap();
+        assert_eq!(metadata.raw_metadata.as_ptr(), ptr);
     }
 
     #[test]
