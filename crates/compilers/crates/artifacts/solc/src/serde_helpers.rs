@@ -108,7 +108,7 @@ pub mod string_bytes {
         if value.starts_with("0x") {
             serializer.serialize_str(value.as_str())
         } else {
-            serializer.serialize_str(&format!("0x{value}"))
+            serializer.collect_str(&format_args!("0x{value}"))
         }
     }
 

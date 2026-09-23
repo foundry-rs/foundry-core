@@ -1330,8 +1330,8 @@ pub struct MetadataSettings {
 
 /// Compilation source files/source units, keys are file names
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct MetadataSources {
-    #[serde(flatten)]
     pub inner: BTreeMap<String, MetadataSource>,
 }
 
@@ -1585,8 +1585,8 @@ pub struct Doc {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct DocLibraries {
-    #[serde(flatten)]
     pub libs: BTreeMap<String, serde_json::Value>,
 }
 
@@ -2429,6 +2429,43 @@ mod tests {
         let metadata =
             serde_json::from_value::<LosslessMetadata>(serde_json::Value::String(raw)).unwrap();
         assert_eq!(metadata.raw_metadata.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn transparent_metadata_maps_match_flatten() {
+        #[derive(Deserialize, Serialize)]
+        struct LegacySources {
+            #[serde(flatten)]
+            inner: BTreeMap<String, MetadataSource>,
+        }
+        #[derive(Deserialize, Serialize)]
+        struct LegacyDocs {
+            #[serde(flatten)]
+            libs: BTreeMap<String, serde_json::Value>,
+        }
+        for json in [
+            "{}",
+            r#"{"é.sol":{"keccak256":"0x1234","urls":["ipfs://abc"],"license":"MIT","content":"日本語"}}"#,
+            r#"{"x":{"keccak256":"a"},"x":{"keccak256":"b"}}"#,
+        ] {
+            let old = serde_json::from_str::<LegacySources>(json).unwrap();
+            let new = serde_json::from_str::<MetadataSources>(json).unwrap();
+            assert_eq!(old.inner, new.inner);
+            assert_eq!(serde_json::to_string(&old).unwrap(), serde_json::to_string(&new).unwrap());
+        }
+        for json in [
+            "{}",
+            r#"{"foo()":{"notice":"hello","n":123456789012345678901234567890},"bar()":null}"#,
+        ] {
+            let old = serde_json::from_str::<LegacyDocs>(json).unwrap();
+            let new = serde_json::from_str::<DocLibraries>(json).unwrap();
+            assert_eq!(old.libs, new.libs);
+            assert_eq!(serde_json::to_string(&old).unwrap(), serde_json::to_string(&new).unwrap());
+        }
+        for json in ["null", "[]", r#"{"x":{}}"#, r#"{"x":{"keccak256":1}}"#] {
+            assert!(serde_json::from_str::<LegacySources>(json).is_err());
+            assert!(serde_json::from_str::<MetadataSources>(json).is_err());
+        }
     }
 
     #[test]

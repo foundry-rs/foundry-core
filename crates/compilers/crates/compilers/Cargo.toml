@@ -24,6 +24,7 @@ serde.workspace = true
 semver.workspace = true
 alloy-primitives.workspace = true
 serde_json.workspace = true
+simdutf8.workspace = true
 tracing.workspace = true
 tempfile.workspace = true
 alloy-json-abi.workspace = true

@@ -626,4 +626,20 @@ mod tests {
             BytecodeObject::Unlinked("60__".into())
         );
     }
+    #[test]
+    fn unlinked_serialization_preserves_prefix_and_escaping() {
+        for value in ["", "0x", "__Library__", "0x__Library__", "é\n\"\\"] {
+            let expected =
+                if value.starts_with("0x") { value.to_owned() } else { format!("0x{value}") };
+            let bytecode = BytecodeObject::Unlinked(value.to_owned());
+            assert_eq!(
+                serde_json::to_string(&bytecode).unwrap(),
+                serde_json::to_string(&expected).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&bytecode).unwrap(),
+                serde_json::Value::String(expected)
+            );
+        }
+    }
 }
