@@ -33,7 +33,7 @@ jobs:
       pr-number: ${{ steps.context.outputs.pr-number }}
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@7e2ea6e1a8f5a22f16c2d4b389ffde25da93fa1b # 2026-09-22T22-21-59Z-7e2ea6e1
+        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
       - name: Record trusted workflow context
         id: context
         env:
@@ -99,7 +99,7 @@ jobs:
           fi
 
       - name: Set up pnpm
-        uses: tempoxyz/gh-actions/vendor/pnpm/action-setup@134b6c9105953bcf6d50ef0f3f70e31b7a3ec64f
+        uses: tempoxyz/gh-actions/vendor/pnpm/action-setup@117919c943b804057be733b0c4034c5542e58959
         with:
           version: 11.9.0
           run_install: false
