@@ -4,7 +4,7 @@ description = "Fork database used by Foundry"
 version = "0.27.0"
 
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.96"
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -33,7 +33,7 @@ futures = "0.3.32"
 
 parking_lot = "0.12.5"
 
-revm = { version = "43.0.0", features = ["std", "serde"] }
+evm2 = { git = "https://github.com/mablr/evm2", rev = "2b51ce7d44c38b06eb125a5863655a4f470390f0", default-features = false, features = ["std", "serde"] }
 
 serde.workspace = true
 serde_json.workspace = true

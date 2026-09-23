@@ -1,6 +1,7 @@
 //! Smart caching and deduplication of requests when using a forking provider.
 
 use crate::{
+    AccountInfo, Bytecode,
     cache::{
         AccountFetchPolicy, BlockchainDb, FlushJsonBlockCacheDB, ForkBlockEnv, MemDb, StorageInfo,
     },
@@ -8,7 +9,10 @@ use crate::{
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{Address, B256, Bytes, U64, U256, keccak256, map::U256Map};
+use alloy_primitives::{
+    Address, B256, Bytes, KECCAK256_EMPTY as KECCAK_EMPTY, U64, U256, keccak256,
+    map::{AddressHashMap, HashMap, U256Map, hash_map::Entry},
+};
 use alloy_provider::{
     DynProvider, Network, Provider,
     network::{AnyNetwork, BlockResponse, primitives::HeaderResponse},
@@ -21,15 +25,6 @@ use futures::{
     pin_mut,
     stream::Stream,
     task::{Context, Poll},
-};
-use revm::{
-    context::BlockEnv,
-    database::DatabaseRef,
-    primitives::{
-        KECCAK_EMPTY,
-        map::{AddressHashMap, HashMap, hash_map::Entry},
-    },
-    state::{AccountInfo, Bytecode},
 };
 use serde::Serialize;
 use std::{
@@ -200,7 +195,7 @@ enum BackendRequest<N: Network = AnyNetwork> {
 /// This handler will remain active as long as it is reachable (request channel still open) and
 /// requests are in progress.
 #[must_use = "futures do nothing unless polled"]
-pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
+pub struct BackendHandler<N: Network = AnyNetwork, B = serde_json::Value> {
     provider: DynProvider<N>,
     /// Stores all the data.
     db: BlockchainDb<B>,
@@ -767,7 +762,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 }
                             };
 
-                            // convert it to revm-style types
+                            // Convert the RPC account into cached metadata.
                             let (code, code_hash) = if code.is_empty() {
                                 (Bytes::default(), KECCAK_EMPTY)
                             } else {
@@ -780,7 +775,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 balance,
                                 code: Some(Bytecode::new_raw(code)),
                                 code_hash,
-                                account_id: None,
+                                ..Default::default()
                             };
                             pin.db.accounts().write().insert(addr, acc.clone());
 
@@ -914,8 +909,8 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
     }
 }
 
-/// Mode for the `SharedBackend` how to block in the non-async [`DatabaseRef`] when interacting with
-/// [`BackendHandler`].
+/// Mode for the `SharedBackend` how to block in the synchronous database methods when interacting
+/// with [`BackendHandler`].
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub enum BlockingMode {
     /// This mode use `tokio::task::block_in_place()` to block in place.
@@ -994,7 +989,7 @@ impl BlockingMode {
 // This prevents issues (hangs) we ran into were the [SharedBackend] itself is called from a spawned
 // task.
 #[derive(Clone, Debug)]
-pub struct SharedBackend<N: Network = AnyNetwork, B: Serialize + Clone = BlockEnv> {
+pub struct SharedBackend<N: Network = AnyNetwork, B: Serialize + Clone = serde_json::Value> {
     /// channel used for sending commands related to database operations
     backend: UnboundedSender<BackendRequest<N>>,
     /// Ensures that the underlying cache gets flushed once the last `SharedBackend` is dropped.
@@ -1284,10 +1279,9 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
     }
 }
 
-impl<N: Network, B: ForkBlockEnv> DatabaseRef for SharedBackend<N, B> {
-    type Error = DatabaseError;
-
-    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
+    /// Loads account metadata and bytecode from the shared cache or RPC.
+    pub fn account(&self, address: Address) -> Result<Option<AccountInfo>, DatabaseError> {
         trace!(target: "sharedbackend", %address, "request basic");
         self.do_get_basic(address).inspect_err(|err| {
             error!(target: "sharedbackend", %err, %address, "Failed to send/recv `basic`");
@@ -1297,11 +1291,8 @@ impl<N: Network, B: ForkBlockEnv> DatabaseRef for SharedBackend<N, B> {
         })
     }
 
-    fn code_by_hash_ref(&self, hash: B256) -> Result<Bytecode, Self::Error> {
-        Err(DatabaseError::MissingCode(hash))
-    }
-
-    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
+    /// Loads a storage slot from the shared cache or RPC.
+    pub fn storage_at(&self, address: Address, index: U256) -> Result<U256, DatabaseError> {
         trace!(target: "sharedbackend", "request storage {:?} at {:?}", address, index);
         self.do_get_storage(address, index).inspect_err(|err| {
             error!(target: "sharedbackend", %err, %address, %index, "Failed to send/recv `storage`");
@@ -1311,7 +1302,8 @@ impl<N: Network, B: ForkBlockEnv> DatabaseRef for SharedBackend<N, B> {
         })
     }
 
-    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+    /// Loads a historical block hash relative to the pinned fork.
+    pub fn block_hash(&self, number: u64) -> Result<B256, DatabaseError> {
         trace!(target: "sharedbackend", "request block hash for number {:?}", number);
         self.do_get_block_hash(number).inspect_err(|err| {
             error!(target: "sharedbackend", %err, %number, "Failed to send/recv `block_hash`");
@@ -1322,12 +1314,47 @@ impl<N: Network, B: ForkBlockEnv> DatabaseRef for SharedBackend<N, B> {
     }
 }
 
+impl<N: Network, B: ForkBlockEnv> evm2::evm::Database for SharedBackend<N, B> {
+    type Error = DatabaseError;
+
+    fn get_account(&mut self, address: &Address) -> DatabaseResult<Option<evm2::evm::AccountInfo>> {
+        self.account(*address)
+    }
+
+    fn get_code_by_hash(&mut self, hash: &B256) -> DatabaseResult<evm2::bytecode::Bytecode> {
+        // RPC account fetches include code; there is no RPC lookup by code hash.
+        Err(DatabaseError::MissingCode(*hash))
+    }
+
+    fn get_storage(&mut self, address: &Address, key: &U256) -> DatabaseResult<U256> {
+        self.storage_at(*address, *key)
+    }
+
+    fn get_block_hash(&mut self, number: &U256) -> DatabaseResult<B256> {
+        let number =
+            u64::try_from(*number).map_err(|_| DatabaseError::BlockNumberOverflow(*number))?;
+        self.block_hash(number)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::{BlockchainDbMeta, JsonBlockCacheDB};
+
+    use crate::{
+        cache::{BlockchainDbMeta, JsonBlockCacheDB},
+        test_utils::BlockEnv,
+    };
+    use alloy_consensus::{TxLegacy, transaction::Recovered};
+    use alloy_primitives::TxKind;
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_client::ClientBuilder;
+    use evm2::{
+        BaseEvmTypes, Evm, Precompiles, SpecId,
+        env::BlockEnvExt,
+        ethereum::{TxEnvelope, ethereum_tx_registry},
+        evm::{Database, Db},
+    };
     use serde::Deserialize;
     use std::{fs, path::PathBuf, sync::atomic::AtomicBool, time::Duration};
     use tiny_http::{Response, Server};
@@ -1389,7 +1416,7 @@ mod tests {
             handler.account_fetch_mode.store(mode, Ordering::Relaxed);
             tokio::spawn(handler);
             for address in [Address::with_last_byte(1), Address::with_last_byte(2)] {
-                let account = backend.basic_ref(address).unwrap().unwrap();
+                let account = backend.account(address).unwrap().unwrap();
                 assert_eq!(account.nonce, 7);
                 assert_eq!(account.code.unwrap().original_bytes(), Bytes::from_static(&[0x60, 0]));
                 if reject_account_info {
@@ -1457,7 +1484,7 @@ mod tests {
         let hash = B256::with_last_byte(1);
         let backend = SharedBackend::spawn_backend(Arc::new(provider), db, Some(hash.into())).await;
         let address = Address::with_last_byte(1);
-        let account = backend.basic_ref(address).unwrap().unwrap();
+        let account = backend.account(address).unwrap().unwrap();
         assert_eq!(account.balance, U256::from(42));
         assert_eq!(account.nonce, 7);
         assert_eq!(account.code.unwrap().original_bytes(), Bytes::from_static(&[0x60, 0]));
@@ -1465,10 +1492,10 @@ mod tests {
         backend.set_pinned_block(123).unwrap();
         let clone = backend.clone();
         assert_eq!(
-            clone.basic_ref(Address::with_last_byte(2)).unwrap().unwrap().balance,
+            clone.account(Address::with_last_byte(2)).unwrap().unwrap().balance,
             U256::from(42)
         );
-        assert_eq!(backend.basic_ref(address).unwrap().unwrap().balance, U256::from(42));
+        assert_eq!(backend.account(address).unwrap().unwrap().balance, U256::from(42));
         stop.store(true, Ordering::Relaxed);
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
@@ -1486,7 +1513,7 @@ mod tests {
         let db = BlockchainDb::new(meta, None);
         let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
         for address in [Address::with_last_byte(1), Address::with_last_byte(2)] {
-            assert!(backend.basic_ref(address).is_err());
+            assert!(backend.account(address).is_err());
         }
         assert!(db.accounts().read().is_empty());
         stop.store(true, Ordering::Relaxed);
@@ -1503,12 +1530,60 @@ mod tests {
         let db = BlockchainDb::new(meta, None);
         let backend = SharedBackend::spawn_backend(Arc::new(provider), db, None).await;
         assert_eq!(
-            backend.basic_ref(Address::with_last_byte(1)).unwrap().unwrap().balance,
+            backend.account(Address::with_last_byte(1)).unwrap().unwrap().balance,
             U256::from(65535)
         );
         stop.store(true, Ordering::Relaxed);
         let requests = server.join().unwrap();
         assert!(requests.iter().any(|r| r["method"] == "eth_getBalance"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_evm_executes_rpc_bytecode() {
+        let (endpoint, stop, server) = account_policy_server(false);
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(serde_json::Value::Null, endpoint)
+            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let db = BlockchainDb::new(meta, None);
+        let caller = Address::with_last_byte(0xf0);
+        let target = Address::with_last_byte(0xf1);
+        db.accounts().write().insert(caller, AccountInfo::default());
+        let mut backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
+        let spec = SpecId::CANCUN;
+        let mut evm = Evm::<BaseEvmTypes>::new(
+            spec,
+            BlockEnvExt::default(),
+            ethereum_tx_registry(spec),
+            Db::new(backend.clone()),
+            Precompiles::base(spec),
+        );
+        let tx = Recovered::new_unchecked(
+            TxEnvelope::Legacy(TxLegacy {
+                gas_limit: 100_000,
+                to: TxKind::Call(target),
+                ..Default::default()
+            }),
+            caller,
+        );
+        let result = evm.transact(&tx).unwrap().discard();
+        assert!(result.status);
+        // The RPC serves PUSH1 0: execution adds three gas to the transaction's intrinsic cost.
+        assert_eq!(result.tx_gas_used(), 21_003);
+        assert_eq!(
+            db.accounts().read()[&target].code.as_ref().unwrap().original_bytes(),
+            Bytes::from_static(&[0x60, 0])
+        );
+        assert_eq!(db.accounts().read()[&caller].nonce, 0);
+        assert!(
+            matches!(backend.get_code_by_hash(&B256::ZERO), Err(DatabaseError::MissingCode(hash)) if hash == B256::ZERO)
+        );
+        assert!(
+            matches!(backend.get_block_hash(&U256::MAX), Err(DatabaseError::BlockNumberOverflow(number)) if number == U256::MAX)
+        );
+        stop.store(true, Ordering::Relaxed);
+        let requests = server.join().unwrap();
+        assert!(requests.iter().any(|request| request["method"] == "eth_getAccountInfo"
+            && request["params"][0] == serde_json::json!(target)));
     }
 
     const ENDPOINT: Option<&str> = option_env!("ETH_RPC_URL");
@@ -1519,8 +1594,7 @@ mod tests {
         let provider = get_http_provider(endpoint);
 
         let any_rpc_block = provider.get_block(BlockId::latest()).hashes().await.unwrap().unwrap();
-        let block_env =
-            BlockEnv { number: U256::from(any_rpc_block.header.number()), ..Default::default() };
+        let block_env = BlockEnv { number: U256::from(any_rpc_block.header.number()) };
         let meta = BlockchainDbMeta::default().set_block_env(block_env);
 
         assert_eq!(meta.block_env.number, U256::from(any_rpc_block.header.number()));
@@ -1540,8 +1614,8 @@ mod tests {
         let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
 
         let idx = U256::from(0u64);
-        let value = backend.storage_ref(address, idx).unwrap();
-        let account = backend.basic_ref(address).unwrap().unwrap();
+        let value = backend.storage_at(address, idx).unwrap();
+        let account = backend.account(address).unwrap().unwrap();
 
         let mem_acc = db.accounts().read().get(&address).unwrap().clone();
         assert_eq!(account.balance, mem_acc.balance);
@@ -1551,7 +1625,7 @@ mod tests {
         assert_eq!(slots.get(&idx).copied().unwrap(), value);
 
         let num = 10u64;
-        let hash = backend.block_hash_ref(num).unwrap();
+        let hash = backend.block_hash(num).unwrap();
         let mem_hash = *db.block_hashes().read().get(&U256::from(num)).unwrap();
         assert_eq!(hash, mem_hash);
 
@@ -1559,7 +1633,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             for i in 1..max_slots {
                 let idx = U256::from(i);
-                let _ = backend.storage_ref(address, idx);
+                let _ = backend.storage_at(address, idx);
             }
         });
         handle.join().unwrap();
@@ -1582,7 +1656,7 @@ mod tests {
         let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
 
         let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
+        let mut backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
 
         let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
         let account = AccountInfo {
@@ -1590,7 +1664,7 @@ mod tests {
             balance: U256::from(2),
             code: None,
             code_hash: KECCAK_EMPTY,
-            account_id: None,
+            ..Default::default()
         };
         let mut account_data = AddressData::default();
         account_data.insert(address, account.clone());
@@ -1612,9 +1686,9 @@ mod tests {
 
         assert_eq!(backend.cache_hits(), 0);
         assert_eq!(backend.cache_misses(), 0);
-        assert_eq!(backend.basic_ref(address).unwrap(), Some(account));
-        assert_eq!(backend.storage_ref(address, slot).unwrap(), value);
-        assert_eq!(backend.block_hash_ref(block_number).unwrap(), block_hash);
+        assert_eq!(backend.get_account(&address).unwrap(), Some(account));
+        assert_eq!(backend.get_storage(&address, &slot).unwrap(), value);
+        assert_eq!(backend.get_block_hash(&U256::from(block_number)).unwrap(), block_hash);
         assert_eq!(backend.cache_hits(), 3);
         assert_eq!(backend.cache_misses(), 0);
 
@@ -1659,10 +1733,10 @@ mod tests {
         let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
         let slot = U256::from(1);
 
-        assert_eq!(backend.storage_ref(address, slot).unwrap(), U256::from(42));
+        assert_eq!(backend.storage_at(address, slot).unwrap(), U256::from(42));
         assert_eq!(backend.cache_hits(), 0);
         assert_eq!(backend.cache_misses(), 1);
-        assert_eq!(backend.storage_ref(address, slot).unwrap(), U256::from(42));
+        assert_eq!(backend.storage_at(address, slot).unwrap(), U256::from(42));
         assert_eq!(backend.cache_hits(), 1);
         assert_eq!(backend.cache_misses(), 1);
 
@@ -1742,8 +1816,8 @@ mod tests {
             SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, anchor_hash)).unwrap();
         tokio::spawn(handler);
 
-        assert_eq!(backend.storage_ref(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
-        assert_eq!(backend.block_hash_ref(9).unwrap(), parent_hash);
+        assert_eq!(backend.storage_at(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
+        assert_eq!(backend.block_hash(9).unwrap(), parent_hash);
         server_handle.join().unwrap();
     }
 
@@ -1821,8 +1895,8 @@ mod tests {
                 .unwrap();
         tokio::spawn(handler);
 
-        assert_eq!(backend.storage_ref(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
-        assert_eq!(backend.block_hash_ref(9).unwrap(), parent_hash);
+        assert_eq!(backend.storage_at(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
+        assert_eq!(backend.block_hash(9).unwrap(), parent_hash);
         server_handle.join().unwrap();
     }
 
@@ -1893,7 +1967,7 @@ mod tests {
         .unwrap();
         tokio::spawn(handler);
 
-        assert_eq!(backend.block_hash_ref(requested_number).unwrap(), expected_hash);
+        assert_eq!(backend.block_hash(requested_number).unwrap(), expected_hash);
         server_handle.join().unwrap();
     }
 
@@ -1959,7 +2033,7 @@ mod tests {
         .unwrap();
         tokio::spawn(handler);
 
-        assert_eq!(backend.block_hash_ref(99).unwrap(), block_hash);
+        assert_eq!(backend.block_hash(99).unwrap(), block_hash);
         server_handle.join().unwrap();
     }
 
@@ -1974,7 +2048,7 @@ mod tests {
             SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, anchor_hash)).unwrap();
         tokio::spawn(handler);
 
-        assert_eq!(backend.block_hash_ref(11).unwrap(), B256::ZERO);
+        assert_eq!(backend.block_hash(11).unwrap(), B256::ZERO);
     }
 
     #[test]
@@ -2074,10 +2148,10 @@ mod tests {
         let db = BlockchainDb::new(meta, None);
         let backend =
             SharedBackend::spawn_backend(Arc::new(provider), db, Some(BlockId::from(100))).await;
-        assert_eq!(backend.block_hash_ref(99).unwrap(), first_hash);
-        assert_eq!(backend.block_hash_ref(99).unwrap(), first_hash);
+        assert_eq!(backend.block_hash(99).unwrap(), first_hash);
+        assert_eq!(backend.block_hash(99).unwrap(), first_hash);
         backend.set_pinned_block(200).unwrap();
-        assert_eq!(backend.block_hash_ref(99).unwrap(), second_hash);
+        assert_eq!(backend.block_hash(99).unwrap(), second_hash);
         server_handle.join().unwrap();
     }
 
@@ -2123,7 +2197,7 @@ mod tests {
             SharedBackend::new_with_anchor(provider, db, ForkBlock::new(100, anchor_hash)).unwrap();
         tokio::spawn(handler);
 
-        assert_eq!(backend.block_hash_ref(99).unwrap(), expected_hash);
+        assert_eq!(backend.block_hash(99).unwrap(), expected_hash);
         server_handle.join().unwrap();
     }
 
@@ -2173,7 +2247,7 @@ mod tests {
         let db = BlockchainDb::new(meta, None);
         let backend =
             SharedBackend::spawn_backend(Arc::new(provider), db, Some(BlockId::from(100))).await;
-        assert_eq!(backend.block_hash_ref(99).unwrap(), expected_hash);
+        assert_eq!(backend.block_hash(99).unwrap(), expected_hash);
         server_handle.join().unwrap();
     }
 
@@ -2195,7 +2269,7 @@ mod tests {
             balance: U256::from(2000),
             code: None,
             code_hash: KECCAK_EMPTY,
-            account_id: None,
+            ..Default::default()
         };
         let expected_nonce = new_acc.nonce;
         let expected_balance = new_acc.balance;
@@ -2208,7 +2282,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             for i in 1..max_slots {
                 let idx = U256::from(i);
-                let result_address = backend.basic_ref(address).unwrap();
+                let result_address = backend.account(address).unwrap();
                 match result_address {
                     Some(acc) => {
                         assert_eq!(
@@ -2379,14 +2453,14 @@ mod tests {
         storage_info.insert(U256::from(5), U256::from(15));
         storage_info.insert(U256::from(6), U256::from(10));
 
-        let mut address_data = backend.basic_ref(address).unwrap().unwrap();
+        let mut address_data = backend.account(address).unwrap().unwrap();
         address_data.code = None;
 
         storage_data.insert(address, storage_info);
 
         backend.insert_or_update_storage(storage_data.clone());
 
-        let mut new_acc = backend.basic_ref(address).unwrap().unwrap();
+        let mut new_acc = backend.account(address).unwrap().unwrap();
         // nullify the code
         new_acc.code = Some(Bytecode::new_raw(([10, 20, 30, 40]).into()));
 

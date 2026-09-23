@@ -1,14 +1,12 @@
 //! Cache related abstraction
 
+use crate::AccountInfo;
 use alloy_chains::Chain;
-use alloy_primitives::{Address, B256, U256, map::U256Map};
-use parking_lot::RwLock;
-use revm::{
-    DatabaseCommit,
-    context::BlockEnv,
-    primitives::{KECCAK_EMPTY, StorageKeyMap, map::AddressHashMap},
-    state::{Account, AccountInfo, AccountStatus},
+use alloy_primitives::{
+    Address, B256, U256,
+    map::{AddressHashMap, U256Map},
 };
+use parking_lot::RwLock;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeMap,
 };
@@ -27,7 +25,7 @@ use url::Url;
 #[cfg(feature = "zstd")]
 use zstd::{Encoder, decode_all};
 
-pub type StorageInfo = StorageKeyMap<U256>;
+pub type StorageInfo = U256Map<U256>;
 
 /// Zstd frame magic number: `0x28B52FFD` (little-endian).
 const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
@@ -48,7 +46,7 @@ pub enum AccountFetchPolicy {
 
 /// A shareable Block database
 #[derive(Clone, Debug)]
-pub struct BlockchainDb<B = BlockEnv> {
+pub struct BlockchainDb<B = serde_json::Value> {
     /// Contains all the data
     db: Arc<MemDb>,
     /// metadata of the current config
@@ -369,47 +367,6 @@ impl MemDb {
     pub fn do_insert_account(&self, address: Address, account: AccountInfo) {
         self.accounts.write().insert(address, account);
     }
-
-    /// The implementation of [DatabaseCommit::commit()]
-    pub fn do_commit(&self, changes: AddressHashMap<Account>) {
-        let mut storage = self.storage.write();
-        let mut accounts = self.accounts.write();
-        for (add, mut acc) in changes {
-            if acc.is_empty() || acc.is_selfdestructed() {
-                accounts.remove(&add);
-                storage.remove(&add);
-            } else {
-                // insert account
-                if let Some(code_hash) = acc
-                    .info
-                    .code
-                    .as_ref()
-                    .filter(|code| !code.is_empty())
-                    .map(|code| code.hash_slow())
-                {
-                    acc.info.code_hash = code_hash;
-                } else if acc.info.code_hash.is_zero() {
-                    acc.info.code_hash = KECCAK_EMPTY;
-                }
-                accounts.insert(add, acc.info);
-
-                let acc_storage = storage.entry(add).or_default();
-                if acc.status.contains(AccountStatus::Created) {
-                    acc_storage.clear();
-                }
-                for (index, value) in acc.storage {
-                    if value.present_value().is_zero() {
-                        acc_storage.remove(&index);
-                    } else {
-                        acc_storage.insert(index, value.present_value());
-                    }
-                }
-                if acc_storage.is_empty() {
-                    storage.remove(&add);
-                }
-            }
-        }
-    }
 }
 
 impl Clone for MemDb {
@@ -419,12 +376,6 @@ impl Clone for MemDb {
             accounts: RwLock::new(self.accounts.read().clone()),
             block_hashes: RwLock::new(self.block_hashes.read().clone()),
         }
-    }
-}
-
-impl DatabaseCommit for MemDb {
-    fn commit(&mut self, changes: AddressHashMap<Account>) {
-        self.do_commit(changes)
     }
 }
 
@@ -683,6 +634,8 @@ impl<B: Serialize + Clone> Drop for FlushJsonBlockCacheDB<B> {
 mod tests {
     use super::*;
 
+    use crate::test_utils::BlockEnv;
+
     #[test]
     fn can_deserialize_cache() {
         let s = r#"{
@@ -837,7 +790,9 @@ mod tests {
                     .with_account_fetch_policy(stored);
                 let db = BlockchainDb::new(meta.clone(), Some(path.clone()));
                 let address = Address::with_last_byte(1);
-                db.accounts().write().insert(address, AccountInfo::from_balance(U256::from(42)));
+                db.accounts()
+                    .write()
+                    .insert(address, AccountInfo { balance: U256::from(42), ..Default::default() });
                 db.cache().flush();
 
                 // Matching semantics preserve the actual balance, including nonzero values.
@@ -870,7 +825,7 @@ mod tests {
     fn roundtrip_meta_block_env() {
         let meta = BlockchainDbMeta {
             chain: Some(Chain::mainnet()),
-            block_env: BlockEnv { number: U256::from(1u64), ..Default::default() },
+            block_env: BlockEnv { number: U256::from(1u64) },
             hosts: BTreeSet::from(["eth-mainnet.alchemyapi.io".to_string()]),
             fork_hash: Some(B256::with_last_byte(1)),
             source_id: Some(B256::with_last_byte(2)),
