@@ -1972,19 +1972,19 @@ mod tests {
     #[test]
     fn import_matcher_bounds_pending_on_dense_cycles() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = temp.path();
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         let imports = (0..16).map(|id| format!("import './C{id}.sol';\n")).collect::<String>();
         for id in 0..16 {
             fs::write(src.join(format!("C{id}.sol")), &imports).unwrap();
         }
-        let paths = ProjectPathsConfig::builder().no_remappings().build_with_root(&root);
+        let paths = ProjectPathsConfig::builder().no_remappings().build_with_root(root);
         let (_, edges) = Graph::<SolParser>::resolve(&paths).unwrap().into_sources();
         assert!(edges.unresolved_imports().is_empty());
         let expected = (0..16).map(|id| PathBuf::from(format!("src/C{id}.sol"))).collect();
-        let mut matcher = ImportMatcher::new(&edges, &root);
-        let file = src.join("C0.sol");
+        let mut matcher = ImportMatcher::new(&edges, &paths.root);
+        let file = paths.sources.join("C0.sol");
 
         matcher.enqueue_imports(edges.node_id(&file));
         assert_eq!(matcher.pending.len(), 16);
