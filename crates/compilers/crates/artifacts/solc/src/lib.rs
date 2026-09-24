@@ -1329,10 +1329,38 @@ pub struct MetadataSettings {
 }
 
 /// Compilation source files/source units, keys are file names
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct MetadataSources {
     pub inner: BTreeMap<String, MetadataSource>,
+}
+
+impl<'de> Deserialize<'de> for MetadataSources {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SourcesVisitor;
+
+        impl<'de> Visitor<'de> for SourcesVisitor {
+            type Value = MetadataSources;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a map")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0).min(4096));
+                while let Some(entry) = map.next_entry()? {
+                    entries.push(entry);
+                }
+                // Bulk construction avoids half-empty B-tree nodes from sorted source paths.
+                Ok(MetadataSources { inner: entries.into_iter().collect() })
+            }
+        }
+
+        deserializer.deserialize_map(SourcesVisitor)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1342,13 +1370,47 @@ pub struct MetadataSource {
     /// Required (unless "content" is used, see below): Sorted URL(s)
     /// to the source file, protocol is more or less arbitrary, but a
     /// Swarm URL is recommended
-    #[serde(default)]
+    #[serde(default, deserialize_with = "MetadataSource::deserialize_urls")]
     pub urls: Vec<String>,
     /// Required (unless "url" is used): literal contents of the source file
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     /// Optional: SPDX license identifier as given in the source file
     pub license: Option<String>,
+}
+
+impl MetadataSource {
+    fn deserialize_urls<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<String>, D::Error> {
+        struct UrlsVisitor;
+
+        impl<'de> Visitor<'de> for UrlsVisitor {
+            type Value = Vec<String>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a sequence")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let Some(first) = seq.next_element()? else { return Ok(Vec::new()) };
+                // Solc normally emits two URLs; Vec's initial growth reserves four slots.
+                let mut urls = Vec::with_capacity(
+                    seq.size_hint().unwrap_or(1).saturating_add(1).clamp(2, 4096),
+                );
+                urls.push(first);
+                while let Some(url) = seq.next_element()? {
+                    urls.push(url);
+                }
+                Ok(urls)
+            }
+        }
+
+        deserializer.deserialize_seq(UrlsVisitor)
+    }
 }
 
 /// Model checker settings for solc
@@ -2429,6 +2491,60 @@ mod tests {
         let metadata =
             serde_json::from_value::<LosslessMetadata>(serde_json::Value::String(raw)).unwrap();
         assert_eq!(metadata.raw_metadata.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn metadata_source_url_lengths() {
+        for len in 0..12 {
+            let urls = (0..len).map(|i| format!("ipfs://source-{i}")).collect::<Vec<_>>();
+            let value = serde_json::json!({"keccak256":"hash", "urls":urls});
+            let source = serde_json::from_str::<MetadataSource>(&value.to_string()).unwrap();
+            assert_eq!(source.urls, urls);
+            assert_eq!(serde_json::from_value::<MetadataSource>(value).unwrap(), source);
+            if len == 2 {
+                assert_eq!(source.urls.capacity(), 2);
+            }
+        }
+        for json in [
+            r#"{"keccak256":"hash","urls":null}"#,
+            r#"{"keccak256":"hash","urls":[1]}"#,
+            r#"{"keccak256":"hash","urls":{}}"#,
+        ] {
+            assert!(serde_json::from_str::<MetadataSource>(json).is_err());
+        }
+        let source = serde_json::from_str::<MetadataSource>(
+            r#"{"keccak256":"hash","content":"literal source"}"#,
+        )
+        .unwrap();
+        assert!(source.urls.is_empty());
+        assert_eq!(source.content.as_deref(), Some("literal source"));
+    }
+
+    #[test]
+    fn metadata_sources_bulk_map_matches_insertion() {
+        assert!(
+            MetadataSources::deserialize(serde::de::value::UnitDeserializer::<
+                serde::de::value::Error,
+            >::new())
+            .is_err()
+        );
+        for reverse in [false, true] {
+            let mut entries = (0..100)
+                .map(|i| format!(r#""{i:03}.sol":{{"keccak256":"{i}"}}"#))
+                .collect::<Vec<_>>();
+            if reverse {
+                entries.reverse();
+            }
+            entries.push(r#""050.sol":{"keccak256":"replacement"}"#.into());
+            let json = format!("{{{}}}", entries.join(","));
+            let expected = serde_json::from_str::<BTreeMap<String, MetadataSource>>(&json).unwrap();
+            let sources = serde_json::from_str::<MetadataSources>(&json).unwrap();
+            assert_eq!(sources.inner, expected);
+            assert_eq!(
+                serde_json::to_value(&sources).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+        }
     }
 
     #[test]
