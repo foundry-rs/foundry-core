@@ -8,6 +8,9 @@ pub enum BrowserWalletError {
     #[error("{operation} rejected: {reason}")]
     Rejected { operation: &'static str, reason: String },
 
+    #[error("{operation} failed: {reason}")]
+    Failed { operation: &'static str, reason: String },
+
     #[error("Wallet not connected")]
     NotConnected,
 

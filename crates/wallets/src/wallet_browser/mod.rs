@@ -26,7 +26,7 @@ mod tests {
         utils::create_local_signer,
         wallet_browser::{
             error::BrowserWalletError,
-            server::BrowserWalletServer,
+            server::{BrowserWalletServer, USER_REJECTION_SIGNAL},
             signer::BrowserSigner,
             types::{
                 BrowserApiResponse, BrowserChainSwitchRequest, BrowserChainSwitchResponse,
@@ -354,7 +354,7 @@ mod tests {
             .json(&BrowserTransactionResponse {
                 id: tx_request_id,
                 hash: None,
-                error: Some("User rejected the transaction".into()),
+                error: Some(USER_REJECTION_SIGNAL.into()),
             })
             .send()
             .await
@@ -368,9 +368,42 @@ mod tests {
         match res {
             Err(BrowserWalletError::Rejected { operation, reason }) => {
                 assert_eq!(operation, "Transaction");
-                assert_eq!(reason, "User rejected the transaction");
+                assert_eq!(reason, "Rejected by user");
             }
             other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_transaction_failure_is_not_a_rejection() {
+        let mut server = create_server::<Ethereum>();
+        let client = client_with_token(&server);
+        server.start().await.unwrap();
+        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
+
+        let (tx_request_id, tx_request) = create_browser_transaction_request();
+        let handle = wait_for_transaction_signing(&server, tx_request).await;
+        check_transaction_request_content(&client, &server, tx_request_id).await;
+
+        client
+            .post(format!("http://localhost:{}/api/transaction/response", server.port()))
+            .json(&BrowserTransactionResponse {
+                id: tx_request_id,
+                hash: None,
+                error: Some("provider disconnected".into()),
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        match handle.await.expect("task panicked") {
+            Err(BrowserWalletError::Failed { operation, reason }) => {
+                assert_eq!(operation, "Transaction");
+                assert_eq!(reason, "provider disconnected");
+            }
+            other => panic!("expected failure, got {other:?}"),
         }
     }
 
@@ -466,7 +499,7 @@ mod tests {
             .json(&BrowserTransactionResponse {
                 id: tx_request_id2,
                 hash: None,
-                error: Some("User rejected the transaction".into()),
+                error: Some(USER_REJECTION_SIGNAL.into()),
             })
             .send()
             .await
@@ -479,7 +512,7 @@ mod tests {
         match res2 {
             Err(BrowserWalletError::Rejected { operation, reason }) => {
                 assert_eq!(operation, "Transaction");
-                assert_eq!(reason, "User rejected the transaction");
+                assert_eq!(reason, "Rejected by user");
             }
             other => panic!("expected BrowserWalletError::Rejected, got {other:?}"),
         }
@@ -1067,11 +1100,11 @@ mod tests {
         // per-request timeout.
         let res = handle.await.expect("task panicked");
         match res {
-            Err(BrowserWalletError::Rejected { operation, reason }) => {
+            Err(BrowserWalletError::Failed { operation, reason }) => {
                 assert_eq!(operation, "Transaction");
                 assert_eq!(reason, "Wallet disconnected");
             }
-            other => panic!("expected Rejected, got {other:?}"),
+            other => panic!("expected Failed, got {other:?}"),
         }
 
         server.stop().await.unwrap();
