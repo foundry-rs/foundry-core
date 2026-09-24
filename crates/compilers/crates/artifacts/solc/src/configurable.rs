@@ -68,6 +68,48 @@ impl ConfigurableContractArtifact {
         serde_json::from_str::<DirectArtifactValue>(json)
             .map(|artifact| artifact.0)
             .or_else(|_| serde_json::from_str(json))
+            .or_else(|error| {
+                if !error.to_string().starts_with("missing field `outputs`") {
+                    return Err(error);
+                }
+                #[derive(Deserialize)]
+                struct Artifact<'a> {
+                    #[serde(borrow)]
+                    metadata: Metadata<'a>,
+                }
+                #[derive(Deserialize)]
+                struct Metadata<'a> {
+                    #[serde(borrow)]
+                    output: Output<'a>,
+                }
+                #[derive(Deserialize)]
+                struct Output<'a> {
+                    #[serde(borrow)]
+                    abi: Vec<&'a serde_json::value::RawValue>,
+                }
+                #[derive(Deserialize)]
+                struct Item<'a> {
+                    #[serde(rename = "type")]
+                    kind: String,
+                    #[serde(borrow)]
+                    outputs: Option<&'a serde_json::value::RawValue>,
+                }
+
+                let artifact = serde_json::from_str::<Artifact<'_>>(json)?;
+                let mut repaired = json.to_owned();
+                // Insert missing outputs without rewriting other fields or collapsing duplicate keys.
+                for raw in artifact.metadata.output.abi.into_iter().rev() {
+                    let item = serde_json::from_str::<Item<'_>>(raw.get())?;
+                    if item.kind == "function"
+                        && item.outputs.is_none()
+                        && raw.get().starts_with('{')
+                    {
+                        let offset = raw.get().as_ptr() as usize - json.as_ptr() as usize;
+                        repaired.insert_str(offset + 1, "\"outputs\":[],");
+                    }
+                }
+                serde_json::from_str(&repaired)
+            })
     }
 
     /// Returns the inner element that contains the core bytecode related information
@@ -394,6 +436,39 @@ fn deserialize_abi_name<'de, D: Deserializer<'de>>(deserializer: D) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_legacy_metadata_without_empty_outputs() {
+        let json = serde_json::json!({
+            "abi": [],
+            "rawMetadata": "preserve this exact string",
+            "metadata": {
+                "compiler": {"version":"0.8.30"}, "language":"Solidity", "version":1,
+                "settings": {"optimizer":{}}, "sources":{},
+                "output": {"abi":[{"type":"function","name":"f","inputs":[],"stateMutability":"nonpayable"}]}
+            }
+        });
+        let artifact = ConfigurableContractArtifact::from_json(&json.to_string()).unwrap();
+        assert!(
+            artifact.metadata.as_ref().unwrap().output.abi.functions["f"][0].outputs.is_empty()
+        );
+        assert_eq!(artifact.raw_metadata.as_deref(), Some("preserve this exact string"));
+        let serialized = serde_json::to_string(&artifact).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ConfigurableContractArtifact>(&serialized).unwrap(),
+            artifact
+        );
+    }
+
+    #[test]
+    fn legacy_metadata_repair_preserves_duplicate_errors() {
+        let metadata = r#""metadata":{"compiler":{"version":"0.8.30"},"language":"Solidity","version":1,"settings":{"optimizer":{}},"sources":{},"output":{"abi":[{"type":"function","name":"f","inputs":[]}]}}"#;
+        let json = format!("{{{metadata},\"abi\":[],\"abi\":[]}}");
+        assert!(ConfigurableContractArtifact::from_json(&json).is_err());
+        let json = format!("{{{metadata},\"abi\":[]}}")
+            .replace(r#""name":"f""#, r#""name":"f","name":"g""#);
+        assert!(ConfigurableContractArtifact::from_json(&json).is_err());
+    }
 
     #[test]
     fn direct_abi_reader_matches_deserialize() {

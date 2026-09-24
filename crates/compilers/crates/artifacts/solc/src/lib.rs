@@ -7,6 +7,7 @@
 #[macro_use]
 extern crate tracing;
 
+use alloy_json_abi::JsonAbi;
 use semver::Version;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
 use std::{
@@ -1573,49 +1574,9 @@ pub struct Compiler {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
-    #[serde(deserialize_with = "serde_helpers::deserialize_small_vec")]
-    pub abi: Vec<SolcAbi>,
+    pub abi: JsonAbi,
     pub devdoc: Option<Doc>,
     pub userdoc: Option<Doc>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SolcAbi {
-    #[serde(default, deserialize_with = "serde_helpers::deserialize_small_vec")]
-    pub inputs: Vec<Item>,
-    #[serde(rename = "stateMutability", skip_serializing_if = "Option::is_none")]
-    pub state_mutability: Option<String>,
-    #[serde(rename = "type")]
-    pub abi_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "serde_helpers::deserialize_small_vec"
-    )]
-    pub outputs: Vec<Item>,
-    // required to satisfy solidity events
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anonymous: Option<bool>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Item {
-    #[serde(rename = "internalType")]
-    pub internal_type: Option<String>,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub put_type: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "serde_helpers::deserialize_small_vec"
-    )]
-    pub components: Vec<Self>,
-    /// Indexed flag. for solidity events
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub indexed: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2474,6 +2435,27 @@ mod tests {
         let metadata =
             serde_json::from_value::<LosslessMetadata>(serde_json::Value::String(raw)).unwrap();
         assert_eq!(metadata.raw_metadata.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn metadata_output_uses_json_abi() {
+        let abi = serde_json::json!([
+            {"type":"function","name":"f","inputs":[{"name":"x","type":"tuple","components":[{"name":"y","type":"uint256"}]}],"outputs":[],"constant":true,"payable":false},
+            {"type":"event","name":"E","inputs":[{"name":"x","type":"address","indexed":true}],"anonymous":false},
+            {"type":"error","name":"Oops","inputs":[]},
+            {"type":"constructor","inputs":[],"stateMutability":"nonpayable"},
+            {"type":"fallback","stateMutability":"payable"},
+            {"type":"receive","stateMutability":"payable"}
+        ]);
+        let expected = serde_json::from_value::<JsonAbi>(abi.clone()).unwrap();
+        let output = serde_json::from_value::<Output>(serde_json::json!({"abi":abi})).unwrap();
+        assert_eq!(output.abi, expected);
+        assert_eq!(output.abi.functions["f"][0].inputs[0].components[0].ty, "uint256");
+        assert!(output.abi.events["E"][0].inputs[0].indexed);
+        let roundtrip =
+            serde_json::from_str::<Output>(&serde_json::to_string(&output).unwrap()).unwrap();
+        assert_eq!(roundtrip, output);
+        assert!(serde_json::from_str::<Output>(r#"{"abi":[]}"#).unwrap().abi.is_empty());
     }
 
     #[test]
