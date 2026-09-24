@@ -141,8 +141,7 @@ impl<'de> Deserialize<'de> for Remapping {
     where
         D: serde::de::Deserializer<'de>,
     {
-        let remapping = String::deserialize(deserializer)?;
-        Self::from_str(&remapping).map_err(serde::de::Error::custom)
+        crate::serde_helpers::display_from_str::deserialize(deserializer)
     }
 }
 
@@ -373,8 +372,7 @@ impl<'de> Deserialize<'de> for RelativeRemapping {
     where
         D: serde::de::Deserializer<'de>,
     {
-        let remapping = String::deserialize(deserializer)?;
-        let remapping = Remapping::from_str(&remapping).map_err(serde::de::Error::custom)?;
+        let remapping = Remapping::deserialize(deserializer)?;
         Ok(Self { context: remapping.context, name: remapping.name, path: remapping.path.into() })
     }
 }
@@ -391,6 +389,54 @@ fn needs_trailing_slash(name_or_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     pub use super::*;
+
+    #[test]
+    fn deserialize_remapping_strings() {
+        assert_eq!(
+            Remapping::deserialize(
+                serde::de::value::BytesDeserializer::<serde::de::value::Error>::new(b"a/=lib/a/")
+            )
+            .unwrap(),
+            "a/=lib/a/".parse::<Remapping>().unwrap()
+        );
+        assert!(
+            Remapping::deserialize(
+                serde::de::value::BytesDeserializer::<serde::de::value::Error>::new(b"\xff")
+            )
+            .is_err()
+        );
+        for value in [
+            "a/=lib/a/",
+            "context:a/=lib/a/",
+            ":a/=lib/a/",
+            "é/=日本語/",
+            "a/=lib/\\a/",
+            "",
+            "a",
+            "=path",
+            "a=",
+            " :a/=path",
+        ] {
+            let json = serde_json::to_string(value).unwrap();
+            let expected = value.parse::<Remapping>();
+            let parsed = serde_json::from_str::<Remapping>(&json);
+            let owned =
+                serde_json::from_value::<Remapping>(serde_json::Value::String(value.into()));
+            match expected {
+                Ok(expected) => {
+                    assert_eq!(parsed.unwrap(), expected);
+                    assert_eq!(owned.unwrap(), expected);
+                }
+                Err(_) => {
+                    assert!(parsed.is_err());
+                    assert!(owned.is_err());
+                }
+            }
+        }
+        for json in ["null", "123", "[]", "{}", "true"] {
+            assert!(serde_json::from_str::<Remapping>(json).is_err());
+        }
+    }
 
     #[test]
     fn relative_remapping() {

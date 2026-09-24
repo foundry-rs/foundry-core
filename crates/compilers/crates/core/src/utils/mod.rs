@@ -451,9 +451,26 @@ pub fn tempdir(name: &str) -> Result<tempfile::TempDir, SolcIoError> {
 
 /// Reads the json file and deserialize it into the provided type.
 pub fn read_json_file<T: DeserializeOwned>(path: &Path) -> Result<T, SolcError> {
+    read_json_file_with(path, |json| serde_json::from_str(json))
+}
+
+/// Reads a JSON file using a custom deserializer after validating its UTF-8.
+pub fn read_json_file_with<T>(
+    path: &Path,
+    deserialize: impl FnOnce(&str) -> serde_json::Result<T>,
+) -> Result<T, SolcError> {
     // See: https://github.com/serde-rs/json/issues/160
-    let s = fs::read_to_string(path).map_err(|err| SolcError::io(err, path))?;
-    serde_json::from_str(&s).map_err(Into::into)
+    let bytes = fs::read(path).map_err(|err| SolcError::io(err, path))?;
+    let s = simdutf8::basic::from_utf8(&bytes).map_err(|_| {
+        SolcError::io(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            ),
+            path,
+        )
+    })?;
+    deserialize(s).map_err(Into::into)
 }
 
 /// Writes serializes the provided value to JSON and writes it to a file.
@@ -513,6 +530,25 @@ pub fn mkdir_or_touch(tmp: &std::path::Path, paths: &[&str]) {
 mod tests {
     pub use super::*;
     pub use std::fs::{File, create_dir_all};
+
+    #[test]
+    fn json_read_preserves_utf8_and_errors() {
+        let dir = tempdir("json-read").unwrap();
+        let path = dir.path().join("artifact.json");
+        for value in ["", "ascii", "é日本語🦀", "\\\"\n"] {
+            fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+            assert_eq!(read_json_file::<String>(&path).unwrap(), value);
+        }
+        fs::write(&path, [b'"', 0xff, b'"']).unwrap();
+        let expected = fs::read_to_string(&path).unwrap_err();
+        let SolcError::Io(actual) = read_json_file::<String>(&path).unwrap_err() else {
+            panic!("expected UTF-8 IO error");
+        };
+        assert_eq!(actual.source().kind(), expected.kind());
+        assert_eq!(actual.source().to_string(), expected.to_string());
+        fs::write(&path, "{").unwrap();
+        assert!(matches!(read_json_file::<String>(&path), Err(SolcError::SerdeJson(_))));
+    }
 
     #[test]
     fn can_create_parent_dirs_with_ext() {

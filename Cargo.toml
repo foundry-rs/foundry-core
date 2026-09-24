@@ -220,6 +220,7 @@ reqwest = { version = "0.13.3", default-features = false, features = ["rustls"] 
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }
+simdutf8 = "0.1.5"
 snapbox = "1.2.1"
 solar = { package = "solar-compiler", version = "=0.2.0", default-features = false }
 svm = { package = "svm-rs", version = "0.5.25", default-features = false }
