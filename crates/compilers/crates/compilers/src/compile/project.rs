@@ -112,17 +112,16 @@ use crate::{
     report,
     resolver::{GraphEdges, ResolvedSources},
 };
+use alloy_primitives::keccak256;
 use foundry_compilers_artifacts::{Contract, sources::SourceCompilationKind};
 use foundry_compilers_core::error::{Result, SolcError};
 use rayon::prelude::*;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
-use std::path::Path;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
     fmt::Debug,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -392,13 +391,32 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let slash_paths = self.project.slash_paths;
 
         // drive the compiler statemachine to completion
-        let mut output = self.preprocess()?.compile()?.write_artifacts()?.write_cache()?;
+        let mut output = self.preprocess()?.compile(None)?.write_artifacts()?.write_cache()?;
 
         if slash_paths {
             // ensures we always use `/` paths
             output.slash_paths();
         }
 
+        Ok(output)
+    }
+
+    /// Compiles normally while allowing self-contained compiler responses to be reused.
+    ///
+    /// Artifact naming, diagnostics, preprocessing, and build contexts still follow the current
+    /// request. Use an uncached project to retain full-compilation semantics. The directory is
+    /// dedicated to response storage, with one replaceable entry per version/language/profile.
+    /// Unsupported compilers and unavailable storage retain ordinary compilation behavior.
+    pub fn compile_with_response_cache(
+        self,
+        directory: &Path,
+    ) -> Result<ProjectCompileOutput<C, T>> {
+        let slash_paths = self.project.slash_paths;
+        let mut output =
+            self.preprocess()?.compile(Some(directory))?.write_artifacts()?.write_cache()?;
+        if slash_paths {
+            output.slash_paths();
+        }
         Ok(output)
     }
 
@@ -448,7 +466,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
         let mut output = if !project.cached
             || state.sources.sources.values().flatten().all(|(_, sources, _)| sources.is_empty())
         {
-            state.compile()?.write_artifacts_if(false)?.write_cache_if(false)?
+            state.compile(None)?.write_artifacts_if(false)?.write_cache_if(false)?
         } else {
             let PreprocessedState { mut sources, cache, primary_profiles, preprocessor } = state;
             let normal_mocks = cache.mocks();
@@ -495,7 +513,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                         debug!(%err, "ABI cache unavailable; compiling without persistence");
                         let mut output =
                             PreprocessedState { sources, cache, primary_profiles, preprocessor }
-                                .compile()?
+                                .compile(None)?
                                 .write_artifacts_if(false)?
                                 .write_cache_if(false)?;
                         if slash_paths {
@@ -574,8 +592,8 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 None
             };
             let write = generation.is_some();
-            let mut state =
-                PreprocessedState { sources, cache, primary_profiles, preprocessor }.compile()?;
+            let mut state = PreprocessedState { sources, cache, primary_profiles, preprocessor }
+                .compile(None)?;
             // Keep classifications for secondary artifacts outside the preprocessed jobs.
             if !preserved_mocks.is_empty() {
                 let mut mocks = state.cache.mocks();
@@ -644,11 +662,11 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 {
     /// advance to the next state by compiling all sources
     #[instrument(skip_all)]
-    fn compile(self) -> Result<CompiledState<'a, T, C>> {
+    fn compile(self, response_cache: Option<&Path>) -> Result<CompiledState<'a, T, C>> {
         trace!("compiling");
         let PreprocessedState { sources, mut cache, primary_profiles, preprocessor } = self;
 
-        let mut output = sources.compile(&mut cache, preprocessor)?;
+        let mut output = sources.compile(&mut cache, preprocessor, response_cache)?;
 
         // source paths get stripped before handing them over to solc, so solc never uses absolute
         // paths, instead `--base-path <root dir>` is set. this way any metadata that's derived from
@@ -898,6 +916,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
         self,
         cache: &mut ArtifactsCache<'_, T, C>,
         preprocessor: Option<Box<dyn Preprocessor<C>>>,
+        response_cache: Option<&Path>,
     ) -> Result<AggregatedCompilerOutput<C>> {
         let project = cache.project();
         let graph = cache.graph();
@@ -1017,9 +1036,9 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
         cache.apply_native_dependency_updates(preprocessor_state.into_updates());
 
         let results = if let Some(num_jobs) = jobs_cnt {
-            compile_parallel(&project.compiler, jobs, num_jobs)
+            compile_parallel(&project.compiler, jobs, num_jobs, response_cache)
         } else {
-            compile_sequential(&project.compiler, jobs)
+            compile_sequential(&project.compiler, jobs, response_cache)
         }?;
 
         let mut aggregated = AggregatedCompilerOutput::default();
@@ -1130,6 +1149,7 @@ type CompilationResult<'a, I, E, C> = Result<Vec<(I, CompilerOutput<E, C>, &'a s
 fn compile_sequential<'a, C: Compiler>(
     compiler: &C,
     jobs: Vec<(C::Input, &'a str, Vec<PathBuf>)>,
+    response_cache: Option<&Path>,
 ) -> CompilationResult<'a, C::Input, C::CompilationError, C::CompilerContract> {
     jobs.into_iter()
         .map(|(input, profile, actually_dirty)| {
@@ -1141,7 +1161,7 @@ fn compile_sequential<'a, C: Compiler>(
                 input.settings_summary().as_deref(),
                 actually_dirty.as_slice(),
             );
-            let output = compiler.compile(&input)?;
+            let output = compile_job(compiler, &input, profile, response_cache)?;
             report::compiler_success(&input.compiler_name(), input.version(), &start.elapsed());
 
             Ok((input, output, profile, actually_dirty))
@@ -1154,6 +1174,7 @@ fn compile_parallel<'a, C: Compiler>(
     compiler: &C,
     jobs: Vec<(C::Input, &'a str, Vec<PathBuf>)>,
     num_jobs: usize,
+    response_cache: Option<&Path>,
 ) -> CompilationResult<'a, C::Input, C::CompilationError, C::CompilerContract> {
     // need to get the currently installed reporter before installing the pool, otherwise each new
     // thread in the pool will get initialized with the default value of the `thread_local!`'s
@@ -1177,7 +1198,7 @@ fn compile_parallel<'a, C: Compiler>(
                     input.settings_summary().as_deref(),
                     actually_dirty.as_slice(),
                 );
-                compiler.compile(&input).map(move |output| {
+                compile_job(compiler, &input, profile, response_cache).map(move |output| {
                     report::compiler_success(
                         &input.compiler_name(),
                         input.version(),
@@ -1188,6 +1209,22 @@ fn compile_parallel<'a, C: Compiler>(
             })
             .collect()
     })
+}
+
+/// Keeps source edits from accumulating copies of the same compiler job.
+fn compile_job<C: Compiler>(
+    compiler: &C,
+    input: &C::Input,
+    profile: &str,
+    response_cache: Option<&Path>,
+) -> Result<CompilerOutput<C::CompilationError, C::CompilerContract>> {
+    if let Some(directory) = response_cache {
+        let identity = serde_json::to_vec(&(input.language(), input.version(), profile))?;
+        let path = directory.join(format!("{}.solc-response", keccak256(identity)));
+        compiler.compile_cached(input, &path)
+    } else {
+        compiler.compile(input)
+    }
 }
 
 #[cfg(test)]
@@ -1201,8 +1238,6 @@ mod tests {
     };
     #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
-    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
-    use std::path::Path;
 
     fn known(paths: &[&str]) -> NativeDependencyState {
         NativeDependencyState::Known(paths.iter().map(PathBuf::from).collect::<BTreeSet<_>>())
@@ -1353,7 +1388,7 @@ mod tests {
         assert_eq!(cache.cache.files.len(), 3);
         assert!(cache.cache.files.values().all(|v| v.artifacts.is_empty()));
 
-        let compiled = prep.compile().unwrap();
+        let compiled = prep.compile(None).unwrap();
         assert_eq!(compiled.output.contracts.files().count(), 3);
     }
 
@@ -1451,7 +1486,7 @@ mod tests {
         assert_eq!(filtered.dirty().count(), 1);
         assert!(filtered.dirty_files().next().unwrap().ends_with("A.sol"));
 
-        let state = state.compile().unwrap();
+        let state = state.compile(None).unwrap();
         assert_eq!(state.output.sources.len(), 1);
         for (f, source) in state.output.sources.sources() {
             if f.ends_with("A.sol") {

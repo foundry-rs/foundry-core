@@ -7466,3 +7466,58 @@ contract Target {{
         );
     }
 }
+
+#[test]
+fn response_cache_preserves_fresh_artifacts_and_builds() {
+    let mut fixture = TempProject::<MultiCompiler>::dapptools().unwrap();
+    fixture.set_solc("0.8.19");
+    fixture
+        .add_source("A", "contract A { function value() public pure returns (uint) { return 1; } }")
+        .unwrap();
+    fixture
+        .add_source(
+            "nested/A",
+            "contract A { function value() public pure returns (uint) { return 2; } }",
+        )
+        .unwrap();
+    fixture.add_source("Free", "function value() pure returns (uint) { return 3; }").unwrap();
+    let mut project = fixture.project().clone();
+    project.cached = false;
+    project.no_artifacts = true;
+    let cache = fixture.root().join("responses");
+
+    for stage in 0..3 {
+        if stage == 1 {
+            fs::remove_file(fixture.paths().sources.join("A.sol")).unwrap();
+        } else if stage == 2 {
+            fixture
+                .add_source(
+                    "nested/A",
+                    "contract A { function value() public pure returns (uint) { return 4; } }",
+                )
+                .unwrap();
+        }
+        let fresh = ProjectCompiler::new(&project).unwrap().compile().unwrap();
+        fresh.assert_success();
+        for _ in 0..2 {
+            let cached = ProjectCompiler::new(&project)
+                .unwrap()
+                .compile_with_response_cache(&cache)
+                .unwrap();
+            cached.assert_success();
+            assert_eq!(cached.builds().collect::<Vec<_>>(), fresh.builds().collect::<Vec<_>>());
+            assert_eq!(
+                cached.artifact_ids().collect::<BTreeMap<_, _>>(),
+                fresh.artifact_ids().collect::<BTreeMap<_, _>>()
+            );
+            assert_eq!(
+                serde_json::to_value(&cached.output().sources).unwrap(),
+                serde_json::to_value(&fresh.output().sources).unwrap()
+            );
+            assert_eq!(cached.output().errors, fresh.output().errors);
+        }
+    }
+    // Source changes replace the compiler job's response rather than growing the store.
+    assert_eq!(fs::read_dir(cache).unwrap().count(), 1);
+    assert!(!fixture.cache_path().exists());
+}

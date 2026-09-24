@@ -371,6 +371,21 @@ impl Compiler for MultiCompiler {
         }
     }
 
+    fn compile_cached(
+        &self,
+        input: &Self::Input,
+        cache_file: &Path,
+    ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
+        if let MultiCompilerInput::Solc(input) = input
+            && let Some(solc) = &self.solc
+        {
+            return solc
+                .compile_cached(input, cache_file)
+                .map(|output| output.map_err(MultiCompilerError::Solc));
+        }
+        self.compile(input)
+    }
+
     fn available_versions(&self, language: &Self::Language) -> Vec<CompilerVersion> {
         match language {
             MultiCompilerLanguage::Solc(language) => {

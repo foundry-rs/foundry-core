@@ -439,6 +439,18 @@ pub trait Compiler: Send + Sync + Clone {
         input: &Self::Input,
     ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>>;
 
+    /// Compiles an input, optionally reusing an exact compiler response stored at `cache_file`.
+    ///
+    /// Implementations that cannot establish a self-contained invocation compile normally.
+    /// Cache failures must not prevent compilation.
+    fn compile_cached(
+        &self,
+        input: &Self::Input,
+        _cache_file: &Path,
+    ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
+        self.compile(input)
+    }
+
     /// Returns all versions available locally and remotely. Should return versions with stripped
     /// metadata.
     fn available_versions(&self, language: &Self::Language) -> Vec<CompilerVersion>;

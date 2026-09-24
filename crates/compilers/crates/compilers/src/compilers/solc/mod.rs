@@ -31,6 +31,7 @@ pub use foundry_compilers_artifacts::SolcLanguage;
 
 mod command;
 mod compiler;
+mod response_cache;
 pub use compiler::{SOLC_EXTENSIONS, Solc};
 
 #[derive(Clone, Debug)]
@@ -59,19 +60,15 @@ impl Compiler for SolcCompiler {
         &self,
         input: &Self::Input,
     ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
-        let mut solc = match self {
-            Self::Specific(solc) => solc.clone(),
+        self.compile_response(input, None)
+    }
 
-            #[cfg(feature = "svm-solc")]
-            Self::AutoDetect => Solc::find_or_install(&input.version)?,
-        };
-        solc.base_path.clone_from(&input.cli_settings.base_path);
-        solc.allow_paths.clone_from(&input.cli_settings.allow_paths);
-        solc.include_paths.clone_from(&input.cli_settings.include_paths);
-        solc.extra_args.extend_from_slice(&input.cli_settings.extra_args);
-
-        let solc_output = solc.compile(&input.input)?;
-        compiler_output(&solc, input, solc_output)
+    fn compile_cached(
+        &self,
+        input: &Self::Input,
+        cache_file: &Path,
+    ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
+        self.compile_response(input, Some(cache_file))
     }
 
     fn available_versions(&self, _language: &Self::Language) -> Vec<CompilerVersion> {
@@ -105,6 +102,32 @@ impl Compiler for SolcCompiler {
                 all_versions
             }
         }
+    }
+}
+
+impl SolcCompiler {
+    fn compile_response(
+        &self,
+        input: &SolcVersionedInput,
+        cache_file: Option<&Path>,
+    ) -> Result<CompilerOutput<Error, Contract>> {
+        let mut solc = match self {
+            Self::Specific(solc) => solc.clone(),
+
+            #[cfg(feature = "svm-solc")]
+            Self::AutoDetect => Solc::find_or_install(&input.version)?,
+        };
+        solc.base_path.clone_from(&input.cli_settings.base_path);
+        solc.allow_paths.clone_from(&input.cli_settings.allow_paths);
+        solc.include_paths.clone_from(&input.cli_settings.include_paths);
+        solc.extra_args.extend_from_slice(&input.cli_settings.extra_args);
+
+        let solc_output = if let Some(cache_file) = cache_file {
+            solc.compile_cached_response(&input.input, cache_file)?
+        } else {
+            solc.compile(&input.input)?
+        };
+        compiler_output(&solc, input, solc_output)
     }
 }
 
