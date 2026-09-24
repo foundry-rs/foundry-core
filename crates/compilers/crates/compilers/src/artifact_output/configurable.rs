@@ -171,6 +171,10 @@ impl ArtifactOutput for ConfigurableArtifacts {
     type Artifact = ConfigurableContractArtifact;
     type CompilerContract = Contract;
 
+    fn read_cached_artifact(path: &Path) -> Result<Self::Artifact, SolcError> {
+        utils::read_json_file_with(path, ConfigurableContractArtifact::from_json)
+    }
+
     /// Writes extra files for compiled artifact based on [Self::additional_files]
     fn handle_artifacts(
         &self,

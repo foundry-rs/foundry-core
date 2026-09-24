@@ -376,10 +376,8 @@ impl AsRef<[u8]> for BytecodeObject {
 
 impl<'de> Deserialize<'de> for BytecodeObject {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct BytecodeString<'a>(#[serde(borrow)] Cow<'a, str>);
-
-        let BytecodeString(value) = BytecodeString::deserialize(deserializer)?;
+        let serde_helpers::BorrowedString(value) =
+            serde_helpers::BorrowedString::deserialize(deserializer)?;
         // Library placeholders cannot be hex; avoid allocating a decode buffer and an error.
         if !value.contains('_')
             && let Ok(bytes) = value.parse()

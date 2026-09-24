@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize, de::Visitor};
+use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     path::{MAIN_SEPARATOR, Path, PathBuf},
@@ -141,27 +141,7 @@ impl<'de> Deserialize<'de> for Remapping {
     where
         D: serde::de::Deserializer<'de>,
     {
-        struct RemappingVisitor;
-
-        impl Visitor<'_> for RemappingVisitor {
-            type Value = Remapping;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a string")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                value.parse().map_err(E::custom)
-            }
-
-            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
-                let text = std::str::from_utf8(value)
-                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
-                self.visit_str(text)
-            }
-        }
-
-        deserializer.deserialize_string(RemappingVisitor)
+        crate::serde_helpers::display_from_str::deserialize(deserializer)
     }
 }
 
@@ -392,8 +372,7 @@ impl<'de> Deserialize<'de> for RelativeRemapping {
     where
         D: serde::de::Deserializer<'de>,
     {
-        let remapping = String::deserialize(deserializer)?;
-        let remapping = Remapping::from_str(&remapping).map_err(serde::de::Error::custom)?;
+        let remapping = Remapping::deserialize(deserializer)?;
         Ok(Self { context: remapping.context, name: remapping.name, path: remapping.path.into() })
     }
 }

@@ -1329,38 +1329,11 @@ pub struct MetadataSettings {
 }
 
 /// Compilation source files/source units, keys are file names
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MetadataSources {
+    #[serde(deserialize_with = "serde_helpers::deserialize_btree_map")]
     pub inner: BTreeMap<String, MetadataSource>,
-}
-
-impl<'de> Deserialize<'de> for MetadataSources {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct SourcesVisitor;
-
-        impl<'de> Visitor<'de> for SourcesVisitor {
-            type Value = MetadataSources;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a map")
-            }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0).min(4096));
-                while let Some(entry) = map.next_entry()? {
-                    entries.push(entry);
-                }
-                // Bulk construction avoids half-empty B-tree nodes from sorted source paths.
-                Ok(MetadataSources { inner: entries.into_iter().collect() })
-            }
-        }
-
-        deserializer.deserialize_map(SourcesVisitor)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1600,6 +1573,7 @@ pub struct Compiler {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
+    #[serde(deserialize_with = "serde_helpers::deserialize_small_vec")]
     pub abi: Vec<SolcAbi>,
     pub devdoc: Option<Doc>,
     pub userdoc: Option<Doc>,
@@ -1607,7 +1581,7 @@ pub struct Output {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SolcAbi {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "serde_helpers::deserialize_small_vec")]
     pub inputs: Vec<Item>,
     #[serde(rename = "stateMutability", skip_serializing_if = "Option::is_none")]
     pub state_mutability: Option<String>,
@@ -1615,7 +1589,11 @@ pub struct SolcAbi {
     pub abi_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "serde_helpers::deserialize_small_vec"
+    )]
     pub outputs: Vec<Item>,
     // required to satisfy solidity events
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1629,7 +1607,11 @@ pub struct Item {
     pub name: String,
     #[serde(rename = "type")]
     pub put_type: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "serde_helpers::deserialize_small_vec"
+    )]
     pub components: Vec<Self>,
     /// Indexed flag. for solidity events
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1649,6 +1631,7 @@ pub struct Doc {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DocLibraries {
+    #[serde(deserialize_with = "serde_helpers::deserialize_btree_map")]
     pub libs: BTreeMap<String, serde_json::Value>,
 }
 

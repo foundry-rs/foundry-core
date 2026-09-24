@@ -284,7 +284,7 @@ impl<'de> Deserialize<'de> for ContractOutputSelection {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+        crate::serde_helpers::display_from_str::deserialize(deserializer)
     }
 }
 
@@ -380,7 +380,7 @@ impl<'de> Deserialize<'de> for EvmOutputSelection {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+        crate::serde_helpers::display_from_str::deserialize(deserializer)
     }
 }
 
@@ -447,7 +447,7 @@ impl<'de> Deserialize<'de> for BytecodeOutputSelection {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+        crate::serde_helpers::display_from_str::deserialize(deserializer)
     }
 }
 
@@ -509,7 +509,7 @@ impl<'de> Deserialize<'de> for DeployedBytecodeOutputSelection {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+        crate::serde_helpers::display_from_str::deserialize(deserializer)
     }
 }
 
@@ -572,7 +572,7 @@ impl<'de> Deserialize<'de> for EwasmOutputSelection {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
+        crate::serde_helpers::display_from_str::deserialize(deserializer)
     }
 }
 
