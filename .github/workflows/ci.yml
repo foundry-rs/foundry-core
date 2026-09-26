@@ -25,11 +25,11 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           toolchain: nightly
           components: rustfmt
@@ -49,16 +49,16 @@ jobs:
         os: ["ubuntu-latest", "macos-latest"]
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           toolchain: nightly
           components: clippy
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@117919c943b804057be733b0c4034c5542e58959
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@ee2960a6cc25d99bda45614135bfe1197d879bac
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@ee2960a6cc25d99bda45614135bfe1197d879bac
       - run: cargo clippy --workspace --all-targets --all-features --locked
         env:
           RUSTFLAGS: -Dwarnings
@@ -91,7 +91,7 @@ jobs:
           - { xcode: "latest", os: "macos-latest" }
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -104,12 +104,12 @@ jobs:
             exit 1
           fi
           echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@117919c943b804057be733b0c4034c5542e58959
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@ee2960a6cc25d99bda45614135bfe1197d879bac
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           key: ${{ matrix.toolchain.xcode }}
       - run: swiftc --version
@@ -139,15 +139,15 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@117919c943b804057be733b0c4034c5542e58959
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@ee2960a6cc25d99bda45614135bfe1197d879bac
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@ee2960a6cc25d99bda45614135bfe1197d879bac
       - name: Install cargo-hack
         run: cargo install --locked --version 0.6.45 cargo-hack
       - name: cargo hack
@@ -174,21 +174,21 @@ jobs:
             flags: "--all-features"
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           toolchain: ${{ matrix.rust }}
       - name: Install nextest
-        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           tool: nextest@0.9.140
           checksum: true
           fallback: none
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@117919c943b804057be733b0c4034c5542e58959
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@ee2960a6cc25d99bda45614135bfe1197d879bac
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@ee2960a6cc25d99bda45614135bfe1197d879bac
       - name: test
         run: cargo nextest run --workspace --locked ${{ matrix.flags }}
 
@@ -200,15 +200,15 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           toolchain: stable
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@117919c943b804057be733b0c4034c5542e58959
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@ee2960a6cc25d99bda45614135bfe1197d879bac
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@ee2960a6cc25d99bda45614135bfe1197d879bac
       - run: cargo test --workspace --doc --all-features --locked
 
   docs:
@@ -219,15 +219,15 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           toolchain: nightly
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@117919c943b804057be733b0c4034c5542e58959
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@ee2960a6cc25d99bda45614135bfe1197d879bac
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@ee2960a6cc25d99bda45614135bfe1197d879bac
       - run: cargo doc --workspace --all-features --no-deps --document-private-items --locked
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings --show-type-layout --generate-link-to-definition --enable-index-page -Zunstable-options
@@ -240,14 +240,14 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/actions/secure-runner@ee2960a6cc25d99bda45614135bfe1197d879bac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/actions/typos@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/actions/typos@ee2960a6cc25d99bda45614135bfe1197d879bac
 
   deny:
-    uses: tempoxyz/gh-actions/.github/workflows/rust-deny.yml@5840979a7c849cbe541c67431ec7315cd6396e3b
+    uses: tempoxyz/gh-actions/.github/workflows/rust-deny.yml@ee2960a6cc25d99bda45614135bfe1197d879bac
     permissions:
       contents: read
       id-token: write
@@ -287,14 +287,14 @@ jobs:
 
   workflow-validation:
     name: Workflow Validation
-    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@b35994a23aaf6acf4d5e2f91d18235a6e2f90e95
+    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@ee2960a6cc25d99bda45614135bfe1197d879bac
     permissions:
       actions: read
       contents: read
       id-token: write
     with:
       pinact: true
-      secure-runner-fail-on-violation: false
+      ensure-secure-runner: false
 
   ci-success:
     runs-on: ubuntu-latest
@@ -315,7 +315,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: tempoxyz/gh-actions/actions/check-needs@117919c943b804057be733b0c4034c5542e58959
+        uses: tempoxyz/gh-actions/actions/check-needs@ee2960a6cc25d99bda45614135bfe1197d879bac
         with:
           jobs: ${{ toJSON(needs) }}
 
@@ -331,7 +331,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/JasonEtco/create-an-issue@117919c943b804057be733b0c4034c5542e58959
+      - uses: tempoxyz/gh-actions/vendor/JasonEtco/create-an-issue@ee2960a6cc25d99bda45614135bfe1197d879bac
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKFLOW_URL: |
