@@ -1,4 +1,4 @@
-//! Transactional storage for optional compiler artifacts.
+//! Transactional storage for optional ABI artifacts.
 
 use super::{ArtifactsCache, CompilerCache};
 use crate::{
@@ -18,29 +18,15 @@ use tempfile::{Builder, TempDir};
 
 /// Holds the store lock across snapshot loading, compilation, publication, and collection.
 /// The lock file is outside the store so collection cannot replace its identity.
-pub(crate) struct SecondaryCache {
+pub(crate) struct AbiCache {
     _lock: fs::File,
     root: PathBuf,
     directory: PathBuf,
-    kind: SecondaryCacheKind,
 }
 
-impl SecondaryCache {
-    pub(crate) fn open(
-        root: PathBuf,
-        directory: PathBuf,
-        write: bool,
-        kind: SecondaryCacheKind,
-    ) -> io::Result<Self> {
-        let lock = Self::lock(&root, write, kind)?;
-        Ok(Self { _lock: lock, root, directory, kind })
-    }
-
-    fn lock(root: &Path, write: bool, kind: SecondaryCacheKind) -> io::Result<fs::File> {
-        let lock_path = root.with_extension(match kind {
-            SecondaryCacheKind::Abi => "abi.lock",
-            SecondaryCacheKind::Outputs => "outputs.lock",
-        });
+impl AbiCache {
+    pub(crate) fn open(root: PathBuf, directory: PathBuf, write: bool) -> io::Result<Self> {
+        let lock_path = root.with_extension("abi.lock");
         let lock = if write {
             if let Some(parent) = lock_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -55,8 +41,8 @@ impl SecondaryCache {
             fs::File::open(lock_path)?
         };
         // Contention is a cache miss, not a reason to stall a compiler invocation.
-        lock.try_lock()?;
-        Ok(lock)
+        lock.try_lock().map_err(io::Error::other)?;
+        Ok(Self { _lock: lock, root, directory })
     }
 
     pub(crate) fn paths<L>(&self, logical: &ProjectPathsConfig<L>) -> Box<ProjectPathsConfig<L>>
@@ -196,7 +182,8 @@ impl SecondaryCache {
                 continue;
             };
             let obsolete = cache.paths != project.paths.paths_relative()
-                || (self.kind == SecondaryCacheKind::Abi
+                // Different output requests may intentionally use different optimizer settings.
+                || (directory.extension() == self.directory.extension()
                     && cache.profiles.iter().any(|(profile, settings)| {
                         !project.settings_profiles().any(|(name, current)| {
                             name == profile && current.can_use_cached(settings)
@@ -215,55 +202,4 @@ impl SecondaryCache {
             }
         }
     }
-
-    /// Removes output artifacts without racing a reader or publisher. Busy stores are retained.
-    pub(crate) fn cleanup_outputs(root: &Path) -> io::Result<()> {
-        if !root.exists() {
-            return Ok(());
-        }
-        let _lock = match Self::lock(root, true, SecondaryCacheKind::Outputs) {
-            Ok(lock) => lock,
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                debug!(?root, "output artifact cache is busy; skipping cleanup");
-                return Ok(());
-            }
-            Err(err) => return Err(err),
-        };
-        let result = if root.is_dir() { fs::remove_dir_all(root) } else { fs::remove_file(root) };
-        match result {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            result => result,
-        }
-    }
-
-    /// Ordinary cleanup must not recursively remove a locked output store or its sibling lock.
-    pub(crate) fn outputs_path_is_safe<L>(root: &Path, paths: &ProjectPathsConfig<L>) -> bool {
-        let resolve = |path: &Path| {
-            let existing = path.ancestors().find(|path| path.exists())?;
-            let suffix = path.strip_prefix(existing).ok()?;
-            if suffix.components().any(|part| !matches!(part, Component::Normal(_))) {
-                return None;
-            }
-            Some(utils::canonicalize(existing).ok()?.join(suffix))
-        };
-        // A final symlink can redirect storage while its sibling lock stays beside the entry.
-        let (Some(target), Some(parent), Some(name)) =
-            (resolve(root), root.parent().and_then(resolve), root.file_name())
-        else {
-            return false;
-        };
-        let entry = parent.join(name);
-        [&paths.artifacts, &paths.build_infos].into_iter().all(|path| {
-            path == &paths.root
-                || resolve(path)
-                    .is_some_and(|path| !target.starts_with(&path) && !entry.starts_with(path))
-        })
-    }
-}
-
-/// Selects the compiler-owned namespace and its context retention policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SecondaryCacheKind {
-    Abi,
-    Outputs,
 }

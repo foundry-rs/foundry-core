@@ -50,10 +50,7 @@ pub mod project_util;
 pub use foundry_compilers_artifacts as artifacts;
 pub use foundry_compilers_core::{error, utils};
 
-use cache::{
-    CompilerCache,
-    secondary::{SecondaryCache, SecondaryCacheKind},
-};
+use cache::CompilerCache;
 use compile::output::contracts::VersionedContracts;
 use compilers::multi::MultiCompiler;
 use foundry_compilers_artifacts::{
@@ -334,12 +331,9 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler> Pro
         ProjectCompiler::with_sources(self, sources)?.compile()
     }
 
-    /// Removes the project's artifacts and cache file.
+    /// Removes the project's artifacts and cache file
     ///
     /// If the cache file was the only file in the folder, this also removes the empty folder.
-    /// Secondary output-cache cleanup is best effort when another operation holds its lock:
-    /// that store is retained without preventing ordinary cleanup. The sibling lock file is
-    /// retained to preserve lock identity.
     ///
     /// # Examples
     /// ```
@@ -356,7 +350,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler> Pro
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn cleanup(&self) -> std::result::Result<(), SolcIoError> {
-        let abi_cache = self.secondary_cache_path(SecondaryCacheKind::Abi);
+        let abi_cache = self.abi_cache_path();
         let abi_cleanup = if abi_cache.exists() {
             if abi_cache.is_dir() {
                 std::fs::remove_dir_all(&abi_cache)
@@ -367,9 +361,6 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler> Pro
         } else {
             Ok(())
         };
-        let output_cache = self.secondary_cache_path(SecondaryCacheKind::Outputs);
-        let output_cleanup = SecondaryCache::cleanup_outputs(&output_cache)
-            .map_err(|err| SolcIoError::new(err, &output_cache));
         trace!("clean up project");
         if self.cache_path().exists() {
             std::fs::remove_file(self.cache_path())
@@ -405,15 +396,12 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler> Pro
             tracing::trace!("removed build-info dir \"{}\"", self.build_info_path().display());
         }
 
-        abi_cleanup.and(output_cleanup)
+        abi_cleanup
     }
 
-    pub(crate) fn secondary_cache_path(&self, kind: SecondaryCacheKind) -> PathBuf {
+    pub(crate) fn abi_cache_path(&self) -> PathBuf {
         let mut name = self.paths.cache.file_name().unwrap_or_default().to_os_string();
-        name.push(match kind {
-            SecondaryCacheKind::Abi => ".abi",
-            SecondaryCacheKind::Outputs => ".outputs",
-        });
+        name.push(".abi");
         self.paths.cache.with_file_name(name)
     }
 

@@ -29,7 +29,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-pub(crate) mod secondary;
+pub(crate) mod abi;
 
 mod iface;
 use iface::{interface_repr_hash, interface_repr_hash_compiler};

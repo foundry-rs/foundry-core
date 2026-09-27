@@ -105,17 +105,16 @@ use crate::{
     ProjectPathsConfig, Sources,
     artifact_output::Artifacts,
     buildinfo::RawBuildInfo,
-    cache::{
-        ArtifactsCache,
-        secondary::{SecondaryCache, SecondaryCacheKind},
-    },
+    cache::{ArtifactsCache, abi::AbiCache},
     compilers::{Compiler, CompilerInput, CompilerOutput, Language},
     filter::SparseOutputFilter,
     output::{AggregatedCompilerOutput, Builds},
     report,
     resolver::{GraphEdges, ResolvedSources},
 };
-use foundry_compilers_artifacts::{Contract, Severity, sources::SourceCompilationKind};
+use foundry_compilers_artifacts::{
+    Contract, output_selection::OutputSelection, sources::SourceCompilationKind,
+};
 use foundry_compilers_core::{
     error::{Result, SolcError},
     utils,
@@ -123,15 +122,14 @@ use foundry_compilers_core::{
 use rayon::prelude::*;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::path::Path;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
     fmt::Debug,
     path::PathBuf,
     time::Instant,
 };
-
-#[cfg(windows)]
-use std::path::Path;
 
 /// A set of different Solc installations with their version and the sources to be compiled
 pub(crate) type VersionedSources<'a, L, S> = HashMap<L, Vec<(Version, Sources, (&'a str, &'a S))>>;
@@ -434,45 +432,21 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, ConfigurableArtifacts, C> {
     /// Acquires ABI artifacts, reusing normal artifacts before consulting a separate cache.
     ///
-    /// The project must request ABI output. Normal artifacts and their manifest are never
-    /// modified by this operation. Additional output files and full build info retain ordinary
-    /// compilation behavior. Secondary persistence requires caching and artifact writes enabled.
-    /// Refreshes publish immutable generations atomically; contention or unavailable storage uses
-    /// in-memory output. Persistence prunes retired generations and invalid contexts. Distinct,
-    /// still-valid preprocessor contexts remain reusable until invalidated or explicitly cleaned.
+    /// The project must request ABI output; additional outputs are also cached. Requests with
+    /// different output selections use separate contexts. Normal artifacts and their manifest are
+    /// never modified by this operation. Additional output files and full build info retain
+    /// ordinary compilation behavior. Secondary persistence requires caching and artifact
+    /// writes enabled. Refreshes publish immutable generations atomically; contention or
+    /// unavailable storage uses in-memory output. Persistence prunes retired generations and
+    /// invalid contexts. Distinct, still-valid preprocessor contexts remain reusable until
+    /// invalidated or explicitly cleaned.
     ///
     /// Consume artifacts and build contexts from the returned in-memory output. Paths into
     /// secondary storage are temporary cache locations, not owned by that output: later ABI
     /// acquisitions or cleanup may remove them even while the returned output is still alive.
     pub fn compile_abi_cached(self) -> Result<ProjectCompileOutput<C>> {
-        self.compile_secondary(SecondaryCacheKind::Abi)
-    }
-
-    /// Acquires requested outputs, reusing normal artifacts before consulting isolated storage.
-    ///
-    /// The secondary cache does not modify normal artifacts or their manifest. Persistence
-    /// requires caching and artifact writes enabled. Full build info, additional output files, and
-    /// warning or info denial retain ordinary compilation behavior. Unavailable or contended
-    /// storage compiles in memory. Settings variants coexist until their source dependencies
-    /// change or cleanup runs. Secondary storage is disabled inside ordinary artifact or
-    /// build-info directories so cleanup cannot remove an active cache generation. Set
-    /// [`Project::cached`] to false when the caller requires compilation even if cached outputs
-    /// exist.
-    ///
-    /// Consume artifacts from the returned in-memory output. Secondary artifact paths are
-    /// temporary: later acquisitions or cleanup may remove them while the returned output
-    /// remains alive.
-    pub fn compile_outputs_cached(self) -> Result<ProjectCompileOutput<C>> {
-        self.compile_secondary(SecondaryCacheKind::Outputs)
-    }
-
-    fn compile_secondary(self, kind: SecondaryCacheKind) -> Result<ProjectCompileOutput<C>> {
         let project = self.project;
-        if project.build_info
-            || project.artifacts.additional_files != Default::default()
-            || (kind == SecondaryCacheKind::Outputs
-                && project.compiler_severity_filter != Severity::Error)
-        {
+        if project.build_info || project.artifacts.additional_files != Default::default() {
             return self.compile();
         }
         let slash_paths = project.slash_paths;
@@ -480,18 +454,14 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
         let state = self.preprocess()?;
         let mut output = if !project.cached
             || state.sources.sources.values().flatten().all(|(_, sources, _)| sources.is_empty())
-            || (kind == SecondaryCacheKind::Outputs
-                && !SecondaryCache::outputs_path_is_safe(
-                    &project.secondary_cache_path(kind),
-                    &project.paths,
-                )) {
+        {
             state.compile()?.write_artifacts_if(false)?.write_cache_if(false)?
         } else {
             let PreprocessedState { mut sources, cache, primary_profiles, preprocessor } = state;
             let normal_mocks = cache.mocks();
             let normal_native_dependencies = cache.native_dependency_contexts();
             let normal_source_units = cache.preprocessor_source_units();
-            let preprocessor_context = if preprocessed {
+            let mut context = if preprocessed {
                 // Preprocessors can depend on the complete compiler job, including its source
                 // units. Separate storage keeps alternating filtered requests independent.
                 let mut jobs = sources
@@ -521,37 +491,44 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                     &normal_native_dependencies,
                     &normal_source_units,
                 ))?;
-                Some(utils::unique_hash(identity))
+                utils::unique_hash(identity)
             } else {
-                None
+                "default".to_string()
             };
-            let root = project.secondary_cache_path(kind);
-            let directory = match kind {
-                SecondaryCacheKind::Abi => {
-                    root.join(preprocessor_context.as_deref().unwrap_or("default"))
-                }
-                SecondaryCacheKind::Outputs => {
-                    let profiles = project.settings_profiles().collect::<BTreeMap<_, _>>();
-                    let mut identity = serde_json::to_value((profiles, preprocessor_context))?;
-                    identity.sort_all_objects();
-                    root.join(utils::unique_hash(serde_json::to_vec(&identity)?))
-                }
-            };
-            let store = match SecondaryCache::open(root, directory, !project.no_artifacts, kind) {
-                Ok(store) => store,
-                Err(err) => {
-                    debug!(%err, ?kind, "secondary cache unavailable; compiling without persistence");
-                    let mut output =
-                        PreprocessedState { sources, cache, primary_profiles, preprocessor }
-                            .compile()?
-                            .write_artifacts_if(false)?
-                            .write_cache_if(false)?;
-                    if slash_paths {
-                        output.slash_paths();
+            let abi = OutputSelection::common_output_selection(["abi".to_string()]);
+            let mut abi_only = true;
+            let selections = project
+                .settings_profiles()
+                .map(|(name, settings)| {
+                    let mut selections = Vec::new();
+                    settings.clone().update_output_selection(|selection| {
+                        abi_only &= *selection == abi;
+                        selections.push(selection.clone());
+                    });
+                    (name, selections)
+                })
+                .collect::<BTreeMap<_, _>>();
+            if !abi_only {
+                context.push('.');
+                context.push_str(&utils::unique_hash(serde_json::to_vec(&selections)?));
+            }
+            let directory = project.abi_cache_path().join(context);
+            let store =
+                match AbiCache::open(project.abi_cache_path(), directory, !project.no_artifacts) {
+                    Ok(store) => store,
+                    Err(err) => {
+                        debug!(%err, "ABI cache unavailable; compiling without persistence");
+                        let mut output =
+                            PreprocessedState { sources, cache, primary_profiles, preprocessor }
+                                .compile()?
+                                .write_artifacts_if(false)?
+                                .write_cache_if(false)?;
+                        if slash_paths {
+                            output.slash_paths();
+                        }
+                        return Ok(output);
                     }
-                    return Ok(output);
-                }
-            };
+                };
             let (normal_artifacts, normal_builds, edges) =
                 cache.consume(&Artifacts::default(), &Vec::new(), false)?;
             let secondary_preprocessor_version =
@@ -613,7 +590,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 match store.stage(&mut cache) {
                     Ok(generation) => Some(generation),
                     Err(SolcError::Io(err)) => {
-                        debug!(%err, ?kind, "secondary cache staging unavailable");
+                        debug!(%err, "ABI cache staging unavailable");
                         None
                     }
                     Err(err) => return Err(err),
@@ -642,7 +619,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
             if let Some(generation) = generation
                 && let Err(err) = store.publish(generation, project)
             {
-                debug!(%err, ?kind, "secondary cache publication unavailable");
+                debug!(%err, "ABI cache publication unavailable");
             }
             for (file, contracts) in normal_artifacts {
                 let cached = output.cached_artifacts.0.entry(file).or_default();

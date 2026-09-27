@@ -39,7 +39,10 @@ use std::{
     env, fs, io,
     path::{MAIN_SEPARATOR, Path, PathBuf},
     str::FromStr,
-    sync::LazyLock,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use svm::{Platform, platform};
 
@@ -1250,6 +1253,109 @@ fn optimized_import_observations_invalidate_new_consumers() {
 }
 
 #[test]
+fn abi_cache_preserves_filtered_context_after_ir_publication() {
+    #[derive(Debug)]
+    struct CountingPreprocessor(Arc<AtomicUsize>);
+
+    impl Preprocessor<MultiCompiler> for CountingPreprocessor {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.project_mut().settings.solc.optimizer.enabled = Some(false);
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    let source = project
+        .add_source(
+            "Contract",
+            "pragma solidity ^0.8.0; contract Contract { function value() public pure returns (uint) { return 1; } }",
+        )
+        .unwrap();
+    let test = project
+        .add_test(
+            "Filtered",
+            "pragma solidity ^0.8.0; import '../src/Contract.sol'; contract FilteredTest is Contract {}",
+        )
+        .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let compile_filtered = || {
+        let output = ProjectCompiler::with_sources(
+            project.project(),
+            Source::read_all([test.clone()]).unwrap(),
+        )
+        .unwrap()
+        .with_preprocessor(CountingPreprocessor(calls.clone()))
+        .compile_abi_cached()
+        .unwrap();
+        output.assert_success();
+        output
+    };
+    assert!(!compile_filtered().is_unchanged());
+    assert!(compile_filtered().is_unchanged());
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    let mut output_project = project.project().clone();
+    output_project.artifacts.additional_values.ir_optimized = true;
+    output_project.artifacts.additional_values.assembly = true;
+    for cached in [false, true] {
+        for field in ["irOptimized", "evm.assembly"] {
+            // Optimized assembly inspection enables the optimizer independently of test settings.
+            output_project.settings.solc.optimizer.enabled = Some(field == "evm.assembly");
+            output_project.update_output_selection(|selection| {
+                *selection = OutputSelection::common_output_selection([
+                    "abi".to_string(),
+                    field.to_string(),
+                ]);
+            });
+            let output = ProjectCompiler::with_sources(
+                &output_project,
+                Source::read_all([source.clone()]).unwrap(),
+            )
+            .unwrap()
+            .compile_abi_cached()
+            .unwrap();
+            output.assert_success();
+            assert_eq!(output.is_unchanged(), cached);
+            let artifact = output.find_first("Contract").unwrap();
+            assert_eq!(artifact.ir_optimized.is_some(), field == "irOptimized");
+            assert_eq!(artifact.assembly.is_some(), field == "evm.assembly");
+        }
+    }
+
+    let filtered = compile_filtered();
+    assert_eq!(
+        (filtered.is_unchanged(), calls.load(Ordering::Relaxed)),
+        (true, 1),
+        "publishing native ABI + IR must not evict an unchanged filtered ABI context",
+    );
+
+    // Non-output settings changes still retire incompatible contexts for the same outputs.
+    let mut changed_settings = project.project().clone();
+    changed_settings.settings.solc.optimizer.enabled = Some(true);
+    let output =
+        ProjectCompiler::with_sources(&changed_settings, Source::read_all([source]).unwrap())
+            .unwrap()
+            .compile_abi_cached()
+            .unwrap();
+    output.assert_success();
+    assert!(!output.is_unchanged());
+    assert!(!compile_filtered().is_unchanged());
+    assert!(compile_filtered().is_unchanged());
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[test]
 fn abi_cache_prunes_obsolete_contexts_and_preserves_valid_filters() {
     #[derive(Debug)]
     struct Noop;
@@ -1608,361 +1714,6 @@ fn abi_cache_respects_disabled_and_read_only_requests() {
     assert!(fs::read_dir(&project.paths().artifacts).unwrap().next().is_none());
     project.project().cleanup().unwrap();
     assert!(!abi_cache.exists());
-}
-
-#[test]
-fn output_cache_reuses_normal_and_missing_artifacts() {
-    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
-    project.set_solc("0.8.30");
-    project.project_mut().artifacts.additional_values.ir = true;
-    project.project_mut().update_output_selection(|selection| {
-        *selection =
-            OutputSelection::common_output_selection(["abi".to_string(), "ir".to_string()]);
-    });
-    project.add_source("Built", "pragma solidity ^0.8.0; contract Built {}").unwrap();
-    let normal = project.compile().unwrap();
-    normal.assert_success();
-    let normal_cache = fs::read(project.cache_path()).unwrap();
-    let normal_artifacts = project.artifacts_snapshot().unwrap();
-    let root = project.paths().cache.with_file_name("solidity-files-cache.json.outputs");
-    let mut narrow = project.project().clone();
-    narrow.update_output_selection(|selection| {
-        *selection = OutputSelection::common_output_selection(["ir".to_string()]);
-    });
-    let output = ProjectCompiler::new(&narrow).unwrap().compile_outputs_cached().unwrap();
-    output.assert_success();
-    assert!(output.is_unchanged());
-    assert_eq!(output.find_first("Built").unwrap().ir, normal.find_first("Built").unwrap().ir);
-    assert!(!root.exists());
-
-    project
-        .add_source(
-            "Discovered",
-            "pragma solidity ^0.8.0; import './Built.sol'; contract Discovered is Built {}",
-        )
-        .unwrap();
-    for cached in [false, true] {
-        let output = ProjectCompiler::new(&narrow).unwrap().compile_outputs_cached().unwrap();
-        output.assert_success();
-        assert_eq!(output.is_unchanged(), cached);
-        assert!(output.find_first("Built").unwrap().ir.is_some());
-        assert!(output.find_first("Discovered").unwrap().ir.is_some());
-        assert_eq!(output.graph().files().count(), 2);
-        for (id, context) in normal.builds() {
-            assert_eq!(output.builds().find(|(build, _)| *build == id).unwrap().1, context);
-        }
-        assert_eq!(fs::read(project.cache_path()).unwrap(), normal_cache);
-        assert_eq!(project.artifacts_snapshot().unwrap().artifacts, normal_artifacts.artifacts);
-    }
-}
-
-#[test]
-fn output_cache_preserves_settings_and_abi_contexts() {
-    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
-    project.set_solc("0.8.30");
-    project.project_mut().artifacts.additional_values =
-        ExtraOutputValues { ir: true, ir_optimized: true, assembly: true, ..Default::default() };
-    let source = project
-        .add_source(
-            "Contract",
-            "pragma solidity ^0.8.0; contract Contract { function value(uint x) public pure returns(uint) { return x * 3; } }",
-        )
-        .unwrap();
-    let mut abi = project.project().clone();
-    abi.update_output_selection(|selection| {
-        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
-    });
-    ProjectCompiler::new(&abi).unwrap().compile_abi_cached().unwrap().assert_success();
-    let abi_pointer = project
-        .paths()
-        .cache
-        .with_file_name("solidity-files-cache.json.abi")
-        .join("default/current");
-    let original_abi = fs::read(&abi_pointer).unwrap();
-
-    let mut variants = Vec::new();
-    for field in ["ir", "irOptimized", "evm.assembly"] {
-        let mut variant = project.project().clone();
-        variant.update_output_selection(|selection| {
-            *selection = OutputSelection::common_output_selection([field.to_string()]);
-        });
-        variants.push(variant);
-    }
-    let mut optimized = variants[1].clone();
-    optimized.settings.solc.optimizer.enabled = Some(true);
-    optimized.settings.solc.optimizer.runs = Some(1000);
-    variants.push(optimized.clone());
-    let mut profiled = variants[1].clone();
-    profiled.additional_settings.insert("optimized".to_string(), optimized.settings.clone());
-    profiled.restrictions.insert(
-        source,
-        RestrictionsWithVersion {
-            restrictions: MultiCompilerRestrictions {
-                solc: SolcRestrictions {
-                    optimizer_runs: Restriction { min: Some(1000), ..Default::default() },
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            version: None,
-        },
-    );
-    variants.push(profiled);
-
-    for cached in [false, true] {
-        for (index, variant) in variants.iter().enumerate() {
-            let output = ProjectCompiler::new(variant).unwrap().compile_outputs_cached().unwrap();
-            output.assert_success();
-            assert_eq!(output.is_unchanged(), cached, "variant {index}");
-            let artifact = output.find_first("Contract").unwrap();
-            match index {
-                0 => assert!(artifact.ir.is_some()),
-                2 => assert!(artifact.assembly.is_some()),
-                _ => assert!(artifact.ir_optimized.is_some()),
-            }
-        }
-    }
-    let root = project.paths().cache.with_file_name("solidity-files-cache.json.outputs");
-    assert_eq!(fs::read_dir(root).unwrap().count(), variants.len());
-    let output = ProjectCompiler::new(&abi).unwrap().compile_abi_cached().unwrap();
-    output.assert_success();
-    assert!(output.is_unchanged());
-    assert_eq!(fs::read(abi_pointer).unwrap(), original_abi);
-    assert!(!project.cache_path().exists());
-}
-
-#[test]
-fn output_cache_invalidates_imports_and_recovers_corruption() {
-    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
-    project.set_solc("0.8.30");
-    project.project_mut().artifacts.additional_values.ir = true;
-    project.project_mut().update_output_selection(|selection| {
-        *selection = OutputSelection::common_output_selection(["ir".to_string()]);
-    });
-    project
-        .add_source(
-            "Dependency",
-            "pragma solidity ^0.8.0; contract Dependency { function value() public pure returns(uint) { return 1; } }",
-        )
-        .unwrap();
-    project
-        .add_source(
-            "Contract",
-            "pragma solidity ^0.8.0; import './Dependency.sol'; contract Contract is Dependency {}",
-        )
-        .unwrap();
-    let original =
-        ProjectCompiler::new(project.project()).unwrap().compile_outputs_cached().unwrap();
-    original.assert_success();
-    let mut assembly = project.project().clone();
-    assembly.artifacts.additional_values.assembly = true;
-    assembly.update_output_selection(|selection| {
-        *selection = OutputSelection::common_output_selection(["evm.assembly".to_string()]);
-    });
-    ProjectCompiler::new(&assembly).unwrap().compile_outputs_cached().unwrap().assert_success();
-    let root = project.paths().cache.with_file_name("solidity-files-cache.json.outputs");
-    assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
-
-    project
-        .add_source(
-            "Dependency",
-            "pragma solidity ^0.8.0; contract Dependency { function value() public pure returns(uint) { return 2; } }",
-        )
-        .unwrap();
-    let changed =
-        ProjectCompiler::new(project.project()).unwrap().compile_outputs_cached().unwrap();
-    changed.assert_success();
-    assert!(!changed.is_unchanged());
-    assert_ne!(
-        changed.find_first("Contract").unwrap().ir,
-        original.find_first("Contract").unwrap().ir
-    );
-    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
-    let mut uncached = project.project().clone();
-    uncached.cached = false;
-    uncached.no_artifacts = true;
-    let expected = ProjectCompiler::new(&uncached).unwrap().compile().unwrap();
-    expected.assert_success();
-    assert_eq!(
-        changed.find_first("Contract").unwrap().ir,
-        expected.find_first("Contract").unwrap().ir
-    );
-
-    let directory = fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
-    let generation = directory.join(fs::read_to_string(directory.join("current")).unwrap());
-    fs::write(generation.join("artifacts/Contract.sol/Contract.json"), "invalid json").unwrap();
-    for cached in [false, true] {
-        let output =
-            ProjectCompiler::new(project.project()).unwrap().compile_outputs_cached().unwrap();
-        output.assert_success();
-        assert_eq!(output.is_unchanged(), cached);
-        assert_eq!(
-            output.find_first("Contract").unwrap().ir,
-            expected.find_first("Contract").unwrap().ir
-        );
-    }
-}
-
-#[test]
-fn output_cache_respects_disabled_and_read_only_requests() {
-    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
-    project.set_solc("0.8.30");
-    project.project_mut().artifacts.additional_values.ir = true;
-    project.project_mut().update_output_selection(|selection| {
-        *selection = OutputSelection::common_output_selection(["ir".to_string()]);
-    });
-    project.add_source("Contract", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
-    let root = project.paths().cache.with_file_name("solidity-files-cache.json.outputs");
-    for (cached, no_artifacts) in [(false, false), (true, true)] {
-        let mut variant = project.project().clone();
-        variant.cached = cached;
-        variant.no_artifacts = no_artifacts;
-        let output = ProjectCompiler::new(&variant).unwrap().compile_outputs_cached().unwrap();
-        output.assert_success();
-        assert!(!output.is_unchanged());
-        assert!(output.find_first("Contract").unwrap().ir.is_some());
-        assert!(!root.exists());
-    }
-    for directory in [&project.paths().artifacts, &project.paths().build_infos] {
-        let mut nested = project.project().clone();
-        nested.paths.cache = directory.join("nested-cache.json");
-        let output = ProjectCompiler::new(&nested).unwrap().compile_outputs_cached().unwrap();
-        output.assert_success();
-        assert!(!output.is_unchanged());
-        assert!(output.find_first("Contract").unwrap().ir.is_some());
-        assert!(!directory.join("nested-cache.json.outputs").exists());
-        assert!(!nested.cache_path().exists());
-    }
-    #[cfg(unix)]
-    {
-        let alias = project.root().join("artifacts-link");
-        std::os::unix::fs::symlink(&project.paths().artifacts, &alias).unwrap();
-        let mut nested = project.project().clone();
-        nested.paths.cache = alias.join("nested-cache.json");
-        let output = ProjectCompiler::new(&nested).unwrap().compile_outputs_cached().unwrap();
-        output.assert_success();
-        assert!(!output.is_unchanged());
-        assert!(!alias.join("nested-cache.json.outputs").exists());
-        assert!(!nested.cache_path().exists());
-
-        let outside = project.root().join("outside-cache");
-        fs::create_dir(&outside).unwrap();
-        let store = project.paths().artifacts.join("linked-cache.json.outputs");
-        std::os::unix::fs::symlink(&outside, &store).unwrap();
-        nested.paths.cache = project.paths().artifacts.join("linked-cache.json");
-        let linked = ProjectCompiler::new(&nested).unwrap().compile_outputs_cached().unwrap();
-        linked.assert_success();
-        assert!(!linked.is_unchanged());
-        assert_eq!(
-            linked.find_first("Contract").unwrap().ir,
-            output.find_first("Contract").unwrap().ir
-        );
-        assert!(fs::read_dir(outside).unwrap().next().is_none());
-        assert!(!store.with_extension("outputs.lock").exists());
-        assert!(!nested.cache_path().exists());
-    }
-    ProjectCompiler::new(project.project())
-        .unwrap()
-        .compile_outputs_cached()
-        .unwrap()
-        .assert_success();
-    let directory = fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
-    let pointer = fs::read(directory.join("current")).unwrap();
-    project.project_mut().no_artifacts = true;
-    let output = ProjectCompiler::new(project.project()).unwrap().compile_outputs_cached().unwrap();
-    output.assert_success();
-    assert!(output.is_unchanged());
-    project
-        .add_source("Contract", "pragma solidity ^0.8.0; contract Contract { uint value; }")
-        .unwrap();
-    let output = ProjectCompiler::new(project.project()).unwrap().compile_outputs_cached().unwrap();
-    output.assert_success();
-    assert!(!output.is_unchanged());
-    assert_eq!(fs::read(directory.join("current")).unwrap(), pointer);
-    assert!(!project.cache_path().exists());
-}
-
-#[test]
-fn output_cache_respects_warning_denial() {
-    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
-    project.set_solc("0.8.30");
-    project.project_mut().artifacts.additional_values.ir = true;
-    project.project_mut().ignored_error_codes.clear();
-    project.project_mut().update_output_selection(|selection| {
-        *selection = OutputSelection::common_output_selection(["ir".to_string()]);
-    });
-    project.add_source("Contract", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
-    ProjectCompiler::new(project.project())
-        .unwrap()
-        .compile_outputs_cached()
-        .unwrap()
-        .assert_success();
-    let root = project.paths().cache.with_file_name("solidity-files-cache.json.outputs");
-    let directory = fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
-    let pointer = fs::read(directory.join("current")).unwrap();
-    project.project_mut().no_artifacts = true;
-    for severity in [Severity::Warning, Severity::Info] {
-        project.project_mut().compiler_severity_filter = severity;
-        let output =
-            ProjectCompiler::new(project.project()).unwrap().compile_outputs_cached().unwrap();
-        assert!(!output.is_unchanged());
-        assert!(output.has_compiler_errors());
-        assert_eq!(fs::read(directory.join("current")).unwrap(), pointer);
-    }
-}
-
-#[test]
-fn output_cache_cleanup_preserves_active_generation() {
-    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
-    project.set_solc("0.8.30");
-    let custom_cache = project.root().join("custom-cache/compiler.json");
-    project.paths_mut().cache = custom_cache;
-    project.project_mut().artifacts.additional_values.ir = true;
-    project.project_mut().update_output_selection(|selection| {
-        *selection = OutputSelection::common_output_selection(["ir".to_string()]);
-    });
-    project.add_source("Contract", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
-    ProjectCompiler::new(project.project())
-        .unwrap()
-        .compile_outputs_cached()
-        .unwrap()
-        .assert_success();
-    project.compile().unwrap().assert_success();
-    let root = project.paths().cache.with_file_name("compiler.json.outputs");
-    let directory = fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
-    let pointer = fs::read(directory.join("current")).unwrap();
-    let lock_path = root.with_extension("outputs.lock");
-    let lock = fs::OpenOptions::new().read(true).write(true).open(&lock_path).unwrap();
-    lock.lock().unwrap();
-    project.project().cleanup().unwrap();
-    assert_eq!(fs::read(directory.join("current")).unwrap(), pointer);
-    assert!(!project.cache_path().exists());
-    assert!(!project.paths().artifacts.exists());
-    assert!(!project.paths().build_infos.exists());
-    drop(lock);
-    project.project().cleanup().unwrap();
-    assert!(!root.exists());
-    assert!(lock_path.exists());
-}
-
-#[test]
-fn output_cache_cleanup_failure_still_cleans_normal_output() {
-    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
-    let root = project.paths().cache.with_file_name("solidity-files-cache.json.outputs");
-    let lock_path = root.with_extension("outputs.lock");
-    fs::create_dir_all(&root).unwrap();
-    fs::create_dir_all(&lock_path).unwrap();
-    fs::create_dir_all(&project.paths().build_infos).unwrap();
-    fs::write(project.paths().artifacts.join("sentinel"), "normal artifact").unwrap();
-    fs::write(project.cache_path(), "normal cache").unwrap();
-    assert!(project.project().cleanup().is_err());
-    assert!(!project.cache_path().exists());
-    assert!(!project.paths().artifacts.exists());
-    assert!(!project.paths().build_infos.exists());
-    assert!(root.exists());
-    fs::remove_dir(lock_path).unwrap();
-    project.project().cleanup().unwrap();
-    assert!(!root.exists());
 }
 
 #[test]
