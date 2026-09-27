@@ -6,5 +6,5 @@ rules:
   - ignore: true
     conditions:
       - expr: >-
-          ActionRepoFullName in ["tempoxyz/gh-actions", "tempoxyz/ci"] &&
+          ActionRepoFullName == "tempoxyz/gh-actions" &&
           ActionVersion matches "^[0-9a-f]{40}$"

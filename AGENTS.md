@@ -42,7 +42,6 @@ compiler formats. Cover changed defaults and serialization in existing tests.
 Use conventional commits and PR titles: `type: description`, with an optional
 scope. Keep subjects under 50 characters where practical. Explain what changed
 and why in a short PR description; omit templates and validation boilerplate.
-Disclose AI assistance and its scope, as required by `CONTRIBUTING.md`.
 
 ### Performance PRs
 

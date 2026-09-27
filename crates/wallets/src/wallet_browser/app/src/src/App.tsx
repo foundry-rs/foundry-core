@@ -5,7 +5,7 @@ import { KeyAuthorization } from "ox/tempo";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type Address, type Chain, createWalletClient, custom, type Hex } from "viem";
 import { waitForTransactionReceipt } from "viem/actions";
-
+import { isUserRejection } from "./utils/errors.ts";
 import {
   api,
   applyChainId,
@@ -36,6 +36,7 @@ import type {
 const POLL_REQUEST_INTERVAL_MS = 1000;
 const POLL_SESSION_INTERVAL_MS = 3000;
 const CHAIN_SWITCH_EVENT_GRACE_MS = 5000;
+const USER_REJECTION_SIGNAL = "__foundry_user_rejected__";
 
 export function App() {
   useEffect(() => {
@@ -250,12 +251,17 @@ export function App() {
       });
     } catch (e: unknown) {
       const msg = errMessage(e);
+      const userRejected = isUserRejection(e);
       console.error("send failed:", msg);
 
       if (!hash) {
-        // Wallet rejected or failed before broadcasting — safe to report error.
+        // Preserve explicit user rejection; other failures remain ambiguous.
         try {
-          await api("/api/transaction/response", "POST", { id, hash: null, error: msg });
+          await api("/api/transaction/response", "POST", {
+            id,
+            hash: null,
+            error: userRejected ? USER_REJECTION_SIGNAL : msg,
+          });
         } catch {}
         updateHistory(id, "tx", { status: "failed", error: msg });
       } else {
@@ -443,7 +449,11 @@ export function App() {
       const id = pendingTx.id;
       const reason = "Rejected by user";
       try {
-        await api("/api/transaction/response", "POST", { id, hash: null, error: reason });
+        await api("/api/transaction/response", "POST", {
+          id,
+          hash: null,
+          error: USER_REJECTION_SIGNAL,
+        });
       } catch {}
       upsertHistory({
         kind: "tx",

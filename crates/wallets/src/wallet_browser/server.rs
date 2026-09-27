@@ -31,6 +31,8 @@ use {
     tempo_alloy::primitives::transaction::{KeyAuthorization, SignedKeyAuthorization},
 };
 
+pub(crate) const USER_REJECTION_SIGNAL: &str = "__foundry_user_rejected__";
+
 /// Browser wallet server.
 #[derive(Debug, Clone)]
 pub struct BrowserWalletServer<N: Network> {
@@ -153,9 +155,13 @@ impl<N: Network> BrowserWalletServer<N> {
                 if let Some(hash) = response.hash {
                     return Ok(hash);
                 } else if let Some(error) = response.error {
-                    return Err(BrowserWalletError::Rejected {
-                        operation: "Transaction",
-                        reason: error,
+                    return Err(if error == USER_REJECTION_SIGNAL {
+                        BrowserWalletError::Rejected {
+                            operation: "Transaction",
+                            reason: "Rejected by user".to_string(),
+                        }
+                    } else {
+                        BrowserWalletError::Failed { operation: "Transaction", reason: error }
                     });
                 }
                 return Err(BrowserWalletError::ServerError(
