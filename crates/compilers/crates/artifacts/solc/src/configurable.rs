@@ -260,7 +260,8 @@ impl<'de> Deserialize<'de> for DirectAbi {
                 while let Some(raw) = seq.next_element::<&serde_json::value::RawValue>()? {
                     let tag = serde_json::from_str::<Tag<'_>>(raw.get())
                         .map_err(serde::de::Error::custom)?;
-                    // Read the concrete item directly instead of buffering its entire parameter tree.
+                    // Read the concrete item directly instead of buffering its entire parameter
+                    // tree.
                     let item = match tag.kind.as_ref() {
                         "constructor" => DirectConstructor::deserialize(
                             &mut serde_json::Deserializer::from_str(raw.get()),
