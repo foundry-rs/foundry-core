@@ -8,6 +8,8 @@
 #[macro_use]
 extern crate tracing;
 
+#[cfg(feature = "azure-key-vault")]
+mod azure;
 pub mod error;
 pub mod opts;
 pub mod signer;

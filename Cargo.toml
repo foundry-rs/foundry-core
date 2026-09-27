@@ -192,6 +192,7 @@ alloy-primitives = { version = "1.6.0", features = [
 ] }
 alloy-signer = "2.2.0"
 alloy-signer-aws = "2.2.0"
+alloy-signer-azure = "2.6.1"
 alloy-signer-gcp = "2.2.0"
 alloy-signer-ledger = "2.2.0"
 alloy-signer-local = "2.2.0"
