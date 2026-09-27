@@ -129,48 +129,28 @@ impl<'a> From<&'a ConfigurableContractArtifact> for CompactContractBytecodeCow<'
 struct DirectArtifact {
     #[serde(deserialize_with = "deserialize_direct_abi")]
     abi: Option<JsonAbi>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     bytecode: Option<CompactBytecode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "deserialize_direct_deployed")]
+    #[serde(default, deserialize_with = "deserialize_direct_deployed")]
     deployed_bytecode: Option<CompactDeployedBytecode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     assembly: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     legacy_assembly: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     opcodes: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     method_identifiers: Option<BTreeMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     generated_sources: Vec<GeneratedSource>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     function_debug_data: Option<BTreeMap<String, FunctionDebugData>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     gas_estimates: Option<GasEstimates>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     raw_metadata: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     metadata: Option<Metadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_layout: Option<StorageLayout>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     transient_storage_layout: Option<StorageLayout>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     userdoc: Option<UserDoc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     devdoc: Option<DevDoc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     ir: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     ir_optimized: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     ir_optimized_ast: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     ewasm: Option<Ewasm>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     ast: Option<Ast>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<u32>,
 }
 
@@ -258,65 +238,56 @@ impl<'de> Deserialize<'de> for DirectAbi {
             ) -> Result<Self::Value, A::Error> {
                 let mut abi = JsonAbi::new();
                 while let Some(raw) = seq.next_element::<&serde_json::value::RawValue>()? {
-                    let tag = serde_json::from_str::<Tag<'_>>(raw.get())
-                        .map_err(serde::de::Error::custom)?;
+                    let tag = Tag::deserialize(raw).map_err(serde::de::Error::custom)?;
                     // Read the concrete item directly instead of buffering its entire parameter
                     // tree.
-                    let item = match tag.kind.as_ref() {
-                        "constructor" => DirectConstructor::deserialize(
-                            &mut serde_json::Deserializer::from_str(raw.get()),
-                        )
-                        .map(Into::into),
-                        "function" => DirectFunction::deserialize(
-                            &mut serde_json::Deserializer::from_str(raw.get()),
-                        )
-                        .map(Into::into),
-                        "event" => DirectEvent::deserialize(
-                            &mut serde_json::Deserializer::from_str(raw.get()),
-                        )
-                        .map(Into::into),
-                        "error" => DirectError::deserialize(
-                            &mut serde_json::Deserializer::from_str(raw.get()),
-                        )
-                        .map(Into::into),
-                        "fallback" => serde_json::from_str::<alloy_json_abi::Fallback>(raw.get())
-                            .map(Into::into),
-                        "receive" => serde_json::from_str::<alloy_json_abi::Receive>(raw.get())
-                            .map(Into::into),
-                        _ => return Err(serde::de::Error::custom("unknown ABI item type")),
-                    }
-                    .map_err(serde::de::Error::custom)?;
-                    match item {
-                        alloy_json_abi::AbiItem::Constructor(value) => {
-                            if abi.constructor.replace(value.into_owned()).is_some() {
+                    match tag.kind.as_ref() {
+                        "constructor" => {
+                            let value = DirectConstructor::deserialize(raw)
+                                .map_err(serde::de::Error::custom)?;
+                            if abi.constructor.replace(value).is_some() {
                                 return Err(serde::de::Error::duplicate_field("constructor"));
                             }
                         }
-                        alloy_json_abi::AbiItem::Fallback(value) => {
-                            if abi.fallback.replace(value.into_owned()).is_some() {
+                        "function" => {
+                            let value = DirectFunction::deserialize(raw)
+                                .map_err(serde::de::Error::custom)?;
+                            abi.functions
+                                .entry(value.name.clone())
+                                .or_insert_with(|| Vec::with_capacity(1))
+                                .push(value);
+                        }
+                        "event" => {
+                            let value =
+                                DirectEvent::deserialize(raw).map_err(serde::de::Error::custom)?;
+                            abi.events
+                                .entry(value.name.clone())
+                                .or_insert_with(|| Vec::with_capacity(1))
+                                .push(value);
+                        }
+                        "error" => {
+                            let value =
+                                DirectError::deserialize(raw).map_err(serde::de::Error::custom)?;
+                            abi.errors
+                                .entry(value.name.clone())
+                                .or_insert_with(|| Vec::with_capacity(1))
+                                .push(value);
+                        }
+                        "fallback" => {
+                            let value = alloy_json_abi::Fallback::deserialize(raw)
+                                .map_err(serde::de::Error::custom)?;
+                            if abi.fallback.replace(value).is_some() {
                                 return Err(serde::de::Error::duplicate_field("fallback"));
                             }
                         }
-                        alloy_json_abi::AbiItem::Receive(value) => {
-                            if abi.receive.replace(value.into_owned()).is_some() {
+                        "receive" => {
+                            let value = alloy_json_abi::Receive::deserialize(raw)
+                                .map_err(serde::de::Error::custom)?;
+                            if abi.receive.replace(value).is_some() {
                                 return Err(serde::de::Error::duplicate_field("receive"));
                             }
                         }
-                        alloy_json_abi::AbiItem::Function(value) => abi
-                            .functions
-                            .entry(value.name.clone())
-                            .or_insert_with(|| Vec::with_capacity(1))
-                            .push(value.into_owned()),
-                        alloy_json_abi::AbiItem::Event(value) => abi
-                            .events
-                            .entry(value.name.clone())
-                            .or_insert_with(|| Vec::with_capacity(1))
-                            .push(value.into_owned()),
-                        alloy_json_abi::AbiItem::Error(value) => abi
-                            .errors
-                            .entry(value.name.clone())
-                            .or_insert_with(|| Vec::with_capacity(1))
-                            .push(value.into_owned()),
+                        _ => return Err(serde::de::Error::custom("unknown ABI item type")),
                     }
                 }
                 Ok(DirectAbi(abi))
@@ -424,14 +395,7 @@ mod tests {
             r#"[{"type":"function","name":"f","inputs":[],"outputs":[],"unknown":{"n":123456789012345678901234567890}}]"#,
         ] {
             let json = format!(r#"{{"abi":{abi}}}"#);
-            let expected = serde_json::from_str::<ConfigurableContractArtifact>(&json);
-            let actual = ConfigurableContractArtifact::from_json(&json);
-            match expected {
-                Ok(expected) => assert_eq!(actual.unwrap(), expected, "{json}"),
-                Err(expected) => {
-                    assert_eq!(actual.unwrap_err().to_string(), expected.to_string(), "{json}")
-                }
-            }
+            assert_matches_deserialize(&json);
         }
     }
 
@@ -462,14 +426,7 @@ mod tests {
             "[]",
         ] {
             let json = format!(r#"{{"abi":[],"deployedBytecode":{deployed},"id":7}}"#);
-            let expected = serde_json::from_str::<ConfigurableContractArtifact>(&json);
-            let actual = ConfigurableContractArtifact::from_json(&json);
-            match expected {
-                Ok(expected) => assert_eq!(actual.unwrap(), expected, "{json}"),
-                Err(expected) => {
-                    assert_eq!(actual.unwrap_err().to_string(), expected.to_string(), "{json}")
-                }
-            }
+            assert_matches_deserialize(&json);
         }
         for json in [
             "{}",
@@ -479,11 +436,17 @@ mod tests {
             r#"{"abi":[],"abi":[]}"#,
             r#"{"deployedBytecode":null,"deployedBytecode":null}"#,
         ] {
-            let expected = serde_json::from_str::<ConfigurableContractArtifact>(json);
-            let actual = ConfigurableContractArtifact::from_json(json);
-            match expected {
-                Ok(expected) => assert_eq!(actual.unwrap(), expected),
-                Err(expected) => assert_eq!(actual.unwrap_err().to_string(), expected.to_string()),
+            assert_matches_deserialize(json);
+        }
+    }
+
+    fn assert_matches_deserialize(json: &str) {
+        let expected = serde_json::from_str::<ConfigurableContractArtifact>(json);
+        let actual = ConfigurableContractArtifact::from_json(json);
+        match expected {
+            Ok(expected) => assert_eq!(actual.unwrap(), expected, "{json}"),
+            Err(expected) => {
+                assert_eq!(actual.unwrap_err().to_string(), expected.to_string(), "{json}")
             }
         }
     }

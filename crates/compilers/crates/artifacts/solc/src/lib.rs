@@ -1343,47 +1343,13 @@ pub struct MetadataSource {
     /// Required (unless "content" is used, see below): Sorted URL(s)
     /// to the source file, protocol is more or less arbitrary, but a
     /// Swarm URL is recommended
-    #[serde(default, deserialize_with = "MetadataSource::deserialize_urls")]
+    #[serde(default, deserialize_with = "serde_helpers::deserialize_small_vec")]
     pub urls: Vec<String>,
     /// Required (unless "url" is used): literal contents of the source file
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     /// Optional: SPDX license identifier as given in the source file
     pub license: Option<String>,
-}
-
-impl MetadataSource {
-    fn deserialize_urls<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Vec<String>, D::Error> {
-        struct UrlsVisitor;
-
-        impl<'de> Visitor<'de> for UrlsVisitor {
-            type Value = Vec<String>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a sequence")
-            }
-
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut seq: A,
-            ) -> Result<Self::Value, A::Error> {
-                let Some(first) = seq.next_element()? else { return Ok(Vec::new()) };
-                // Solc normally emits two URLs; Vec's initial growth reserves four slots.
-                let mut urls = Vec::with_capacity(
-                    seq.size_hint().unwrap_or(1).saturating_add(1).clamp(2, 4096),
-                );
-                urls.push(first);
-                while let Some(url) = seq.next_element()? {
-                    urls.push(url);
-                }
-                Ok(urls)
-            }
-        }
-
-        deserializer.deserialize_seq(UrlsVisitor)
-    }
 }
 
 /// Model checker settings for solc

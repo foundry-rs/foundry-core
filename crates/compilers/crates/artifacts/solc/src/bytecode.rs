@@ -7,7 +7,7 @@ use crate::{
 use alloy_primitives::{Address, Bytes, hex};
 use foundry_compilers_core::utils;
 use serde::{Deserialize, Serialize, Serializer};
-use std::{borrow::Cow, collections::BTreeMap};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -385,16 +385,7 @@ impl<'de> Deserialize<'de> for BytecodeObject {
             return Ok(Self::Bytecode(bytes));
         }
 
-        let value = match value {
-            Cow::Borrowed(value) => value.strip_prefix("0x").unwrap_or(value).to_owned(),
-            Cow::Owned(mut value) => {
-                if value.starts_with("0x") {
-                    value.drain(..2);
-                }
-                value
-            }
-        };
-        Ok(Self::Unlinked(value))
+        Ok(Self::Unlinked(serde_helpers::string_bytes::strip_prefix(value)))
     }
 }
 

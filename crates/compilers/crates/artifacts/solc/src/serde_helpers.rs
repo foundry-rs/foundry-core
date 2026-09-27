@@ -123,7 +123,11 @@ pub mod string_bytes {
         D: Deserializer<'de>,
     {
         let BorrowedString(value) = BorrowedString::deserialize(deserializer)?;
-        Ok(match value {
+        Ok(strip_prefix(value))
+    }
+
+    pub(crate) fn strip_prefix(value: Cow<'_, str>) -> String {
+        match value {
             Cow::Borrowed(value) => value.strip_prefix("0x").unwrap_or(value).to_owned(),
             Cow::Owned(mut value) => {
                 if value.starts_with("0x") {
@@ -131,13 +135,13 @@ pub mod string_bytes {
                 }
                 value
             }
-        })
+        }
     }
 }
 
 pub mod display_from_str_opt {
-    use serde::{Deserializer, Serializer, de::Visitor};
-    use std::{fmt, marker::PhantomData, str::FromStr};
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::{fmt, str::FromStr};
 
     pub fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -157,30 +161,11 @@ pub mod display_from_str_opt {
         T: FromStr,
         T::Err: fmt::Display,
     {
-        struct Optional<T>(PhantomData<T>);
+        #[derive(Deserialize)]
+        #[serde(transparent, bound(deserialize = "T: FromStr, T::Err: fmt::Display"))]
+        struct Parsed<T>(#[serde(deserialize_with = "super::display_from_str::deserialize")] T);
 
-        impl<'de, T: FromStr<Err: fmt::Display>> Visitor<'de> for Optional<T> {
-            type Value = Option<T>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("option")
-            }
-
-            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(None)
-            }
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(None)
-            }
-            fn visit_some<D: Deserializer<'de>>(
-                self,
-                deserializer: D,
-            ) -> Result<Self::Value, D::Error> {
-                super::display_from_str::deserialize(deserializer).map(Some)
-            }
-        }
-
-        deserializer.deserialize_option(Optional(PhantomData))
+        Option::<Parsed<T>>::deserialize(deserializer).map(|value| value.map(|value| value.0))
     }
 }
 
