@@ -182,11 +182,13 @@ impl AbiCache {
                 continue;
             };
             let obsolete = cache.paths != project.paths.paths_relative()
-                || cache.profiles.iter().any(|(profile, settings)| {
-                    !project
-                        .settings_profiles()
-                        .any(|(name, current)| name == profile && current.can_use_cached(settings))
-                })
+                // Different output requests may intentionally use different optimizer settings.
+                || (directory.extension() == self.directory.extension()
+                    && cache.profiles.iter().any(|(profile, settings)| {
+                        !project.settings_profiles().any(|(name, current)| {
+                            name == profile && current.can_use_cached(settings)
+                        })
+                    }))
                 || cache.files.iter().any(|(file, entry)| {
                     match crate::artifacts::Source::read(&project.root().join(file)) {
                         Ok(source) => source.content_hash() != entry.content_hash,

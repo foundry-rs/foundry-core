@@ -25,6 +25,7 @@ use foundry_compilers_artifacts::{
     },
 };
 use foundry_compilers_core::utils;
+use serde::Serialize;
 use std::{fs, path::Path};
 
 /// An `Artifact` implementation that can be configured to include additional content and emit
@@ -441,7 +442,7 @@ impl ArtifactOutput for ConfigurableArtifacts {
 }
 
 /// Determines the additional values to include in the contract's artifact file
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ExtraOutputValues {
     pub ast: bool,
     pub userdoc: bool,

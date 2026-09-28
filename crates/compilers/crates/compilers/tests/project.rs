@@ -39,7 +39,10 @@ use std::{
     env, fs, io,
     path::{MAIN_SEPARATOR, Path, PathBuf},
     str::FromStr,
-    sync::LazyLock,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use svm::{Platform, platform};
 
@@ -1247,6 +1250,130 @@ fn optimized_import_observations_invalidate_new_consumers() {
             .artifact_files()
             .any(|artifact| { artifact.file.ends_with("Caller.sol/Caller.json") })
     );
+}
+
+#[test]
+fn abi_cache_preserves_filtered_context_after_ir_publication() {
+    #[derive(Debug)]
+    struct CountingPreprocessor(Arc<AtomicUsize>);
+
+    impl Preprocessor<MultiCompiler> for CountingPreprocessor {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.project_mut().settings.solc.optimizer.enabled = Some(false);
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    let source = project
+        .add_source(
+            "Contract",
+            "pragma solidity ^0.8.0; contract Contract { function value() public pure returns (uint) { return 1; } }",
+        )
+        .unwrap();
+    let test = project
+        .add_test(
+            "Filtered",
+            "pragma solidity ^0.8.0; import '../src/Contract.sol'; contract FilteredTest is Contract {}",
+        )
+        .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let compile_filtered = || {
+        let output = ProjectCompiler::with_sources(
+            project.project(),
+            Source::read_all([test.clone()]).unwrap(),
+        )
+        .unwrap()
+        .with_preprocessor(CountingPreprocessor(calls.clone()))
+        .compile_abi_cached()
+        .unwrap();
+        output.assert_success();
+        output
+    };
+    assert!(!compile_filtered().is_unchanged());
+    assert!(compile_filtered().is_unchanged());
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    let mut output_project = project.project().clone();
+    output_project.artifacts.additional_values.ir_optimized = true;
+    output_project.artifacts.additional_values.assembly = true;
+    for cached in [false, true] {
+        for field in ["irOptimized", "evm.assembly"] {
+            // Optimized assembly inspection enables the optimizer independently of test settings.
+            output_project.settings.solc.optimizer.enabled = Some(field == "evm.assembly");
+            output_project.update_output_selection(|selection| {
+                *selection = OutputSelection::common_output_selection([
+                    "abi".to_string(),
+                    field.to_string(),
+                ]);
+            });
+            let output = ProjectCompiler::with_sources(
+                &output_project,
+                Source::read_all([source.clone()]).unwrap(),
+            )
+            .unwrap()
+            .compile_abi_cached()
+            .unwrap();
+            output.assert_success();
+            assert_eq!(output.is_unchanged(), cached);
+            let artifact = output.find_first("Contract").unwrap();
+            assert_eq!(artifact.ir_optimized.is_some(), field == "irOptimized");
+            assert_eq!(artifact.assembly.is_some(), field == "evm.assembly");
+        }
+    }
+
+    let filtered = compile_filtered();
+    assert_eq!(
+        (filtered.is_unchanged(), calls.load(Ordering::Relaxed)),
+        (true, 1),
+        "publishing native ABI + IR must not evict an unchanged filtered ABI context",
+    );
+
+    // Non-output settings changes still retire incompatible contexts for the same outputs.
+    let mut changed_settings = project.project().clone();
+    changed_settings.settings.solc.optimizer.enabled = Some(true);
+    let output =
+        ProjectCompiler::with_sources(&changed_settings, Source::read_all([source]).unwrap())
+            .unwrap()
+            .compile_abi_cached()
+            .unwrap();
+    output.assert_success();
+    assert!(!output.is_unchanged());
+    assert!(!compile_filtered().is_unchanged());
+    assert!(compile_filtered().is_unchanged());
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn abi_cache_separates_artifact_value_settings() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection([
+            "abi".to_string(),
+            "irOptimized".to_string(),
+        ]);
+    });
+    project.add_source("Contract", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
+
+    for (retain_ir, cached) in [(false, false), (true, false), (false, true), (true, true)] {
+        project.project_mut().artifacts.additional_values.ir_optimized = retain_ir;
+        let output = ProjectCompiler::new(project.project()).unwrap().compile_abi_cached().unwrap();
+        output.assert_success();
+        assert_eq!(output.is_unchanged(), cached);
+        assert_eq!(output.find_first("Contract").unwrap().ir_optimized.is_some(), retain_ir);
+    }
 }
 
 #[test]
