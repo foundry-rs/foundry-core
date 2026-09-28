@@ -9,6 +9,17 @@ export const ALL_CHAINS: readonly Chain[] = Object.freeze(Object.values(chains) 
 
 export const getChainById = (id: number) => ALL_CHAINS.find((c) => c.id === id);
 
+export const formatNetwork = (id: number | undefined) => {
+  if (id == null) return "Unknown network";
+  const name = getChainById(id)?.name ?? `Chain ${id}`;
+  return `${name} (chain ID ${id})`;
+};
+
+export const transactionTargetChainId = (
+  request: Record<string, unknown>,
+  connectedChainId: number | undefined,
+) => (request.chainId == null ? connectedChainId : parseChainId(request.chainId));
+
 export const parseChainId = (input: unknown): number | undefined => {
   if (typeof input === "number") return Number.isFinite(input) ? input : undefined;
   if (typeof input !== "string") return undefined;
