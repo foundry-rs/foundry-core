@@ -1356,6 +1356,27 @@ fn abi_cache_preserves_filtered_context_after_ir_publication() {
 }
 
 #[test]
+fn abi_cache_separates_artifact_value_settings() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection([
+            "abi".to_string(),
+            "irOptimized".to_string(),
+        ]);
+    });
+    project.add_source("Contract", "pragma solidity ^0.8.0; contract Contract {}").unwrap();
+
+    for (retain_ir, cached) in [(false, false), (true, false), (false, true), (true, true)] {
+        project.project_mut().artifacts.additional_values.ir_optimized = retain_ir;
+        let output = ProjectCompiler::new(project.project()).unwrap().compile_abi_cached().unwrap();
+        output.assert_success();
+        assert_eq!(output.is_unchanged(), cached);
+        assert_eq!(output.find_first("Contract").unwrap().ir_optimized.is_some(), retain_ir);
+    }
+}
+
+#[test]
 fn abi_cache_prunes_obsolete_contexts_and_preserves_valid_filters() {
     #[derive(Debug)]
     struct Noop;

@@ -433,13 +433,13 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
     /// Acquires ABI artifacts, reusing normal artifacts before consulting a separate cache.
     ///
     /// The project must request ABI output; additional outputs are also cached. Requests with
-    /// different output selections use separate contexts. Normal artifacts and their manifest are
-    /// never modified by this operation. Additional output files and full build info retain
-    /// ordinary compilation behavior. Secondary persistence requires caching and artifact
-    /// writes enabled. Refreshes publish immutable generations atomically; contention or
-    /// unavailable storage uses in-memory output. Persistence prunes retired generations and
-    /// invalid contexts. Distinct, still-valid preprocessor contexts remain reusable until
-    /// invalidated or explicitly cleaned.
+    /// different output selections or artifact value settings use separate contexts. Normal
+    /// artifacts and their manifest are never modified by this operation. Additional output files
+    /// and full build info retain ordinary compilation behavior. Secondary persistence requires
+    /// caching and artifact writes enabled. Refreshes publish immutable generations atomically;
+    /// contention or unavailable storage uses in-memory output. Persistence prunes retired
+    /// generations and invalid contexts. Distinct, still-valid preprocessor contexts remain
+    /// reusable until invalidated or explicitly cleaned.
     ///
     /// Consume artifacts and build contexts from the returned in-memory output. Paths into
     /// secondary storage are temporary cache locations, not owned by that output: later ABI
@@ -508,9 +508,15 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                     (name, selections)
                 })
                 .collect::<BTreeMap<_, _>>();
-            if !abi_only {
+            let values = &project.artifacts.additional_values;
+            if !abi_only || *values != Default::default() {
                 context.push('.');
-                context.push_str(&utils::unique_hash(serde_json::to_vec(&selections)?));
+                let identity = if *values == Default::default() {
+                    serde_json::to_vec(&selections)?
+                } else {
+                    serde_json::to_vec(&(selections, values))?
+                };
+                context.push_str(&utils::unique_hash(identity));
             }
             let directory = project.abi_cache_path().join(context);
             let store =
