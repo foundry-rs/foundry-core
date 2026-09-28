@@ -401,6 +401,31 @@ impl SourceParser for MultiCompilerParser {
         })
     }
 
+    fn read_all(
+        &mut self,
+        paths: &[PathBuf],
+    ) -> Vec<Result<crate::resolver::Node<Self::ParsedSource>>> {
+        let solc_paths = paths
+            .iter()
+            .filter(|path| matches!(guess_lang(path), Ok(MultiCompilerLanguage::Solc(_))))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut solc_nodes = self.solc.read_all(&solc_paths).into_iter();
+        paths
+            .iter()
+            .map(|path| {
+                if matches!(guess_lang(path), Ok(MultiCompilerLanguage::Solc(_))) {
+                    solc_nodes
+                        .next()
+                        .unwrap()
+                        .map(|node| node.map_data(MultiCompilerParsedSource::Solc))
+                } else {
+                    self.read(path)
+                }
+            })
+            .collect()
+    }
+
     fn parse_sources(
         &mut self,
         sources: &mut Sources,

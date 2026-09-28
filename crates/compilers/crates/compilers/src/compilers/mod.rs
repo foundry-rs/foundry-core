@@ -157,6 +157,11 @@ pub trait SourceParser: Clone + Debug + Send + Sync {
         Node::read(path)
     }
 
+    /// Reads and parses files in order, returning one result for each path.
+    fn read_all(&mut self, paths: &[PathBuf]) -> Vec<Result<Node<Self::ParsedSource>>> {
+        paths.iter().map(|path| self.read(path)).collect()
+    }
+
     /// Parses the sources in the given sources map.
     fn parse_sources(
         &mut self,

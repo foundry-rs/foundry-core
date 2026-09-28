@@ -435,7 +435,7 @@ impl Solc {
         let output = self.compile_output(input)?;
 
         // Only run UTF-8 validation once.
-        let output = std::str::from_utf8(&output).map_err(|_| SolcError::InvalidUtf8)?;
+        let output = simdutf8::basic::from_utf8(&output).map_err(|_| SolcError::InvalidUtf8)?;
 
         Ok(serde_json::from_str(output)?)
     }

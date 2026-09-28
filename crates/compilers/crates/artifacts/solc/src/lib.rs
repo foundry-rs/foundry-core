@@ -1283,8 +1283,16 @@ impl<'de> Deserialize<'de> for LosslessMetadata {
                 let raw_metadata = value.to_string();
                 Ok(LosslessMetadata { raw_metadata, metadata })
             }
+
+            fn visit_string<E>(self, raw_metadata: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let metadata = serde_json::from_str(&raw_metadata).map_err(E::custom)?;
+                Ok(LosslessMetadata { raw_metadata, metadata })
+            }
         }
-        deserializer.deserialize_str(LosslessMetadataVisitor)
+        deserializer.deserialize_string(LosslessMetadataVisitor)
     }
 }
 
@@ -1322,8 +1330,9 @@ pub struct MetadataSettings {
 
 /// Compilation source files/source units, keys are file names
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct MetadataSources {
-    #[serde(flatten)]
+    #[serde(deserialize_with = "serde_helpers::deserialize_btree_map")]
     pub inner: BTreeMap<String, MetadataSource>,
 }
 
@@ -1334,7 +1343,7 @@ pub struct MetadataSource {
     /// Required (unless "content" is used, see below): Sorted URL(s)
     /// to the source file, protocol is more or less arbitrary, but a
     /// Swarm URL is recommended
-    #[serde(default)]
+    #[serde(default, deserialize_with = "serde_helpers::deserialize_small_vec")]
     pub urls: Vec<String>,
     /// Required (unless "url" is used): literal contents of the source file
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1530,6 +1539,7 @@ pub struct Compiler {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
+    #[serde(deserialize_with = "serde_helpers::deserialize_small_vec")]
     pub abi: Vec<SolcAbi>,
     pub devdoc: Option<Doc>,
     pub userdoc: Option<Doc>,
@@ -1537,7 +1547,7 @@ pub struct Output {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SolcAbi {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "serde_helpers::deserialize_small_vec")]
     pub inputs: Vec<Item>,
     #[serde(rename = "stateMutability", skip_serializing_if = "Option::is_none")]
     pub state_mutability: Option<String>,
@@ -1545,7 +1555,11 @@ pub struct SolcAbi {
     pub abi_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "serde_helpers::deserialize_small_vec"
+    )]
     pub outputs: Vec<Item>,
     // required to satisfy solidity events
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1559,7 +1573,11 @@ pub struct Item {
     pub name: String,
     #[serde(rename = "type")]
     pub put_type: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "serde_helpers::deserialize_small_vec"
+    )]
     pub components: Vec<Self>,
     /// Indexed flag. for solidity events
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1577,8 +1595,9 @@ pub struct Doc {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct DocLibraries {
-    #[serde(flatten)]
+    #[serde(deserialize_with = "serde_helpers::deserialize_btree_map")]
     pub libs: BTreeMap<String, serde_json::Value>,
 }
 
@@ -2415,6 +2434,103 @@ mod tests {
 
         let value = serde_json::to_string(&c).unwrap();
         assert_eq!(s, value);
+
+        let raw = c.metadata.unwrap().raw_metadata;
+        let ptr = raw.as_ptr();
+        let metadata =
+            serde_json::from_value::<LosslessMetadata>(serde_json::Value::String(raw)).unwrap();
+        assert_eq!(metadata.raw_metadata.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn metadata_source_url_lengths() {
+        for len in 0..12 {
+            let urls = (0..len).map(|i| format!("ipfs://source-{i}")).collect::<Vec<_>>();
+            let value = serde_json::json!({"keccak256":"hash", "urls":urls});
+            let source = serde_json::from_str::<MetadataSource>(&value.to_string()).unwrap();
+            assert_eq!(source.urls, urls);
+            assert_eq!(serde_json::from_value::<MetadataSource>(value).unwrap(), source);
+            if len == 2 {
+                assert_eq!(source.urls.capacity(), 2);
+            }
+        }
+        for json in [
+            r#"{"keccak256":"hash","urls":null}"#,
+            r#"{"keccak256":"hash","urls":[1]}"#,
+            r#"{"keccak256":"hash","urls":{}}"#,
+        ] {
+            assert!(serde_json::from_str::<MetadataSource>(json).is_err());
+        }
+        let source = serde_json::from_str::<MetadataSource>(
+            r#"{"keccak256":"hash","content":"literal source"}"#,
+        )
+        .unwrap();
+        assert!(source.urls.is_empty());
+        assert_eq!(source.content.as_deref(), Some("literal source"));
+    }
+
+    #[test]
+    fn metadata_sources_bulk_map_matches_insertion() {
+        assert!(
+            MetadataSources::deserialize(serde::de::value::UnitDeserializer::<
+                serde::de::value::Error,
+            >::new())
+            .is_err()
+        );
+        for reverse in [false, true] {
+            let mut entries = (0..100)
+                .map(|i| format!(r#""{i:03}.sol":{{"keccak256":"{i}"}}"#))
+                .collect::<Vec<_>>();
+            if reverse {
+                entries.reverse();
+            }
+            entries.push(r#""050.sol":{"keccak256":"replacement"}"#.into());
+            let json = format!("{{{}}}", entries.join(","));
+            let expected = serde_json::from_str::<BTreeMap<String, MetadataSource>>(&json).unwrap();
+            let sources = serde_json::from_str::<MetadataSources>(&json).unwrap();
+            assert_eq!(sources.inner, expected);
+            assert_eq!(
+                serde_json::to_value(&sources).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn transparent_metadata_maps_match_flatten() {
+        #[derive(Deserialize, Serialize)]
+        struct LegacySources {
+            #[serde(flatten)]
+            inner: BTreeMap<String, MetadataSource>,
+        }
+        #[derive(Deserialize, Serialize)]
+        struct LegacyDocs {
+            #[serde(flatten)]
+            libs: BTreeMap<String, serde_json::Value>,
+        }
+        for json in [
+            "{}",
+            r#"{"é.sol":{"keccak256":"0x1234","urls":["ipfs://abc"],"license":"MIT","content":"日本語"}}"#,
+            r#"{"x":{"keccak256":"a"},"x":{"keccak256":"b"}}"#,
+        ] {
+            let old = serde_json::from_str::<LegacySources>(json).unwrap();
+            let new = serde_json::from_str::<MetadataSources>(json).unwrap();
+            assert_eq!(old.inner, new.inner);
+            assert_eq!(serde_json::to_string(&old).unwrap(), serde_json::to_string(&new).unwrap());
+        }
+        for json in [
+            "{}",
+            r#"{"foo()":{"notice":"hello","n":123456789012345678901234567890},"bar()":null}"#,
+        ] {
+            let old = serde_json::from_str::<LegacyDocs>(json).unwrap();
+            let new = serde_json::from_str::<DocLibraries>(json).unwrap();
+            assert_eq!(old.libs, new.libs);
+            assert_eq!(serde_json::to_string(&old).unwrap(), serde_json::to_string(&new).unwrap());
+        }
+        for json in ["null", "[]", r#"{"x":{}}"#, r#"{"x":{"keccak256":1}}"#] {
+            assert!(serde_json::from_str::<LegacySources>(json).is_err());
+            assert!(serde_json::from_str::<MetadataSources>(json).is_err());
+        }
     }
 
     #[test]

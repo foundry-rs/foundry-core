@@ -22,7 +22,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
 };
@@ -494,6 +494,32 @@ impl SourceParser for SolParser {
         let nodes = self.parse_sources(&mut sources)?;
         debug_assert_eq!(nodes.len(), 1, "{nodes:#?}");
         Ok(nodes.into_iter().next().unwrap().1)
+    }
+
+    fn read_all(&mut self, paths: &[PathBuf]) -> Vec<Result<Node<Self::ParsedSource>>> {
+        let mut sources = Sources::new();
+        let reads = paths
+            .iter()
+            .map(|path| {
+                Source::read_(path).map(|source| {
+                    sources.insert(path.clone(), source);
+                })
+            })
+            .collect::<Vec<_>>();
+        if sources.is_empty() {
+            return reads.into_iter().map(|read| Err(read.unwrap_err())).collect();
+        }
+        let Ok(nodes) = self.parse_sources(&mut sources) else {
+            return paths.iter().map(|path| self.read(path)).collect();
+        };
+        let nodes = nodes.into_iter().collect::<HashMap<_, _>>();
+        paths
+            .iter()
+            .zip(reads)
+            .map(|(path, read)| {
+                read.map(|()| nodes.get(path).cloned().expect("parsed source missing"))
+            })
+            .collect()
     }
 
     fn parse_sources(

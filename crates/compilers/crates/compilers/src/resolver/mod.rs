@@ -377,29 +377,6 @@ impl<P: SourceParser> Graph<P> {
         paths: &ProjectPathsConfig<<P::ParsedSource as ParsedSource>::Language>,
         mut sources: Sources,
     ) -> Result<Self> {
-        /// checks if the given target path was already resolved, if so it adds its id to the list
-        /// of resolved imports. If it hasn't been resolved yet, it queues in the file for
-        /// processing
-        fn add_node<P: SourceParser>(
-            parser: &mut P,
-            unresolved: &mut VecDeque<(PathBuf, Node<P::ParsedSource>)>,
-            index: &mut HashMap<PathBuf, usize>,
-            resolved_imports: &mut Vec<usize>,
-            target: PathBuf,
-        ) -> Result<()> {
-            if let Some(idx) = index.get(&target).copied() {
-                resolved_imports.push(idx);
-            } else {
-                // imported file is not part of the input files
-                let node = parser.read(&target)?;
-                unresolved.push_back((target.clone(), node));
-                let idx = index.len();
-                index.insert(target, idx);
-                resolved_imports.push(idx);
-            }
-            Ok(())
-        }
-
         // The cache relies on the absolute paths relative to the project root as cache keys.
         sources.make_absolute(&paths.root);
 
@@ -417,7 +394,6 @@ impl<P: SourceParser> Graph<P> {
 
         // contains the files and their dependencies
         let mut nodes = Vec::with_capacity(unresolved.len());
-        let mut edges = Vec::with_capacity(unresolved.len());
         let mut rev_edges = Vec::with_capacity(unresolved.len());
 
         // tracks additional paths that should be used with `--include-path`, these are libraries
@@ -429,41 +405,65 @@ impl<P: SourceParser> Graph<P> {
         // the same path
         let mut unresolved_imports = HashSet::new();
 
-        // now we need to resolve all imports for the source file and those imported from other
-        // locations
-        while let Some((path, node)) = unresolved.pop_front() {
-            let mut resolved_imports = Vec::new();
-            // parent directory of the current file
-            let cwd = match path.parent() {
-                Some(inner) => inner,
-                None => continue,
-            };
-
-            for import_path in node.data.resolve_imports(paths, &mut resolved_solc_include_paths)? {
-                if let Some(err) = match paths.resolve_import_and_include_paths(
-                    cwd,
-                    &import_path,
-                    &mut resolved_solc_include_paths,
-                ) {
-                    Ok(import) => add_node(
-                        &mut parser,
-                        &mut unresolved,
-                        &mut index,
-                        &mut resolved_imports,
-                        import,
-                    )
-                    .err(),
-                    Err(err) => Some(err),
-                } {
-                    unresolved_imports.insert((import_path.clone(), node.path.clone()));
-                    trace!("failed to resolve import component \"{:?}\" for {:?}", err, node.path)
+        // Resolve a breadth-first layer before parsing its new imports together.
+        let mut edges = Vec::with_capacity(unresolved.len());
+        while !unresolved.is_empty() {
+            let mut pending_edges = Vec::new();
+            let mut pending = Vec::new();
+            let mut importers = HashMap::<PathBuf, Vec<(PathBuf, PathBuf)>>::new();
+            while let Some((path, node)) = unresolved.pop_front() {
+                let mut resolved_imports = Vec::new();
+                let Some(cwd) = path.parent() else { continue };
+                for import_path in
+                    node.data.resolve_imports(paths, &mut resolved_solc_include_paths)?
+                {
+                    match paths.resolve_import_and_include_paths(
+                        cwd,
+                        &import_path,
+                        &mut resolved_solc_include_paths,
+                    ) {
+                        Ok(target) => {
+                            if !index.contains_key(&target) {
+                                importers
+                                    .entry(target.clone())
+                                    .or_insert_with(|| {
+                                        pending.push(target.clone());
+                                        Vec::new()
+                                    })
+                                    .push((import_path, node.path.clone()));
+                            }
+                            resolved_imports.push(target);
+                        }
+                        Err(err) => {
+                            unresolved_imports.insert((import_path.clone(), node.path.clone()));
+                            trace!(
+                                "failed to resolve import component {:?} for {:?}",
+                                err, node.path
+                            );
+                        }
+                    }
+                }
+                nodes.push(node);
+                pending_edges.push(resolved_imports);
+                rev_edges.push(Vec::new());
+            }
+            let parsed = parser.read_all(&pending);
+            for (path, result) in pending.into_iter().zip(parsed) {
+                match result {
+                    Ok(node) => {
+                        let idx = index.len();
+                        index.insert(path.clone(), idx);
+                        unresolved.push_back((path, node));
+                    }
+                    Err(err) => {
+                        unresolved_imports.extend(importers.remove(&path).unwrap_or_default());
+                        trace!("failed to read import {:?}: {:?}", path, err);
+                    }
                 }
             }
-
-            nodes.push(node);
-            edges.push(resolved_imports);
-            // Will be populated later
-            rev_edges.push(Vec::new());
+            edges.extend(pending_edges.into_iter().map(|imports| {
+                imports.into_iter().filter_map(|path| index.get(&path).copied()).collect::<Vec<_>>()
+            }));
         }
 
         // Build `rev_edges`
@@ -1097,7 +1097,7 @@ impl<P: SourceParser> Iterator for NodesIter<'_, P> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Node<S> {
     /// path of the solidity  file
     path: PathBuf,
@@ -1179,6 +1179,40 @@ enum SourceVersionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batched_imports_preserve_order_cycles_and_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ProjectPathsConfig::dapptools(dir.path()).unwrap();
+        std::fs::create_dir_all(&paths.sources).unwrap();
+        std::fs::create_dir_all(paths.root.join("lib")).unwrap();
+        let root = paths.sources.join("Root.sol");
+        let z = paths.root.join("lib/Z.sol");
+        let a = paths.root.join("lib/A.sol");
+        let shared = paths.root.join("lib/Shared.sol");
+        std::fs::write(&root, r#"import "../lib/Z.sol"; import "../lib/A.sol"; import "../lib/Z.sol"; import "../lib/Missing.sol";"#).unwrap();
+        std::fs::write(&z, r#"import "./Shared.sol";"#).unwrap();
+        std::fs::write(&a, r#"import "./Shared.sol";"#).unwrap();
+        std::fs::write(&shared, r#"import "./Z.sol";"#).unwrap();
+        let graph = Graph::<SolParser>::resolve(&paths).unwrap();
+        assert_eq!(
+            graph.files(),
+            &HashMap::from([(root.clone(), 0), (z.clone(), 1), (a, 2), (shared, 3)])
+        );
+        assert_eq!(graph.edges.edges, vec![vec![1, 2, 1], vec![3], vec![3], vec![1]]);
+        assert_eq!(
+            graph.edges.unresolved_imports,
+            HashSet::from([(PathBuf::from("../lib/Missing.sol"), root)])
+        );
+
+        let mut parser = <SolParser as SourceParser>::new(paths.with_language_ref());
+        let missing = paths.root.join("Missing.sol");
+        let results = parser.read_all(&[z.clone(), missing, z]);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+        assert!(results[2].is_ok());
+        assert_eq!(results[0].as_ref().unwrap().content(), results[2].as_ref().unwrap().content());
+    }
 
     #[test]
     fn can_resolve_hardhat_dependency_graph() {
