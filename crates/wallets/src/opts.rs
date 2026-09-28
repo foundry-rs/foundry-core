@@ -116,7 +116,8 @@ pub struct WalletOpts {
     /// Use Azure Key Vault.
     ///
     /// Ensure the AZURE_KEY_VAULT_KEY_ID environment variable is set to the key identifier, e.g.
-    /// `https://<vault>.vault.azure.net/keys/<name>/<version>`.
+    /// `https://<vault>.vault.azure.net/keys/<name>/<version>`. Without a version, the latest
+    /// version is used, so the address changes when the key is rotated.
     ///
     /// See: <https://learn.microsoft.com/azure/key-vault/keys/about-keys>
     #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "azure-key-vault"))]
