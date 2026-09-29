@@ -75,4 +75,6 @@ unknown-git = "deny"
 allow-git = [
     "https://github.com/paradigmxyz/reth",
     "https://github.com/tempoxyz/tempo",
+    # Temporary: `alloy-signer-azure` is not released yet.
+    "https://github.com/aelmanaa/alloy",
 ]

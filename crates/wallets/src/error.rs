@@ -13,6 +13,9 @@ use alloy_signer_gcp::GcpSignerError;
 #[cfg(feature = "turnkey")]
 use alloy_signer_turnkey::TurnkeySignerError;
 
+#[cfg(feature = "azure-key-vault")]
+use alloy_signer_azure::AzureSignerError;
+
 #[cfg(feature = "browser")]
 use crate::wallet_browser::error::BrowserWalletError;
 
@@ -66,6 +69,9 @@ pub enum WalletSignerError {
     #[cfg(feature = "turnkey")]
     Turnkey(#[from] TurnkeySignerError),
     #[error(transparent)]
+    #[cfg(feature = "azure-key-vault")]
+    Azure(#[from] Box<AzureSignerError>),
+    #[error(transparent)]
     #[cfg(feature = "browser")]
     Browser(#[from] BrowserWalletError),
     #[error(transparent)]
@@ -92,6 +98,10 @@ impl WalletSignerError {
 
     pub const fn turnkey_unsupported() -> Self {
         Self::UnsupportedSigner("Turnkey")
+    }
+
+    pub const fn azure_unsupported() -> Self {
+        Self::UnsupportedSigner("Azure Key Vault")
     }
 
     pub const fn browser_unsupported() -> Self {

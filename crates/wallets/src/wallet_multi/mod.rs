@@ -100,7 +100,9 @@ macro_rules! create_hw_wallets {
 /// 5. Private Keys (cleartext in CLI)
 /// 6. Private Keys (interactively via secure prompt)
 /// 7. AWS KMS
-/// 8. Turnkey
+/// 8. Google Cloud KMS
+/// 9. Turnkey
+/// 10. Azure Key Vault
 #[derive(Builder, Clone, Debug, Default, Serialize, Parser)]
 #[command(next_help_heading = "Wallet options", about = None, long_about = None)]
 pub struct MultiWalletOpts {
@@ -244,6 +246,17 @@ pub struct MultiWalletOpts {
     #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "turnkey"))]
     pub turnkey: bool,
 
+    /// Use Azure Key Vault.
+    ///
+    /// Ensure either one of AZURE_KEY_VAULT_KEY_IDS (comma-separated) or AZURE_KEY_VAULT_KEY_ID
+    /// environment variables are set to key identifiers, e.g.
+    /// `https://<vault>.vault.azure.net/keys/<name>/<version>`. Without a version, the latest
+    /// version is used, so the address changes when the key is rotated.
+    ///
+    /// See: <https://learn.microsoft.com/azure/key-vault/keys/about-keys>
+    #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "azure-key-vault"))]
+    pub azure: bool,
+
     /// Browser wallet options
     #[cfg(feature = "browser")]
     #[command(flatten)]
@@ -270,6 +283,9 @@ impl MultiWalletOpts {
         }
         if let Some(turnkey_signers) = self.turnkey_signers()? {
             signers.extend(turnkey_signers);
+        }
+        if let Some(azure_signers) = self.azure_signers().await? {
+            signers.extend(azure_signers);
         }
         if let Some((pending_keystores, unlocked)) = self.keystores()? {
             pending.extend(pending_keystores);
@@ -432,13 +448,7 @@ impl MultiWalletOpts {
         #[cfg(feature = "aws-kms")]
         if self.aws {
             let mut wallets = vec![];
-            let aws_keys = std::env::var("AWS_KMS_KEY_IDS")
-                .or(std::env::var("AWS_KMS_KEY_ID"))?
-                .split(',')
-                .map(|k| k.to_string())
-                .collect::<Vec<_>>();
-
-            for key in aws_keys {
+            for key in key_ids_from_env("AWS_KMS_KEY_IDS", "AWS_KMS_KEY_ID")? {
                 let aws_signer = WalletSigner::from_aws(key).await?;
                 wallets.push(aws_signer)
             }
@@ -500,6 +510,25 @@ impl MultiWalletOpts {
         Ok(None)
     }
 
+    /// Returns a list of Azure Key Vault signers if the Azure flag is set.
+    ///
+    /// The key identifiers are read from `AZURE_KEY_VAULT_KEY_IDS` (comma-separated) or
+    /// `AZURE_KEY_VAULT_KEY_ID`, e.g. `https://<vault>.vault.azure.net/keys/<name>/<version>`.
+    pub async fn azure_signers(&self) -> Result<Option<Vec<WalletSigner>>> {
+        #[cfg(feature = "azure-key-vault")]
+        if self.azure {
+            let mut wallets = vec![];
+            for key_id in key_ids_from_env("AZURE_KEY_VAULT_KEY_IDS", "AZURE_KEY_VAULT_KEY_ID")? {
+                let azure_signer = WalletSigner::from_azure(key_id).await?;
+                wallets.push(azure_signer);
+            }
+
+            return Ok(Some(wallets));
+        }
+
+        Ok(None)
+    }
+
     /// Returns the Turnkey address if `--turnkey` flag is set and `TURNKEY_ADDRESS` is available.
     pub fn turnkey_address(&self) -> Option<alloy_primitives::Address> {
         #[cfg(feature = "turnkey")]
@@ -515,6 +544,15 @@ impl MultiWalletOpts {
     pub async fn browser_signer<N: Network>(&self) -> Result<Option<BrowserSigner<N>>> {
         self.browser.run().await
     }
+}
+
+/// Reads comma-separated key identifiers from `ids_var`, falling back to the single `id_var`.
+///
+/// Whitespace around identifiers and empty entries are ignored.
+#[cfg(any(feature = "aws-kms", feature = "azure-key-vault"))]
+fn key_ids_from_env(ids_var: &str, id_var: &str) -> Result<Vec<String>> {
+    let ids = std::env::var(ids_var).or_else(|_| std::env::var(id_var))?;
+    Ok(ids.split(',').map(str::trim).filter(|id| !id.is_empty()).map(str::to_string).collect())
 }
 
 #[cfg(test)]
@@ -609,6 +647,7 @@ mod tests {
             ("trezor", "--mnemonic-indexes", 2),
             ("aws", "--mnemonic-indexes", 10),
             ("turnkey", "--mnemonic-indexes", 11),
+            ("azure", "--mnemonic-indexes", 12),
         ];
 
         for test_case in wallet_options {
@@ -624,6 +663,7 @@ mod tests {
                 "trezor" => assert!(args.trezor),
                 "aws" => assert!(args.aws),
                 "turnkey" => assert!(args.turnkey),
+                "azure" => assert!(args.azure),
                 _ => panic!("Should have matched one of the previous wallet options"),
             }
 
@@ -646,5 +686,28 @@ mod tests {
         );
 
         assert_eq!(wallet.available_addresses(), vec![address]);
+    }
+
+    #[test]
+    #[cfg(any(feature = "aws-kms", feature = "azure-key-vault"))]
+    fn key_ids_from_env_prefers_list() {
+        const IDS: &str = "FOUNDRY_TEST_KEY_IDS";
+        const ID: &str = "FOUNDRY_TEST_KEY_ID";
+
+        unsafe {
+            std::env::set_var(ID, "single");
+        }
+        assert_eq!(key_ids_from_env(IDS, ID).unwrap(), ["single"]);
+
+        unsafe {
+            std::env::set_var(IDS, "first, second,");
+        }
+        assert_eq!(key_ids_from_env(IDS, ID).unwrap(), ["first", "second"]);
+
+        unsafe {
+            std::env::remove_var(IDS);
+            std::env::remove_var(ID);
+        }
+        assert!(key_ids_from_env(IDS, ID).is_err());
     }
 }

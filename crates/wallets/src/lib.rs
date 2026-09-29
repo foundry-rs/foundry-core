@@ -13,6 +13,8 @@ extern crate tracing;
 #[cfg(feature = "tempo")]
 use alloy_rlp as _;
 
+#[cfg(feature = "azure-key-vault")]
+mod azure;
 pub mod error;
 pub mod opts;
 pub mod signer;
