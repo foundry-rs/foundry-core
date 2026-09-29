@@ -156,7 +156,6 @@ impl fmt::Display for Remapping {
             #[cfg(target_os = "windows")]
             {
                 // ensure we have `/` slashes on windows
-                use path_slash::PathExt;
                 s.push_str(&std::path::Path::new(context).to_slash_lossy());
             }
             #[cfg(not(target_os = "windows"))]
@@ -174,7 +173,6 @@ impl fmt::Display for Remapping {
             #[cfg(target_os = "windows")]
             {
                 // ensure we have `/` slashes on windows
-                use path_slash::PathExt;
                 format!("{}={}", name, std::path::Path::new(&self.path).to_slash_lossy())
             }
             #[cfg(not(target_os = "windows"))]
@@ -269,7 +267,6 @@ impl fmt::Display for RelativeRemapping {
             #[cfg(target_os = "windows")]
             {
                 // ensure we have `/` slashes on windows
-                use path_slash::PathExt;
                 s.push_str(&std::path::Path::new(context).to_slash_lossy());
             }
             #[cfg(not(target_os = "windows"))]
@@ -282,7 +279,6 @@ impl fmt::Display for RelativeRemapping {
             #[cfg(target_os = "windows")]
             {
                 // ensure we have `/` slashes on windows
-                use path_slash::PathExt;
                 format!("{}={}", self.name, self.path.original().to_slash_lossy())
             }
             #[cfg(not(target_os = "windows"))]

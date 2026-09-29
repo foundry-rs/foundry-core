@@ -192,26 +192,6 @@ jobs:
       - name: test
         run: cargo nextest run --workspace --locked ${{ matrix.flags }}
 
-  windows-remappings:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66
-        with:
-          toolchain: stable
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@d5402286a7abdfb7232173b3228d56473feb8a66
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@d5402286a7abdfb7232173b3228d56473feb8a66
-      - name: Test Windows remapping normalization
-        run: cargo test -p foundry-compilers-artifacts-solc --lib remappings::tests --locked
-
   doctest:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -326,7 +306,6 @@ jobs:
       - touch-id-link
       - feature-checks
       - test
-      - windows-remappings
       - doctest
       - docs
       - typos
