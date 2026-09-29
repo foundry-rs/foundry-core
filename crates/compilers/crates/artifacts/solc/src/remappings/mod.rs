@@ -5,6 +5,9 @@ use std::{
     str::FromStr,
 };
 
+#[cfg(windows)]
+use path_slash::PathExt;
+
 #[cfg(feature = "walkdir")]
 mod find;
 
@@ -188,15 +191,25 @@ impl fmt::Display for Remapping {
 }
 
 impl Remapping {
-    /// Converts any `\\` separators in the `path` to `/`.
+    /// Converts Windows separators in the target and context to `/`, preserving trailing
+    /// separators.
     #[allow(clippy::missing_const_for_fn)]
     pub fn slash_path(&mut self) {
         #[cfg(windows)]
         {
-            use path_slash::PathExt;
-            self.path = Path::new(&self.path).to_slash_lossy().to_string();
+            let slash = |path: &str| {
+                let has_boundary = path.ends_with(['/', '\\']);
+                let mut path = Path::new(path).to_slash_lossy().into_owned();
+                // Remapping targets and contexts are lexical prefixes, so their trailing
+                // separators must survive conversion (including repeated conversion).
+                if has_boundary && !path.ends_with('/') {
+                    path.push('/');
+                }
+                path
+            };
+            self.path = slash(&self.path);
             if let Some(context) = self.context.as_mut() {
-                *context = Path::new(&context).to_slash_lossy().to_string();
+                *context = slash(context);
             }
         }
     }
@@ -531,5 +544,32 @@ mod tests {
             }
         );
         assert_eq!(remapping.to_string(), "@my-lib/B.sol=lib/my-lib/B.sol".to_string());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn slash_path_preserves_prefix_boundaries() {
+        for (path, expected) in [
+            ("lib/forge-std/src/", "lib/forge-std/src/"),
+            (r"lib\forge-std\src\", "lib/forge-std/src/"),
+            (r"lib\forge-std/src/", "lib/forge-std/src/"),
+            (r"lib\forge-std\src", "lib/forge-std/src"),
+            (r"lib\forge-std\Test.sol", "lib/forge-std/Test.sol"),
+            (r"C:\project\lib/", "C:/project/lib/"),
+            (r"\\server\share\lib/", r"\\server\share/lib/"),
+            (r"\\?\C:\project/", r"\\?\C:/project/"),
+        ] {
+            let mut remapping = Remapping {
+                context: Some(path.into()),
+                name: "forge-std/".into(),
+                path: path.into(),
+            };
+            for _ in 0..2 {
+                remapping.slash_path();
+                assert_eq!(remapping.path, expected);
+                assert_eq!(remapping.context.as_deref(), Some(expected));
+                assert_eq!(remapping.name, "forge-std/");
+            }
+        }
     }
 }
