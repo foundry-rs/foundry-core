@@ -70,11 +70,11 @@ pub struct WalletOpts {
 
     /// The keystore password file path.
     ///
-    /// Used with --keystore.
+    /// Used with --keystore or --account, and ignored otherwise so that exporting
+    /// ETH_PASSWORD does not affect commands using another signer or none.
     #[arg(
         long = "password-file",
         help_heading = "Wallet options - keystore",
-        requires = "keystore_path",
         value_name = "PASSWORD_FILE",
         env = "ETH_PASSWORD"
     )]
@@ -373,5 +373,31 @@ mod tests {
         assert!(signer.is_none());
         let tempo_wallet: TempoAccountsWallet = tempo_wallet.unwrap();
         assert_eq!(tempo_wallet.account(), account);
+    }
+
+    #[tokio::test]
+    async fn eth_password_env_does_not_require_keystore() {
+        // `ETH_PASSWORD` sets `--password-file`, which only applies to keystores, so
+        // exporting it must not break commands that use another signer or none.
+        unsafe {
+            std::env::set_var("ETH_PASSWORD", "/path/to/password-file");
+        }
+        let private_key = WalletOpts::try_parse_from([
+            "foundry-cli",
+            "--private-key",
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        ]);
+        let no_wallet = WalletOpts::try_parse_from(["foundry-cli"]);
+        unsafe {
+            std::env::remove_var("ETH_PASSWORD");
+        }
+
+        let wallet = private_key.unwrap();
+        assert_eq!(wallet.keystore_password_file.as_deref(), Some("/path/to/password-file"));
+        assert_eq!(
+            wallet.signer().await.unwrap().address(),
+            Address::from_str("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266").unwrap()
+        );
+        assert!(no_wallet.is_ok());
     }
 }

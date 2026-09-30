@@ -200,11 +200,11 @@ pub struct MultiWalletOpts {
 
     /// The keystore password file path.
     ///
-    /// Used with --keystore.
+    /// Used with --keystore or --account, and ignored otherwise so that exporting
+    /// ETH_PASSWORD does not affect commands using another signer or none.
     #[arg(
         long = "password-file",
         help_heading = "Wallet options - keystore",
-        requires = "keystore_paths",
         value_name = "PATHS",
         env = "ETH_PASSWORD"
     )]
@@ -646,5 +646,24 @@ mod tests {
         );
 
         assert_eq!(wallet.available_addresses(), vec![address]);
+    }
+
+    #[test]
+    fn eth_password_env_does_not_require_keystore() {
+        unsafe {
+            std::env::set_var("ETH_PASSWORD", "/path/to/password-file");
+        }
+        let args = MultiWalletOpts::try_parse_from([
+            "foundry-cli",
+            "--private-keys",
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        ]);
+        unsafe {
+            std::env::remove_var("ETH_PASSWORD");
+        }
+
+        let args = args.unwrap();
+        assert_eq!(args.keystore_password_files, Some(vec!["/path/to/password-file".to_string()]));
+        assert_eq!(args.private_keys.map(|keys| keys.len()), Some(1));
     }
 }
