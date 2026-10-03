@@ -15,6 +15,7 @@ use foundry_compilers_core::{
     utils,
 };
 use itertools::Itertools;
+use solar::parse::Cursor;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     hash::Hash,
@@ -954,9 +955,11 @@ impl Flattener {
 
         for loc in &self.collect_licenses() {
             if loc.path == self.target {
-                let license_line = self.read_location(loc);
-                let license_start = license_line.find("SPDX-License-Identifier:").unwrap();
-                target_license = Some(license_line[license_start..].trim().to_string());
+                // Like solc, the license ends at a line break or at the end of a block comment.
+                let comment = self.read_location(loc);
+                let license_start = comment.find("SPDX-License-Identifier:").unwrap();
+                let license = comment[license_start..].split(['\n', '\r']).next().unwrap();
+                target_license = Some(license.split("*/").next().unwrap().trim().to_string());
             }
             updates.entry(loc.path.clone()).or_default().insert((
                 loc.start,
@@ -968,22 +971,29 @@ impl Flattener {
         target_license
     }
 
-    // Collects all SPDX-License-Identifier locations.
+    // Collects the locations of SPDX-License-Identifier comments. Like solc, only file-level
+    // comments outside of top-level nodes are considered.
     fn collect_licenses(&self) -> HashSet<ItemLocation> {
-        self.sources
+        self.asts
             .iter()
-            .flat_map(|(path, source)| {
-                let mut licenses = HashSet::new();
-                if let Some(license_start) = source.content.find("SPDX-License-Identifier:") {
-                    let start =
-                        source.content[..license_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
-                    let end = start
-                        + source.content[start..]
-                            .find('\n')
-                            .unwrap_or(source.content.len() - start);
-                    licenses.insert(ItemLocation { path: path.clone(), start, end });
-                }
-                licenses
+            .filter_map(|(path, ast)| {
+                let content = self.sources[path].content.as_str();
+                Cursor::new(content).with_position().find_map(|(start, token)| {
+                    let end = start + token.len as usize;
+                    (token.kind.is_comment()
+                        && content[start..end].contains("SPDX-License-Identifier:")
+                        && !ast.nodes.iter().any(|node| {
+                            let src = source_unit_part_src(node);
+                            src.start.zip(src.length).is_some_and(|(node_start, length)| {
+                                node_start < end && start < node_start + length
+                            })
+                        }))
+                    .then(|| ItemLocation {
+                        path: path.clone(),
+                        start,
+                        end,
+                    })
+                })
             })
             .collect()
     }
@@ -1105,6 +1115,23 @@ fn top_level_declaration_id(node: &SourceUnitPart) -> Option<usize> {
         SourceUnitPart::UserDefinedValueTypeDefinition(node) => Some(node.id),
         SourceUnitPart::ContractDefinition(node) => Some(node.id),
         _ => None,
+    }
+}
+
+/// Returns the source location of a top-level node.
+fn source_unit_part_src(node: &SourceUnitPart) -> &SourceLocation {
+    match node {
+        SourceUnitPart::PragmaDirective(node) => &node.src,
+        SourceUnitPart::ImportDirective(node) => &node.src,
+        SourceUnitPart::UsingForDirective(node) => &node.src,
+        SourceUnitPart::VariableDeclaration(node) => &node.src,
+        SourceUnitPart::EnumDefinition(node) => &node.src,
+        SourceUnitPart::ErrorDefinition(node) => &node.src,
+        SourceUnitPart::EventDefinition(node) => &node.src,
+        SourceUnitPart::FunctionDefinition(node) => &node.src,
+        SourceUnitPart::StructDefinition(node) => &node.src,
+        SourceUnitPart::UserDefinedValueTypeDefinition(node) => &node.src,
+        SourceUnitPart::ContractDefinition(node) => &node.src,
     }
 }
 

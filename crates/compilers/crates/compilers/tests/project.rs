@@ -7593,3 +7593,93 @@ contract Target {{
         );
     }
 }
+
+#[test]
+fn can_flatten_spdx_string_literal() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+
+    project
+        .add_source(
+            "A",
+            r#"pragma solidity ^0.8.10;
+contract A {
+    event Message(string value);
+    function a() external { emit Message("SPDX-License-Identifier: MIT"); }
+}
+"#,
+        )
+        .unwrap();
+
+    let target = project
+        .add_source(
+            "B",
+            r#"pragma solidity ^0.8.10;
+import "./A.sol";
+contract B is A {
+    function b() external { emit Message("SPDX-License-Identifier: MIT"); }
+}
+"#,
+        )
+        .unwrap();
+
+    test_flatteners(&project, &target, |result| {
+        assert_eq!(
+            result,
+            r#"pragma solidity ^0.8.10;
+
+// src/A.sol
+
+contract A {
+    event Message(string value);
+    function a() external { emit Message("SPDX-License-Identifier: MIT"); }
+}
+
+// src/B.sol
+
+contract B is A {
+    function b() external { emit Message("SPDX-License-Identifier: MIT"); }
+}
+"#
+        );
+    });
+}
+
+#[test]
+fn can_flatten_spdx_comment_on_code_line() {
+    let project = TempProject::<MultiCompiler>::dapptools().unwrap();
+
+    project
+        .add_source(
+            "A",
+            r"pragma solidity ^0.8.10;
+contract A {} // SPDX-License-Identifier: MIT
+",
+        )
+        .unwrap();
+
+    // Comments inside top-level nodes are not file-level license identifiers.
+    project
+        .add_source(
+            "C",
+            r"pragma /* SPDX-License-Identifier: MIT */ solidity ^0.8.10;
+contract/* SPDX-License-Identifier: MIT */C {}
+",
+        )
+        .unwrap();
+
+    let target = project
+        .add_source(
+            "B",
+            r#"/* SPDX-License-Identifier: MIT */ pragma solidity ^0.8.10; import "./A.sol"; import "./C.sol"; contract B is A, C {}
+"#,
+        )
+        .unwrap();
+
+    let result = Flattener::new(project.project().clone(), &target).unwrap().flatten();
+    assert_eq!(
+        result,
+        "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\n\n// src/A.sol\n\ncontract A {} \n\n// src/C.sol\n\ncontract/* SPDX-License-Identifier: MIT */C {}\n\n// src/B.sol\n    contract B is A, C {}\n"
+    );
+    let flattened = project.add_source("Flattened", result).unwrap();
+    project.project().compile_file(flattened).unwrap().assert_success();
+}
