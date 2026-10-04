@@ -97,13 +97,16 @@ impl Client {
         Client::builder().with_api_key(api_key).chain(chain)?.build()
     }
 
-    /// Create a new client with the correct endpoint with the chain
+    /// Creates a client with the chain's endpoints and `ETHERSCAN_API_KEY`.
+    ///
+    /// Legacy keyless explorers remain usable when the variable is absent.
+    /// A non-Unicode value is reported as an environment error.
     pub fn new_from_env(chain: Chain) -> Result<Self> {
         Client::builder().with_api_key(get_api_key_from_chain(chain)?).chain(chain)?.build()
     }
 
     /// Create a new client with the correct endpoints based on the chain and API key
-    /// from the default environment variable defined in [`Chain`].
+    /// from `ETHERSCAN_API_KEY`.
     ///
     /// If the environment variable is not set, create a new client without it.
     pub fn new_from_opt_env(chain: Chain) -> Result<Self> {
@@ -522,36 +525,43 @@ fn into_url(url: impl IntoUrl) -> std::result::Result<Url, reqwest::Error> {
 
 fn get_api_key_from_chain(chain: Chain) -> Result<String, EtherscanError> {
     match chain.kind() {
-        ChainKind::Named(named) => match named {
-            // Backwards compatibility, ideally these should return an error.
-            NamedChain::Gnosis
-            | NamedChain::Chiado
-            | NamedChain::Sepolia
-            | NamedChain::Rsk
-            | NamedChain::Sokol
-            | NamedChain::Poa
-            | NamedChain::Oasis
-            | NamedChain::Emerald
-            | NamedChain::EmeraldTestnet
-            | NamedChain::Evmos
-            | NamedChain::EvmosTestnet => Ok(String::new()),
-            NamedChain::AnvilHardhat | NamedChain::Dev => {
-                Err(EtherscanError::LocalNetworksNotSupported)
-            }
-
-            // Rather than get special ENV vars here, normal case is to pull overall
-            // ETHERSCAN_API_KEY
-            _ => std::env::var("ETHERSCAN_API_KEY").map_err(Into::into),
-        },
+        ChainKind::Named(NamedChain::AnvilHardhat | NamedChain::Dev) => {
+            Err(EtherscanError::LocalNetworksNotSupported)
+        }
+        ChainKind::Named(named) => std::env::var("ETHERSCAN_API_KEY")
+            .or_else(|error| {
+                // Preserve keyless construction only when no key was supplied.
+                if matches!(error, std::env::VarError::NotPresent)
+                    && matches!(
+                        named,
+                        NamedChain::Gnosis
+                            | NamedChain::Chiado
+                            | NamedChain::Sepolia
+                            | NamedChain::Rsk
+                            | NamedChain::Sokol
+                            | NamedChain::Poa
+                            | NamedChain::Oasis
+                            | NamedChain::Emerald
+                            | NamedChain::EmeraldTestnet
+                            | NamedChain::Evmos
+                            | NamedChain::EvmosTestnet
+                    )
+                {
+                    Ok(String::new())
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(Into::into),
         ChainKind::Id(_) => Err(EtherscanError::ChainNotSupported(chain)),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Client, EtherscanError, ResponseData};
-    use alloy_chains::Chain;
+    use super::*;
     use alloy_primitives::{Address, B256};
+    use std::process::Command;
 
     // <https://github.com/foundry-rs/foundry/issues/4406>
     #[test]
@@ -607,6 +617,53 @@ mod tests {
     fn local_networks_not_supported() {
         let err = Client::new_from_env(Chain::dev()).unwrap_err();
         assert!(matches!(err, EtherscanError::LocalNetworksNotSupported));
+    }
+
+    #[test]
+    fn environment_key_precedes_keyless_defaults() {
+        const CHILD_MODE: &str = "FOUNDRY_EXPLORER_ENV_TEST";
+        if let Ok(mode) = std::env::var(CHILD_MODE) {
+            let expected = (mode == "present").then_some("test-api-key");
+            for chain in [Chain::sepolia(), Chain::from_named(NamedChain::Gnosis)] {
+                assert_eq!(Client::new_from_env(chain).unwrap().api_key(), expected);
+                assert_eq!(Client::new_from_opt_env(chain).unwrap().api_key(), expected);
+            }
+            if let Some(key) = expected {
+                assert_eq!(Client::new_from_env(Chain::mainnet()).unwrap().api_key(), Some(key));
+            } else {
+                assert!(matches!(
+                    Client::new_from_env(Chain::mainnet()),
+                    Err(EtherscanError::EnvVarNotFound(_))
+                ));
+                assert_eq!(Client::new_from_opt_env(Chain::mainnet()).unwrap().api_key(), None);
+            }
+            assert!(matches!(
+                Client::new_from_env(Chain::dev()),
+                Err(EtherscanError::LocalNetworksNotSupported)
+            ));
+            assert!(matches!(
+                Client::new_from_env(Chain::from_id(u64::MAX)),
+                Err(EtherscanError::ChainNotSupported(_))
+            ));
+            std::fs::write(std::env::var("FOUNDRY_EXPLORER_ENV_TEST_DONE").unwrap(), mode).unwrap();
+            return;
+        }
+
+        // Isolate the environment without mutating it in a multithreaded test process.
+        for mode in ["present", "absent"] {
+            let completed = tempfile::NamedTempFile::new().unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "tests::environment_key_precedes_keyless_defaults"]);
+            command
+                .env(CHILD_MODE, mode)
+                .env("FOUNDRY_EXPLORER_ENV_TEST_DONE", completed.path())
+                .env_remove("ETHERSCAN_API_KEY");
+            if mode == "present" {
+                command.env("ETHERSCAN_API_KEY", "test-api-key");
+            }
+            assert!(command.status().unwrap().success());
+            assert_eq!(std::fs::read_to_string(completed.path()).unwrap(), mode);
+        }
     }
 
     #[test]
