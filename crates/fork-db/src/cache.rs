@@ -1,5 +1,6 @@
 //! Cache related abstraction
 
+use crate::state::{ForkState, StateStatus};
 use alloy_chains::Chain;
 use alloy_primitives::{Address, B256, U256, map::U256Map};
 use parking_lot::RwLock;
@@ -12,8 +13,6 @@ use revm::{
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeMap,
 };
-#[cfg(not(feature = "zstd"))]
-use std::io::{BufWriter, Write};
 use std::{
     collections::BTreeSet,
     fs,
@@ -24,6 +23,9 @@ use std::{
     },
 };
 use url::Url;
+
+#[cfg(not(feature = "zstd"))]
+use std::io::{BufWriter, Write};
 #[cfg(feature = "zstd")]
 use zstd::{Encoder, decode_all};
 
@@ -441,6 +443,8 @@ pub struct JsonBlockCacheDB<B> {
     cache_hits: AtomicU64,
     /// Number of cache lookups that scheduled a provider request.
     cache_misses: AtomicU64,
+    /// Shared read provenance, held across flushes to exclude number-based state.
+    pub(crate) state: RwLock<Option<ForkState>>,
 }
 
 impl<B> JsonBlockCacheDB<B> {
@@ -451,6 +455,7 @@ impl<B> JsonBlockCacheDB<B> {
             data: JsonBlockCacheData { meta, data: Arc::new(Default::default()) },
             cache_hits: AtomicU64::new(0),
             cache_misses: AtomicU64::new(0),
+            state: RwLock::new(None),
         }
     }
 
@@ -522,6 +527,7 @@ impl<B: ForkBlockEnv> JsonBlockCacheDB<B> {
             data,
             cache_hits: AtomicU64::new(0),
             cache_misses: AtomicU64::new(0),
+            state: RwLock::new(None),
         })
     }
 }
@@ -566,6 +572,16 @@ impl<B: Serialize + Clone> JsonBlockCacheDB<B> {
     /// When the `zstd` feature is enabled, the cache is written as zstd-compressed JSON.
     /// Otherwise, plain JSON is written.
     pub fn flush_to(&self, cache_path: &Path) {
+        // Keep the read guard until serialization finishes. A fallback must acquire the
+        // write guard before it can publish any number-based state.
+        let state = self.state.read();
+        let status = state.as_ref().map(|state| state.status.read());
+        if status
+            .as_deref()
+            .is_some_and(|status| matches!(status, StateStatus::Number | StateStatus::Invalid))
+        {
+            return;
+        }
         let path: &Path = cache_path;
 
         trace!(target: "cache", "saving json cache");

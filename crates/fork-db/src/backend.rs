@@ -5,6 +5,7 @@ use crate::{
         AccountFetchPolicy, BlockchainDb, FlushJsonBlockCacheDB, ForkBlockEnv, MemDb, StorageInfo,
     },
     error::{DatabaseError, DatabaseResult},
+    state::{ForkState, StateBlockId},
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader;
@@ -44,27 +45,6 @@ use std::{
     },
 };
 use tokio::select;
-
-/// Keep state reads hash-addressed without relying on the bare-hash extension to EIP-1898.
-/// Moonbeam parses bare hashes as block numbers, while Rootstock rejects a boolean
-/// `requireCanonical`. An explicit hash object with the optional flag omitted supports both.
-#[derive(Clone, Copy, Debug)]
-struct StateBlockId(BlockId);
-
-impl Serialize for StateBlockId {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if let BlockId::Hash(hash) = self.0
-            && hash.require_canonical.is_none()
-        {
-            use serde::ser::SerializeStruct;
-            let mut object = serializer.serialize_struct("StateBlockId", 1)?;
-            object.serialize_field("blockHash", &hash.block_hash)?;
-            object.end()
-        } else {
-            self.0.serialize(serializer)
-        }
-    }
-}
 
 /// Logged when an error is indicative that the user is trying to fork from a non-archive node.
 pub const NON_ARCHIVE_NODE_WARNING: &str = "\
@@ -223,6 +203,8 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     block_id: Option<BlockId>,
     /// Exact block anchoring state reads and block ancestry.
     block_anchor: Option<ForkBlock>,
+    /// Shared compatibility policy for state reads.
+    state: Option<ForkState>,
     /// Incremented whenever the pinned block changes.
     block_generation: u64,
     /// Whether block hashes are resolved in the remote EVM.
@@ -264,6 +246,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             incoming: rx,
             block_id,
             block_anchor,
+            state: None,
             block_generation: 0,
             block_hash_via_evm,
             account_fetch_mode: Arc::new(AtomicU8::new(ACCOUNT_FETCH_UNCHECKED)),
@@ -280,6 +263,12 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         match req {
             BackendRequest::Basic(addr, sender) => {
                 trace!(target: "backendhandler", "received request basic address={:?}", addr);
+                if let Some(state) = &self.state
+                    && let Err(err) = state.ensure_valid()
+                {
+                    let _ = sender.send(Err(DatabaseError::GetAccount(addr, Arc::new(err))));
+                    return;
+                }
                 let acc = self.db.accounts().read().get(&addr).cloned();
                 if let Some(basic) = acc {
                     self.db.cache().record_cache_hit();
@@ -312,6 +301,12 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 self.request_transaction(tx, sender);
             }
             BackendRequest::Storage(addr, idx, sender) => {
+                if let Some(state) = &self.state
+                    && let Err(err) = state.ensure_valid()
+                {
+                    let _ = sender.send(Err(DatabaseError::GetStorage(addr, idx, Arc::new(err))));
+                    return;
+                }
                 // account is already stored in the cache
                 let value =
                     self.db.storage().read().get(&addr).and_then(|acc| acc.get(&idx).copied());
@@ -361,14 +356,21 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 entry.insert(vec![listener]);
                 let provider = self.provider.clone();
                 let block_id = self.block_id.unwrap_or_default();
+                let state = self.state.clone();
                 let fut = Box::pin(async move {
-                    let storage = provider
-                        .raw_request(
-                            "eth_getStorageAt".into(),
-                            (address, idx, StateBlockId(block_id)),
-                        )
-                        .await
-                        .map_err(Into::into);
+                    let request = |block_id| {
+                        provider
+                            .raw_request(
+                                "eth_getStorageAt".into(),
+                                (address, idx, StateBlockId(block_id)),
+                            )
+                            .map(|result| result.map_err(Into::into))
+                    };
+                    let storage = if let Some(state) = state {
+                        state.read(&provider, request).await
+                    } else {
+                        request(block_id).await
+                    };
                     (storage, address, idx)
                 });
                 self.pending_requests.push(ProviderRequest::Storage(fut));
@@ -384,72 +386,14 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         let block_id = self.block_id.unwrap_or_default();
         let mode = Arc::clone(&self.account_fetch_mode);
         let policy = self.account_fetch_policy;
+        let state = self.state.clone();
         let fut = async move {
-            if policy == AccountFetchPolicy::RequireAccountInfo {
-                return Self::fetch_account_info(&provider, address, block_id)
-                    .await
-                    .map(|info| (info.balance, info.nonce, info.code))
-                    .wrap_err("fork account policy requires eth_getAccountInfo");
-            }
-            // depending on the tracked mode we can dispatch requests.
-            let initial_mode = mode.load(Ordering::Relaxed);
-            match initial_mode {
-                ACCOUNT_FETCH_UNCHECKED => {
-                    // single request for accountinfo object
-                    let acc_info_fut = Self::fetch_account_info(&provider, address, block_id);
-
-                    // tri request for account info
-                    let triple_fut = Self::fetch_account_separately(&provider, address, block_id);
-                    pin_mut!(acc_info_fut, triple_fut);
-
-                    select! {
-                        acc_info = &mut acc_info_fut => {
-                            match acc_info {
-                                Ok(info) => {
-                                 trace!(target: "backendhandler", "endpoint supports eth_getAccountInfo");
-                                    mode.store(ACCOUNT_FETCH_SUPPORTS_ACC_INFO, Ordering::Relaxed);
-                                    Ok((info.balance, info.nonce, info.code))
-                                }
-                                Err(err) => {
-                                    trace!(target: "backendhandler", ?err, "failed initial eth_getAccountInfo call");
-                                    mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
-                                    Ok(triple_fut.await?)
-                                }
-                            }
-                        }
-                        triple = &mut triple_fut => {
-                            match triple {
-                                Ok((balance, nonce, code)) => {
-                                    mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
-                                    Ok((balance, nonce, code))
-                                }
-                                Err(err) => Err(err)
-                            }
-                        }
-                    }
-                }
-
-                ACCOUNT_FETCH_SUPPORTS_ACC_INFO => {
-                    let mut res = Self::fetch_account_info(&provider, address, block_id)
-                        .await
-                        .map(|info| (info.balance, info.nonce, info.code));
-
-                    // it's possible that the configured endpoint load balances requests to multiple
-                    // instances and not all support that endpoint so we should reset here
-                    if res.is_err() {
-                        mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
-
-                        res = Self::fetch_account_separately(&provider, address, block_id).await;
-                    }
-
-                    Ok(res?)
-                }
-
-                ACCOUNT_FETCH_SEPARATE_REQUESTS => {
-                    Self::fetch_account_separately(&provider, address, block_id).await
-                }
-
-                _ => unreachable!("Invalid account fetch mode"),
+            let request =
+                |block_id| Self::fetch_account(&provider, &mode, policy, address, block_id);
+            if let Some(state) = state {
+                state.read(&provider, request).await
+            } else {
+                request(block_id).await
             }
         };
 
@@ -457,6 +401,82 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             let result = fut.await;
             (result, address)
         }))
+    }
+
+    async fn fetch_account(
+        provider: &DynProvider<N>,
+        mode: &AtomicU8,
+        policy: AccountFetchPolicy,
+        address: Address,
+        block_id: BlockId,
+    ) -> eyre::Result<(U256, u64, Bytes)> {
+        if policy == AccountFetchPolicy::RequireAccountInfo {
+            return Self::fetch_account_info(provider, address, block_id)
+                .await
+                .map(|info| (info.balance, info.nonce, info.code))
+                .wrap_err("fork account policy requires eth_getAccountInfo");
+        }
+        // depending on the tracked mode we can dispatch requests.
+        let initial_mode = mode.load(Ordering::Relaxed);
+        match initial_mode {
+            ACCOUNT_FETCH_UNCHECKED => {
+                // single request for accountinfo object
+                let acc_info_fut = Self::fetch_account_info(provider, address, block_id);
+
+                // tri request for account info
+                let triple_fut = Self::fetch_account_separately(provider, address, block_id);
+                pin_mut!(acc_info_fut, triple_fut);
+
+                select! {
+                    acc_info = &mut acc_info_fut => {
+                        match acc_info {
+                            Ok(info) => {
+                             trace!(target: "backendhandler", "endpoint supports eth_getAccountInfo");
+                                mode.store(ACCOUNT_FETCH_SUPPORTS_ACC_INFO, Ordering::Relaxed);
+                                Ok((info.balance, info.nonce, info.code))
+                            }
+                            Err(err) => {
+                                trace!(target: "backendhandler", ?err, "failed initial eth_getAccountInfo call");
+                                mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
+                                Ok(triple_fut.await?)
+                            }
+                        }
+                    }
+                    triple = &mut triple_fut => {
+                        match triple {
+                            Ok((balance, nonce, code)) => {
+                                mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
+                                Ok((balance, nonce, code))
+                            }
+                            Err(err) => Err(err)
+                        }
+                    }
+                }
+            }
+
+            ACCOUNT_FETCH_SUPPORTS_ACC_INFO => {
+                let mut res = Self::fetch_account_info(provider, address, block_id)
+                    .await
+                    .map(|info| (info.balance, info.nonce, info.code));
+
+                // it's possible that the configured endpoint load balances requests to
+                // multiple instances and not all support that
+                // endpoint so we should reset here
+                if res.is_err() {
+                    mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
+
+                    res = Self::fetch_account_separately(provider, address, block_id).await;
+                }
+
+                Ok(res?)
+            }
+
+            ACCOUNT_FETCH_SEPARATE_REQUESTS => {
+                Self::fetch_account_separately(provider, address, block_id).await
+            }
+
+            _ => unreachable!("Invalid account fetch mode"),
+        }
     }
 
     async fn fetch_account_info(
@@ -750,6 +770,12 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                 match &mut request {
                     ProviderRequest::Account(fut) => {
                         if let Poll::Ready((resp, addr)) = fut.poll_unpin(cx) {
+                            let resp = resp.and_then(|value| {
+                                if let Some(state) = &pin.state {
+                                    state.ensure_valid()?;
+                                }
+                                Ok(value)
+                            });
                             // get the response
                             let (balance, nonce, code) = match resp {
                                 Ok(res) => res,
@@ -795,6 +821,12 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                     }
                     ProviderRequest::Storage(fut) => {
                         if let Poll::Ready((resp, addr, idx)) = fut.poll_unpin(cx) {
+                            let resp = resp.and_then(|value| {
+                                if let Some(state) = &pin.state {
+                                    state.ensure_valid()?;
+                                }
+                                Ok(value)
+                            });
                             let value = match resp {
                                 Ok(value) => value,
                                 Err(err) => {
@@ -1088,6 +1120,31 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
         Self::new_anchored(provider, db, anchor, BlockId::number(anchor.rpc_number))
     }
 
+    /// Constructs an anchored backend sharing its state policy with preflight reads.
+    ///
+    /// Existing exact constructors never retry by number. This constructor allows the supplied
+    /// policy to do so, and prevents every cache flush path from persisting fallback state.
+    pub fn new_with_state<P: Provider<N> + 'static>(
+        provider: P,
+        db: BlockchainDb<B>,
+        anchor: ForkBlock,
+        state: ForkState,
+    ) -> eyre::Result<(Self, BackendHandler<N, B>)> {
+        eyre::ensure!(
+            state.block().number == anchor.rpc_number && state.block().hash == anchor.hash,
+            "fork state does not match the backend anchor"
+        );
+        state.ensure_valid()?;
+        let (backend, mut handler) = Self::new_with_anchor(provider, db, anchor)?;
+        {
+            let mut cached_state = backend.cache.0.state.write();
+            eyre::ensure!(cached_state.is_none(), "fork cache already has a state reader");
+            *cached_state = Some(state.clone());
+        }
+        handler.state = Some(state);
+        Ok((backend, handler))
+    }
+
     fn new_anchored<P: Provider<N> + 'static>(
         provider: P,
         db: BlockchainDb<B>,
@@ -1109,6 +1166,17 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
         let handler =
             BackendHandler::new(provider.erased(), db, backend_rx, Some(block_id), Some(anchor));
         Ok((Self { backend, cache, blocking_mode: Default::default(), exact: true }, handler))
+    }
+
+    /// Locks a shared state reader to hash-only access before transaction replay.
+    ///
+    /// Fails if this fork has already attempted a numeric fallback. The transition is shared
+    /// with preflight reads and in-flight requests, so none can downgrade it afterwards.
+    pub fn require_hash_state(&self) -> eyre::Result<()> {
+        if let Some(state) = self.cache.0.state.read().as_ref() {
+            state.require_hash_state()?;
+        }
+        Ok(())
     }
 
     /// Returns a new `SharedBackend` and the `BackendHandler` with a specific blocking mode
