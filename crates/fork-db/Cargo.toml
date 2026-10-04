@@ -28,7 +28,7 @@ alloy-eips = "2.2.0"
 alloy-primitives = { workspace = true, features = ["map"] }
 alloy-provider = { version = "2.2.0", default-features = false }
 alloy-rpc-types = { version = "2.2.0", features = ["eth"] }
-alloy-transport = "2.2.0"
+alloy-transport = "2.5.0"
 
 eyre.workspace = true
 futures = "0.3.32"

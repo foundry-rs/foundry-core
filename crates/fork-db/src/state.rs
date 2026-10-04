@@ -117,13 +117,15 @@ impl ForkState {
         };
         // Invalid params is only a reason to try the equivalent numeric selector. It does not
         // establish endpoint-wide support, nor justify hiding an unsuccessful numeric retry.
-        if self.exact
-            || *self.status.read() == StateStatus::HashOnly
-            || !original
-                .downcast_ref::<TransportError>()
-                .and_then(TransportError::as_error_resp)
-                .is_some_and(|err| err.code == -32602)
-        {
+        let invalid_params = original.downcast_ref::<TransportError>().is_some_and(|error| {
+            // Some relays return invalid params with HTTP 400 and a null RPC id. Alloy keeps
+            // those as HTTP errors; use its structured extraction, never the English message.
+            let allowed_transport = error
+                .as_transport_err()
+                .is_none_or(|kind| kind.as_http_error().is_some_and(|http| http.status == 400));
+            allowed_transport && error.error_code() == Some(-32602)
+        });
+        if self.exact || *self.status.read() == StateStatus::HashOnly || !invalid_params {
             return Err(original);
         }
         self.check_anchor(provider).await?;
@@ -201,6 +203,7 @@ mod tests {
     use alloy_primitives::{B256, U256};
     use alloy_provider::{ProviderBuilder, network::AnyNetwork};
     use alloy_rpc_client::ClientBuilder;
+    use alloy_transport::TransportErrorKind;
     use revm::{context::BlockEnv, database::DatabaseRef};
     use serde_json::{Value, json};
     use std::{
@@ -267,6 +270,9 @@ mod tests {
                         if let Some(code) = error.filter(|_| selector.is_object() || fail_number) {
                             response["error"] = json!({"code": code, "message": if selector.is_object() { "hash rejected" } else { "number rejected" }});
                             status = http_status;
+                            if status == 400 {
+                                response["id"] = Value::Null;
+                            }
                         } else {
                             response["result"] =
                                 json!(if method == "eth_getCode" { "0x00" } else { "0x2a" });
@@ -336,6 +342,21 @@ mod tests {
             );
             assert_eq!(requests.iter().filter(|r| r["params"][1].is_object()).count(), 2);
         }
+    }
+
+    #[tokio::test]
+    async fn fork_state_does_not_retry_auth_or_rate_limit_transport_errors() {
+        let rpc = Rpc::new(None, false, 0, 200);
+        let provider = rpc.provider();
+        for status in [401, 403, 429, 500] {
+            let state = ForkState::new(BlockNumHash::new(10, B256::with_last_byte(1)));
+            let result: eyre::Result<()> = state.read(&provider, |_| async move {
+                Err(TransportErrorKind::http_error(status,
+                    r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32602,"message":"rejected"}}"#.into()).into())
+            }).await;
+            assert!(result.is_err());
+        }
+        assert!(rpc.requests.read().is_empty());
     }
 
     #[tokio::test]
