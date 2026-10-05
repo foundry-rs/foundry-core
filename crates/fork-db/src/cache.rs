@@ -626,9 +626,9 @@ impl<B: Serialize + Clone> Serialize for JsonBlockCacheData<B> {
         let mut map = serializer.serialize_map(Some(5))?;
 
         map.serialize_entry("meta", &self.meta.read().clone())?;
-        map.serialize_entry("accounts", &self.data.accounts.read().clone())?;
-        map.serialize_entry("storage", &self.data.storage.read().clone())?;
-        map.serialize_entry("block_hashes", &self.data.block_hashes.read().clone())?;
+        map.serialize_entry("accounts", &*self.data.accounts.read())?;
+        map.serialize_entry("storage", &*self.data.storage.read())?;
+        map.serialize_entry("block_hashes", &*self.data.block_hashes.read())?;
         map.serialize_entry("block_hash_cache_version", &BLOCK_HASH_CACHE_VERSION)?;
 
         map.end()
