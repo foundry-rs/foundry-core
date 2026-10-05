@@ -1,6 +1,11 @@
 onlyBuiltDependencies:
   - "@biomejs/biome"
 minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - "accounts@0.19.1"
+  - "mppx@0.12.0"
+  - "viem@2.57.1"
+  - "wata@0.4.2"
 blockExoticSubdeps: true
 trustPolicy: no-downgrade
 trustPolicyIgnoreAfter: 525600

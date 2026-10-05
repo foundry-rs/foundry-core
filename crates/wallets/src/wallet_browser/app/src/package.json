@@ -15,11 +15,11 @@
     "test": "node --experimental-strip-types --test test/*.test.ts"
   },
   "dependencies": {
-    "accounts": "^0.18.4",
+    "accounts": "^0.19.1",
     "ox": "^0.14.30",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "viem": "^2.56.9"
+    "viem": "^2.57.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
