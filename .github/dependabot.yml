@@ -31,6 +31,9 @@ updates:
           - '*'
   - package-ecosystem: npm
     directory: /crates/wallets/src/wallet_browser/app/src
+    ignore:
+      - dependency-name: accounts
+        versions: ["0.18.5"]
     schedule:
       interval: weekly
       day: monday
