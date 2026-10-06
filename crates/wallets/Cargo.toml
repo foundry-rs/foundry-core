@@ -37,8 +37,6 @@ tower-http = { workspace = true, features = ["cors", "set-header"], optional = t
 # aws-kms
 alloy-signer-aws = { workspace = true, features = ["eip712"], optional = true }
 aws-config = { version = "1.8.14", default-features = true, optional = true }
-# aws-smithy-types 1.5.0 conflicts with time 0.3.48 on Rust 1.96+.
-aws-smithy-time-compat = { package = "time", version = "=0.3.47", optional = true }
 
 # gcp-kms
 alloy-signer-gcp = { workspace = true, features = ["eip712"], optional = true }
@@ -82,7 +80,7 @@ tokio = { workspace = true, features = ["macros"] }
 [features]
 browser = ["dep:axum", "dep:tokio", "dep:uuid", "dep:webbrowser", "dep:tower", "dep:tower-http"]
 tempo = ["dep:tempo-alloy", "dep:alloy-rlp"]
-aws-kms = ["dep:alloy-signer-aws", "dep:aws-config", "dep:aws-smithy-time-compat"]
+aws-kms = ["dep:alloy-signer-aws", "dep:aws-config"]
 gcp-kms = ["dep:alloy-signer-gcp"]
 turnkey = ["dep:alloy-signer-turnkey"]
 touch-id = ["dep:tempfile"]

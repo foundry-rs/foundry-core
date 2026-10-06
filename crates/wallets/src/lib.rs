@@ -36,5 +36,3 @@ pub use wallet_raw::RawWalletOpts;
 
 #[cfg(feature = "aws-kms")]
 use aws_config as _;
-#[cfg(feature = "aws-kms")]
-use aws_smithy_time_compat as _;
