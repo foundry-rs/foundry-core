@@ -209,7 +209,12 @@ impl Default for SourceElement {
 impl SourceElement {
     /// Creates a new source element with default values.
     pub const fn new() -> Self {
-        Self { offset: 0, length: 0, index: -1, jump_and_modifier_depth: 0 }
+        Self {
+            offset: 0,
+            length: 0,
+            index: -1,
+            jump_and_modifier_depth: Jump::Regular.to_int() << 30,
+        }
     }
 
     /// Creates a new source element with default values.
@@ -625,5 +630,14 @@ mod tests {
     fn univ4_deployer() {
         let s = ":::-:0;;1888:10801:91;2615:100;;;2679:3;2615:100;;;;2700:4;2615:100;;;;-1:-1:-1;2615:100:91;;;;2546:169;;;-1:-1:-1;;2546:169:91;;;;;;;;;;;2615:100;2546:169;;;2615:100;2797:101;;;;;;;;;-1:-1:-1;;2797:101:91;;;;;;;;2546:169;2721:177;;;;;;;;;;;;;;;;;;2957:101;1888:10801;2957:101;2797;2957;;;-1:-1:-1;;2957:101:91;;;;356:29:89;2957:101:91;;;;2904:154;;;-1:-1:-1;;2904:154:91;;;;;;;;;;;;-1:-1:-1;;;;;;2904:154:91;;;;;;;;4018:32;;;;;4048:2;4018:32;;;4056:74;;;-1:-1:-1;;;;;4056:74:91;;;;;;;;1888:10801;;;;;;;;;;;;;;;;";
         parse_test(s);
+    }
+
+    #[test]
+    fn default_jump_is_regular() {
+        assert_eq!(SourceElement::new().to_string(), "0:0:-1:-:0");
+
+        let sm = parse_test_("0:8:0;9:3:0:i").unwrap();
+        assert_eq!(sm[0].jump(), Jump::Regular);
+        assert_eq!(sm[1].jump(), Jump::In);
     }
 }
