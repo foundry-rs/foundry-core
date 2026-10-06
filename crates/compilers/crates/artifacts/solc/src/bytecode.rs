@@ -31,6 +31,12 @@ pub struct Bytecode {
     /// If given, this is an unlinked object.
     #[serde(default)]
     pub link_references: BTreeMap<String, BTreeMap<String, Vec<Offsets>>>,
+    /// ETHDebug program for this bytecode.
+    ///
+    /// Present only if `evm.bytecode.ethdebug` or `evm.deployedBytecode.ethdebug` was selected.
+    /// See <https://ethdebug.github.io/format/spec/program>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ethdebug: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,13 +50,24 @@ pub struct CompactBytecode {
     /// If given, this is an unlinked object.
     #[serde(default)]
     pub link_references: BTreeMap<String, BTreeMap<String, Vec<Offsets>>>,
+    /// ETHDebug program for this bytecode.
+    ///
+    /// Present only if `evm.bytecode.ethdebug` or `evm.deployedBytecode.ethdebug` was selected.
+    /// See <https://ethdebug.github.io/format/spec/program>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ethdebug: Option<serde_json::Value>,
 }
 
 impl CompactBytecode {
     /// Returns a new `CompactBytecode` object that contains nothing, as it's the case for
     /// interfaces and standalone solidity files that don't contain any contract definitions
     pub fn empty() -> Self {
-        Self { object: Default::default(), source_map: None, link_references: Default::default() }
+        Self {
+            object: Default::default(),
+            source_map: None,
+            link_references: Default::default(),
+            ethdebug: None,
+        }
     }
 
     /// Returns the parsed source map
@@ -101,6 +118,7 @@ impl From<Bytecode> for CompactBytecode {
             object: bcode.object,
             source_map: bcode.source_map,
             link_references: bcode.link_references,
+            ethdebug: bcode.ethdebug,
         }
     }
 }
@@ -111,6 +129,7 @@ impl From<CompactBytecode> for Bytecode {
             object: bcode.object,
             source_map: bcode.source_map,
             link_references: bcode.link_references,
+            ethdebug: bcode.ethdebug,
             function_debug_data: Default::default(),
             opcodes: Default::default(),
             generated_sources: Default::default(),
@@ -127,6 +146,7 @@ impl From<BytecodeObject> for Bytecode {
             source_map: Default::default(),
             generated_sources: Default::default(),
             link_references: Default::default(),
+            ethdebug: Default::default(),
         }
     }
 }

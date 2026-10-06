@@ -178,6 +178,8 @@ impl<'de> Deserialize<'de> for DirectDeployed {
             link_references: BTreeMap<String, BTreeMap<String, Vec<Offsets>>>,
             #[serde(default)]
             immutable_references: BTreeMap<String, Vec<Offsets>>,
+            #[serde(default)]
+            ethdebug: Option<serde_json::Value>,
         }
 
         struct MapVisitor;
@@ -198,6 +200,7 @@ impl<'de> Deserialize<'de> for DirectDeployed {
                         object: fields.object,
                         source_map: fields.source_map,
                         link_references: fields.link_references,
+                        ethdebug: fields.ethdebug,
                     }),
                     immutable_references: fields.immutable_references,
                 }))
@@ -419,6 +422,8 @@ mod tests {
             r#"{"object":"0x12","object":"0x34"}"#,
             r#"{"object":"0x12","sourceMap":null,"sourceMap":null}"#,
             r#"{"object":"0x12","immutableReferences":null}"#,
+            r#"{"object":"0x12","ethdebug":{"instructions":[{"offset":0,"operation":{"mnemonic":"STOP"}}]}}"#,
+            r#"{"object":"0x12","ethdebug":null}"#,
             r#"{"immutableReferences":{"1":[{"start":0,"length":32}]}}"#,
             r#"["0x12",null,{},{}]"#,
             "true",

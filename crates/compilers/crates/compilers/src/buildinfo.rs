@@ -122,7 +122,11 @@ impl<L: Language> RawBuildInfo<L> {
             build_info.insert("solcLongVersion".to_string(), serde_json::to_value(&version)?);
             build_info.insert("input".to_string(), input);
             let output = if let Some(payload) = &output.build_info {
-                payload.output.clone()
+                let mut payload_output = payload.output.clone();
+                if !output.metadata.is_empty() {
+                    payload_output["metadata"] = serde_json::to_value(&output.metadata)?;
+                }
+                payload_output
             } else {
                 serde_json::to_value(output)?
             };
