@@ -13,9 +13,10 @@ pub async fn lookup_compiler_version(version: &Version) -> Result<Version> {
     let response = reqwest::get(SOLC_BIN_LIST_URL).await?.text().await?;
     // Ignore extra metadata (`pre` or `build`)
     let version = format!("{}.{}.{}", version.major, version.minor, version.patch);
+    let prefix = format!("soljson-v{version}+");
     let v = response
         .lines()
-        .find(|l| !l.contains("nightly") && l.contains(&version))
+        .find(|l| l.starts_with(&prefix))
         .map(|l| l.trim_start_matches("soljson-v").trim_end_matches(".js"))
         .ok_or_else(|| EtherscanError::MissingSolcVersion(version))?;
 
