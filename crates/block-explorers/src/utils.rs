@@ -11,11 +11,16 @@ static SOLC_BIN_LIST_URL: &str = "https://binaries.soliditylang.org/bin/list.txt
 /// e.g. `0.8.13` -> `0.8.13+commit.abaa5c0e`
 pub async fn lookup_compiler_version(version: &Version) -> Result<Version> {
     let response = reqwest::get(SOLC_BIN_LIST_URL).await?.text().await?;
+    find_compiler_version(&response, version)
+}
+
+fn find_compiler_version(list: &str, version: &Version) -> Result<Version> {
     // Ignore extra metadata (`pre` or `build`)
     let version = format!("{}.{}.{}", version.major, version.minor, version.patch);
-    let v = response
+    let prefix = format!("soljson-v{version}+");
+    let v = list
         .lines()
-        .find(|l| !l.contains("nightly") && l.contains(&version))
+        .find(|l| l.starts_with(&prefix))
         .map(|l| l.trim_start_matches("soljson-v").trim_end_matches(".js"))
         .ok_or_else(|| EtherscanError::MissingSolcVersion(version))?;
 
@@ -288,5 +293,29 @@ mod tests {
         let json = r#"{"source_code": "source code text"}"#;
         let de: Test = serde_json::from_str(json).unwrap();
         assert_eq!(de.source_code.source_code(), src);
+    }
+
+    #[test]
+    fn find_compiler_version_matches_exact_version() {
+        let list = "soljson-v0.8.19+commit.7dd6d404.js
+soljson-v0.8.10+commit.fc410830.js
+soljson-v0.8.3+commit.8d00100c.js
+soljson-v0.8.1-nightly.2021.1.27+commit.34fa756f.js
+soljson-v0.8.1+commit.df193b15.js
+soljson-v0.4.10+commit.f0d539ae.js
+soljson-v0.4.1+commit.4fc6fc2c.js
+";
+
+        let version = find_compiler_version(list, &Version::new(0, 8, 1)).unwrap();
+        assert_eq!(version, Version::parse("0.8.1+commit.df193b15").unwrap());
+
+        let version = find_compiler_version(list, &Version::new(0, 4, 1)).unwrap();
+        assert_eq!(version, Version::parse("0.4.1+commit.4fc6fc2c").unwrap());
+
+        let version = find_compiler_version(list, &Version::new(0, 8, 19)).unwrap();
+        assert_eq!(version, Version::parse("0.8.19+commit.7dd6d404").unwrap());
+
+        let err = find_compiler_version(list, &Version::new(0, 8, 2)).unwrap_err();
+        assert!(matches!(err, EtherscanError::MissingSolcVersion(_)));
     }
 }
