@@ -23,8 +23,13 @@ use foundry_compilers::{
 };
 use foundry_compilers_artifacts::{
     BytecodeHash, Contract, DevDoc, Error, ErrorDoc, EventDoc, EvmVersion, Libraries, MethodDoc,
-    ModelCheckerEngine::CHC, ModelCheckerSettings, Settings, Severity, SolcInput, Source, UserDoc,
-    UserDocNotice, output_selection::OutputSelection, remappings::Remapping,
+    ModelCheckerEngine::CHC,
+    ModelCheckerSettings, Settings, Severity, SolcInput, Source, UserDoc, UserDocNotice,
+    output_selection::{
+        BytecodeOutputSelection, ContractOutputSelection, DeployedBytecodeOutputSelection,
+        OutputSelection,
+    },
+    remappings::Remapping,
 };
 use foundry_compilers_core::{
     error::{Result, SolcError},
@@ -7682,4 +7687,68 @@ contract/* SPDX-License-Identifier: MIT */C {}
     );
     let flattened = project.add_source("Flattened", result).unwrap();
     project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[test]
+fn can_compile_ethdebug() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.37");
+    let selection = [
+        BytecodeOutputSelection::Ethdebug.into(),
+        DeployedBytecodeOutputSelection::Ethdebug.into(),
+        ContractOutputSelection::EthdebugResources,
+    ];
+    let inner = project.project_mut();
+    inner.build_info = true;
+    inner.artifacts = ConfigurableArtifacts::new(selection, []);
+    let settings = &mut inner.settings.solc;
+    // Without AST output, the sparse output filter selects outputs per file.
+    settings.output_selection = OutputSelection::default_output_selection();
+    settings.via_ir = Some(true);
+    settings.experimental = Some(true);
+    settings.push_all(selection);
+
+    project
+        .add_source(
+            "Counter",
+            r"
+pragma solidity ^0.8.0;
+
+contract Counter {
+    uint256 public number;
+
+    function increment() public {
+        number++;
+    }
+}
+",
+        )
+        .unwrap();
+
+    let compiled = project.compile().unwrap();
+    compiled.assert_success();
+    let artifact = compiled.find_first("Counter").unwrap().clone();
+    let creation = artifact.bytecode.as_ref().unwrap().ethdebug.as_ref().unwrap();
+    assert_eq!(creation["environment"], "create");
+    let deployed = artifact.deployed_bytecode.as_ref().unwrap().bytecode.as_ref().unwrap();
+    let runtime = deployed.ethdebug.as_ref().unwrap();
+    assert_eq!(runtime["environment"], "call");
+    assert_eq!(runtime["contract"]["name"], "Counter");
+    assert!(!runtime["instructions"].as_array().unwrap().is_empty());
+
+    let [entry] = fs::read_dir(project.project().build_info_path())
+        .unwrap()
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    let info =
+        BuildInfo::<SolcInput, CompilerOutput<Error, Contract>>::read(&entry.unwrap().path())
+            .unwrap();
+    let resources = &info.output.metadata["ethdebug"]["resources"];
+    assert_eq!(resources["compilation"]["sources"][0]["path"], "src/Counter.sol");
+
+    // Cached artifacts are read back from disk.
+    let compiled = project.compile().unwrap();
+    assert!(compiled.is_unchanged());
+    assert_eq!(compiled.find_first("Counter").unwrap(), &artifact);
 }

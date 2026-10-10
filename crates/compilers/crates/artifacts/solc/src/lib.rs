@@ -1107,7 +1107,9 @@ pub struct DebuggingSettings {
     //     - `<end>` is the index of the first byte after that location.
     // - `snippet`: A single-line code snippet from the location indicated by `@src`. The snippet is
     //   quoted and follows the corresponding `@src` annotation.
-    // - `*`: Wildcard value that can be used to request everything.
+    // - `ethdebug`: ETHDebug annotations. Experimental, since solc 0.8.29. Solc enables it when an
+    //   ETHDebug program is selected and `debugInfo` is not set.
+    // - `*`: Wildcard value that can be used to request everything except `ethdebug`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub debug_info: Vec<String>,
 }
@@ -1610,6 +1612,13 @@ pub struct CompilerOutput {
     pub sources: BTreeMap<SourceUnitName, SourceFile>,
     #[serde(default)]
     pub contracts: Contracts,
+    /// Global ETHDebug output.
+    ///
+    /// Solar and solc 0.8.35 or later put the selected `resources` and `compilation` records
+    /// here. Solc 0.8.29 to 0.8.34 put the resources record here whenever an ETHDebug program was
+    /// selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ethdebug: Option<serde_json::Value>,
 }
 
 impl CompilerOutput {
@@ -1971,6 +1980,7 @@ impl SourceFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output_selection::{BytecodeOutputSelection, DeployedBytecodeOutputSelection};
     use alloy_primitives::Address;
 
     use std::fs;
@@ -2008,6 +2018,7 @@ mod tests {
                 "lib2.sol".to_string(),
                 BTreeMap::from([("L".to_string(), vec![])]),
             )]),
+            ethdebug: None,
         };
 
         assert!(!code.link("lib2.sol", "Y", Address::random()));
@@ -2287,6 +2298,40 @@ mod tests {
     }
 
     #[test]
+    fn can_serialize_ethdebug_settings() {
+        let mut settings =
+            Settings::new(OutputSelection::empty()).with_via_ir().with_experimental();
+        settings.debug =
+            Some(DebuggingSettings { revert_strings: None, debug_info: vec!["ethdebug".into()] });
+        settings.push_all([
+            BytecodeOutputSelection::Ethdebug.into(),
+            DeployedBytecodeOutputSelection::Ethdebug.into(),
+            ContractOutputSelection::EthdebugResources,
+            ContractOutputSelection::EthdebugCompilation,
+        ]);
+
+        let value = serde_json::to_value(&settings).unwrap();
+        assert_eq!(value["viaIR"], true);
+        assert_eq!(value["experimental"], true);
+        assert_eq!(value["optimizer"]["enabled"], false);
+        assert_eq!(value["debug"], serde_json::json!({ "debugInfo": ["ethdebug"] }));
+        assert_eq!(
+            value["outputSelection"],
+            serde_json::json!({
+                "*": {
+                    "*": [
+                        "evm.bytecode.ethdebug",
+                        "evm.deployedBytecode.ethdebug",
+                        "ethdebug.resources",
+                        "ethdebug.compilation"
+                    ]
+                }
+            })
+        );
+        assert_eq!(serde_json::from_value::<Settings>(value).unwrap(), settings);
+    }
+
+    #[test]
     fn can_parse_libraries() {
         let libraries = ["./src/lib/LibraryContract.sol:Library:0xaddress".to_string()];
 
@@ -2547,6 +2592,35 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/0.6.12-with-libs.json");
         let content = fs::read_to_string(path).unwrap();
         let _output: CompilerOutput = serde_json::from_str(&content).unwrap();
+    }
+
+    // Recorded with solc 0.8.37, `viaIR`, `experimental`, the optimizer disabled, and all
+    // ETHDebug outputs selected.
+    #[test]
+    fn can_parse_ethdebug_compiler_output() {
+        let output: CompilerOutput =
+            serde_json::from_str(include_str!("../../../../test-data/ethdebug-0.8.37-output.json"))
+                .unwrap();
+
+        let ethdebug = output.ethdebug.as_ref().unwrap();
+        assert_eq!(ethdebug["resources"]["compilation"], ethdebug["compilation"]);
+        assert_eq!(ethdebug["compilation"]["sources"][0]["path"], "Counter.sol");
+
+        let evm = output.contracts["Counter.sol"]["Counter"].evm.as_ref().unwrap();
+        let creation = evm.bytecode.as_ref().unwrap().ethdebug.as_ref().unwrap();
+        let deployed = evm.deployed_bytecode.as_ref().unwrap().bytecode.as_ref().unwrap();
+        let runtime = deployed.ethdebug.as_ref().unwrap();
+        assert_eq!(creation["environment"], "create");
+        assert_eq!(runtime["environment"], "call");
+        assert_eq!(runtime["contract"]["name"], "Counter");
+        assert_eq!(runtime["instructions"][0]["offset"], 0);
+        assert_eq!(runtime["instructions"][0]["operation"]["mnemonic"], "PUSH1");
+
+        let value = serde_json::to_value(&output).unwrap();
+        assert_eq!(&value["ethdebug"], ethdebug);
+        let evm = &value["contracts"]["Counter.sol"]["Counter"]["evm"];
+        assert_eq!(&evm["bytecode"]["ethdebug"], creation);
+        assert_eq!(&evm["deployedBytecode"]["ethdebug"], runtime);
     }
 
     // <https://github.com/foundry-rs/foundry/issues/9322>
