@@ -26,21 +26,21 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66
+        uses: tempoxyz/gh-actions/actions/secure-runner@2ab28a31ae569be9f780c7675b684471060afa40
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@2ab28a31ae569be9f780c7675b684471060afa40
         with:
           toolchain: stable
       - name: Install nextest
-        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@d5402286a7abdfb7232173b3228d56473feb8a66
+        uses: tempoxyz/gh-actions/vendor/taiki-e/install-action@2ab28a31ae569be9f780c7675b684471060afa40
         with:
           tool: nextest@0.9.140
           checksum: true
           fallback: none
-      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@d5402286a7abdfb7232173b3228d56473feb8a66
-      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@d5402286a7abdfb7232173b3228d56473feb8a66
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@2ab28a31ae569be9f780c7675b684471060afa40
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@2ab28a31ae569be9f780c7675b684471060afa40
       - name: Test
         env:
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: tempoxyz/gh-actions/vendor/JasonEtco/create-an-issue@d5402286a7abdfb7232173b3228d56473feb8a66
+      - uses: tempoxyz/gh-actions/vendor/JasonEtco/create-an-issue@2ab28a31ae569be9f780c7675b684471060afa40
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKFLOW_URL: |
