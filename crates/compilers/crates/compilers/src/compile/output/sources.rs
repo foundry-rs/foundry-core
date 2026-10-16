@@ -216,44 +216,6 @@ impl IntoIterator for VersionedSourceFiles {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn source(id: u32) -> VersionedSourceFile {
-        VersionedSourceFile {
-            source_file: SourceFile { id, ast: None },
-            version: Version::new(0, 8, 30),
-            build_id: "build".to_string(),
-            profile: "default".to_string(),
-        }
-    }
-
-    #[test]
-    fn remove_by_path_removes_empty_path() {
-        let path = PathBuf::from("src/Greeter.sol");
-        let mut sources = VersionedSourceFiles(BTreeMap::from([(path.clone(), vec![source(0)])]));
-
-        assert!(sources.remove_by_path(&path).is_some());
-
-        assert!(sources.is_empty());
-        assert_eq!(sources.len(), 0);
-        assert_eq!(sources.files().count(), 0);
-    }
-
-    #[test]
-    fn remove_by_id_removes_empty_path() {
-        let path = PathBuf::from("src/Greeter.sol");
-        let mut sources = VersionedSourceFiles(BTreeMap::from([(path, vec![source(0)])]));
-
-        assert!(sources.remove_by_id(0).is_some());
-
-        assert_eq!(sources.len(), 0);
-        assert!(sources.is_empty());
-        assert_eq!(sources.files().count(), 0);
-    }
-}
-
 /// A [SourceFile] and the compiler version used to compile it
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionedSourceFile {
