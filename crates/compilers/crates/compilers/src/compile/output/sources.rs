@@ -113,9 +113,13 @@ impl VersionedSourceFiles {
     /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
     pub fn remove_by_path(&mut self, path: &Path) -> Option<SourceFile> {
-        self.0.get_mut(path).and_then(|all_sources| {
+        let source = self.0.get_mut(path).and_then(|all_sources| {
             (!all_sources.is_empty()).then(|| all_sources.remove(0).source_file)
-        })
+        });
+        if self.0.get(path).is_some_and(Vec::is_empty) {
+            self.0.remove(path);
+        }
+        source
     }
 
     /// Removes the _first_ source_file with the given id from the set
@@ -130,15 +134,16 @@ impl VersionedSourceFiles {
     /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
     pub fn remove_by_id(&mut self, id: u32) -> Option<SourceFile> {
-        self.0
-            .values_mut()
-            .filter_map(|sources| {
-                sources
-                    .iter()
-                    .position(|source| source.source_file.id == id)
-                    .map(|pos| sources.remove(pos).source_file)
-            })
-            .next()
+        let (path, source) = self.0.iter_mut().find_map(|(path, sources)| {
+            sources
+                .iter()
+                .position(|source| source.source_file.id == id)
+                .map(|pos| (path.clone(), sources.remove(pos).source_file))
+        })?;
+        if self.0.get(&path).is_some_and(Vec::is_empty) {
+            self.0.remove(&path);
+        }
+        Some(source)
     }
 
     /// Returns an iterator over all contracts and their names.
