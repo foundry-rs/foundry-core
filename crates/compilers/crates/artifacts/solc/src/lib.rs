@@ -1524,10 +1524,10 @@ impl FromStr for ModelCheckerSolver {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "cvc4" => Ok(Self::Cvc4),
-            "eld" => Ok(Self::Cvc4),
+            "eld" => Ok(Self::Eld),
             "smtlib2" => Ok(Self::Smtlib2),
             "z3" => Ok(Self::Z3),
-            s => Err(format!("Unknown model checker invariant: {s}")),
+            s => Err(format!("Unknown model checker solver: {s}")),
         }
     }
 }
@@ -2606,5 +2606,17 @@ mod tests {
         assert!(serialized.contains("showProvedSafe"));
         assert!(serialized.contains("divModWithSlacks"));
         assert!(!serialized.contains("show_unproved"));
+    }
+
+    #[test]
+    fn model_checker_solver_from_str() {
+        for solver in [
+            ModelCheckerSolver::Cvc4,
+            ModelCheckerSolver::Eld,
+            ModelCheckerSolver::Smtlib2,
+            ModelCheckerSolver::Z3,
+        ] {
+            assert_eq!(solver.to_string().parse::<ModelCheckerSolver>(), Ok(solver));
+        }
     }
 }

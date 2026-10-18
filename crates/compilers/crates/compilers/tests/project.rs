@@ -2063,6 +2063,41 @@ fn can_compile_dapp_detect_swapped_remapping_bindings() {
 }
 
 #[test]
+fn can_remove_build_infos_of_invalidated_cache() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.project_mut().build_info = true;
+    project.add_source("A", "pragma solidity ^0.8.10; contract A {}").unwrap();
+
+    let build_infos = |project: &TempProject<MultiCompiler>| {
+        fs::read_dir(project.project().build_info_path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path().file_stem().unwrap().to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>()
+    };
+
+    project.compile().unwrap().assert_success();
+    let initial = build_infos(&project);
+    assert_eq!(initial.len(), 1);
+
+    // An unused remapping, such as one discovered in a newly installed library, invalidates the
+    // cache and changes the compiler input.
+    let lib = project.paths().libraries[0].join("dep");
+    project
+        .paths_mut()
+        .remappings
+        .push(Remapping::from_str(&format!("@dep/={}/", lib.display())).unwrap());
+    let compiled = project.compile().unwrap();
+    compiled.assert_success();
+    assert!(!compiled.is_unchanged());
+
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    let current = build_infos(&project);
+    assert_eq!(current, cache.builds);
+    assert_eq!(current.len(), 1);
+    assert!(current.is_disjoint(&initial));
+}
+
+#[test]
 fn can_compile_dapp_detect_changes_in_sources() {
     let project = TempProject::<MultiCompiler>::dapptools().unwrap();
 

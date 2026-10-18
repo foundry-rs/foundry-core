@@ -1298,7 +1298,8 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             BTreeSet::new()
         };
         let storage = storage_paths.as_deref().unwrap_or(&project.paths);
-        /// Returns the [CompilerCache] to use and whether its preprocessor context changed.
+        /// Returns the [CompilerCache] to use, whether its preprocessor context changed, and the
+        /// build IDs of a discarded cache.
         ///
         /// Returns a new empty cache if the cache does not exist or `invalidate_cache` is set.
         fn get_cache<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>(
@@ -1308,40 +1309,45 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             preprocessed: bool,
             preprocessor_version: u64,
             current_source_units: &BTreeSet<PathBuf>,
-        ) -> (CompilerCache<C::Settings>, bool) {
+        ) -> (CompilerCache<C::Settings>, bool, BTreeSet<String>) {
             // the currently configured paths
             let paths = project.paths.paths_relative();
 
-            if !invalidate_cache
-                && storage.cache.exists()
+            let mut discarded_builds = BTreeSet::new();
+            if storage.cache.exists()
                 && let Ok(mut cache) = CompilerCache::read_joined(storage)
-                && cache.paths == paths
-                && preprocessed == cache.preprocessed
-                && preprocessor_version == cache.preprocessor_version
-                // Compare the serialized compiler form: remapping serialization normalizes
-                // Windows separators and trailing slashes. Keep order significant.
-                && project
-                    .paths
-                    .remappings
-                    .iter()
-                    .map(ToString::to_string)
-                    .eq(cache.remappings.iter().map(ToString::to_string))
             {
-                let previous_source_units = cache.preprocessor_source_units.clone();
-                cache.preprocessor_source_units.retain(|path| {
-                    let path = if path.is_absolute() {
-                        path.clone()
-                    } else {
-                        project.paths.root.join(path)
-                    };
-                    path.exists()
-                });
-                cache.preprocessor_source_units.extend(current_source_units.iter().cloned());
-                if cache.preprocessor_source_units == previous_source_units {
-                    // Unchanged project paths, preprocessor policy, and source-unit context.
-                    return (cache, false);
+                if !invalidate_cache
+                    && cache.paths == paths
+                    && preprocessed == cache.preprocessed
+                    && preprocessor_version == cache.preprocessor_version
+                    // Compare the serialized compiler form: remapping serialization normalizes
+                    // Windows separators and trailing slashes. Keep order significant.
+                    && project
+                        .paths
+                        .remappings
+                        .iter()
+                        .map(ToString::to_string)
+                        .eq(cache.remappings.iter().map(ToString::to_string))
+                {
+                    let previous_source_units = cache.preprocessor_source_units.clone();
+                    cache.preprocessor_source_units.retain(|path| {
+                        let path = if path.is_absolute() {
+                            path.clone()
+                        } else {
+                            project.paths.root.join(path)
+                        };
+                        path.exists()
+                    });
+                    cache.preprocessor_source_units.extend(current_source_units.iter().cloned());
+                    if cache.preprocessor_source_units == previous_source_units {
+                        // Unchanged project paths, preprocessor policy, and source-unit context.
+                        return (cache, false, discarded_builds);
+                    }
+                    return (cache, true, discarded_builds);
                 }
-                return (cache, true);
+                // The new cache no longer references these build infos.
+                discarded_builds = cache.builds;
             }
 
             trace!(invalidate_cache, "cache invalidated");
@@ -1355,6 +1361,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                     ..CompilerCache::new(Default::default(), paths, preprocessed)
                 },
                 false,
+                discarded_builds,
             )
         }
 
@@ -1365,7 +1372,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             let invalidate_cache = !edges.unresolved_imports().is_empty();
 
             // read the cache file if it already exists
-            let (mut cache, source_context_changed) = get_cache(
+            let (mut cache, source_context_changed, discarded_builds) = get_cache(
                 project,
                 storage,
                 invalidate_cache,
@@ -1399,6 +1406,9 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
             trace!("reading build infos from cache...");
             let cached_builds = cache.read_builds(&storage.build_infos).unwrap_or_default();
+            // Track discarded build infos only after reading cached builds so they are removed as
+            // outdated when the new cache is written, instead of being left orphaned.
+            cache.builds.extend(discarded_builds);
 
             // Remove artifacts for which we are missing a build info.
             cached_artifacts.0.retain(|_, artifacts| {
