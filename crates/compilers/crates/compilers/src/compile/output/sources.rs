@@ -113,13 +113,15 @@ impl VersionedSourceFiles {
     /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
     pub fn remove_by_path(&mut self, path: &Path) -> Option<SourceFile> {
-        let source = self.0.get_mut(path).and_then(|all_sources| {
-            (!all_sources.is_empty()).then(|| all_sources.remove(0).source_file)
-        });
-        if self.0.get(path).is_some_and(Vec::is_empty) {
+        let sources = self.0.get_mut(path)?;
+        if sources.is_empty() {
+            return None;
+        }
+        let source = sources.remove(0).source_file;
+        if sources.is_empty() {
             self.0.remove(path);
         }
-        source
+        Some(source)
     }
 
     /// Removes the _first_ source_file with the given id from the set
@@ -134,13 +136,12 @@ impl VersionedSourceFiles {
     /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
     pub fn remove_by_id(&mut self, id: u32) -> Option<SourceFile> {
-        let (path, source) = self.0.iter_mut().find_map(|(path, sources)| {
-            sources
-                .iter()
-                .position(|source| source.source_file.id == id)
-                .map(|pos| (path.clone(), sources.remove(pos).source_file))
+        let (source, empty_path) = self.0.iter_mut().find_map(|(path, sources)| {
+            let pos = sources.iter().position(|source| source.source_file.id == id)?;
+            let source = sources.remove(pos).source_file;
+            Some((source, sources.is_empty().then(|| path.clone())))
         })?;
-        if self.0.get(&path).is_some_and(Vec::is_empty) {
+        if let Some(path) = empty_path {
             self.0.remove(&path);
         }
         Some(source)
