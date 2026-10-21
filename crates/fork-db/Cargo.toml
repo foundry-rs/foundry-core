@@ -33,7 +33,7 @@ futures = "0.3.32"
 
 parking_lot = "0.12.5"
 
-evm2 = { git = "https://github.com/mablr/evm2", rev = "a4852586072a3a2e6f2b5f3fe9d6ea8338b3fe84", default-features = false, features = ["std", "serde"] }
+evm2 = { git = "https://github.com/mablr/evm2", rev = "64785b94b5697f6d4bb9f03d9884dd4cf0356cf2", default-features = false, features = ["std", "serde"] }
 
 serde.workspace = true
 serde_json.workspace = true
