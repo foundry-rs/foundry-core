@@ -345,13 +345,18 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 self.block_generation = self.block_generation.wrapping_add(1);
             }
             BackendRequest::UpdateAddress(address_data) => {
-                self.db.db().forget_unread_prefetches(address_data.keys().copied());
+                self.db.db().forget_unread_prefetches(|a, slot| {
+                    slot.is_none() && address_data.contains_key(&a)
+                });
                 for (address, data) in address_data {
                     self.db.accounts().write().insert(address, data);
                 }
             }
             BackendRequest::UpdateStorage(storage_data) => {
-                self.db.db().forget_unread_prefetches(storage_data.keys().copied());
+                // The new slot map replaces the old one, so every slot mark goes.
+                self.db.db().forget_unread_prefetches(|a, slot| {
+                    slot.is_some() && storage_data.contains_key(&a)
+                });
                 for (address, data) in storage_data {
                     self.db.storage().write().insert(address, data);
                 }
@@ -1760,6 +1765,8 @@ mod tests {
         let mut storage_data = StorageData::default();
         storage_data.insert(written, StorageInfo::from_iter([(U256::from(1), U256::from(7))]));
         backend.insert_or_update_storage(storage_data);
+        // An account write keeps the address's slot marks.
+        backend.data().do_insert_account(unread, AccountInfo::default());
         // A cached read is answered after the update, so the update is applied before the flush.
         backend.storage_ref(address, U256::from(2)).unwrap();
         backend.flush_cache();

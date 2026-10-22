@@ -3,7 +3,7 @@
 use alloy_chains::Chain;
 use alloy_primitives::{
     Address, B256, U256,
-    map::{AddressHashSet, HashSet, U256Map},
+    map::{HashSet, U256Map},
 };
 use parking_lot::RwLock;
 use revm::{
@@ -379,13 +379,20 @@ impl MemDb {
 
     // Inserts the account, replacing it if it exists already
     pub fn do_insert_account(&self, address: Address, account: AccountInfo) {
-        self.forget_unread_prefetches([address]);
+        self.forget_unread_prefetches(|a, slot| a == address && slot.is_none());
         self.accounts.write().insert(address, account);
     }
 
     /// The implementation of [DatabaseCommit::commit()]
     pub fn do_commit(&self, changes: AddressHashMap<Account>) {
-        self.forget_unread_prefetches(changes.keys().copied());
+        self.forget_unread_prefetches(|address, slot| {
+            changes.get(&address).is_some_and(|acc| {
+                acc.is_empty()
+                    || acc.is_selfdestructed()
+                    || acc.status.contains(AccountStatus::Created)
+                    || slot.is_none_or(|slot| acc.storage.contains_key(&slot))
+            })
+        });
         let mut storage = self.storage.write();
         let mut accounts = self.accounts.write();
         for (add, mut acc) in changes {
@@ -425,14 +432,16 @@ impl MemDb {
         }
     }
 
-    /// Clears the unread prefetch marks of `addresses`, so values written to them reach the cache
-    /// file.
-    pub(crate) fn forget_unread_prefetches(&self, addresses: impl IntoIterator<Item = Address>) {
+    /// Clears the unread prefetch marks of the accounts (`None`) and slots that `written` selects,
+    /// so values written to them reach the cache file.
+    pub(crate) fn forget_unread_prefetches(
+        &self,
+        mut written: impl FnMut(Address, Option<U256>) -> bool,
+    ) {
         if self.unread_prefetches.read().is_empty() {
             return;
         }
-        let addresses = addresses.into_iter().collect::<AddressHashSet>();
-        self.unread_prefetches.write().retain(|(address, _)| !addresses.contains(address));
+        self.unread_prefetches.write().retain(|(address, slot)| !written(*address, *slot));
     }
 }
 
