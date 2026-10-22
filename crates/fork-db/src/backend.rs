@@ -172,10 +172,10 @@ enum ProviderRequest<Err, N: Network = AnyNetwork> {
 /// The Request type the Backend listens for
 #[derive(Debug)]
 enum BackendRequest<N: Network = AnyNetwork> {
-    /// Fetch the account info
-    Basic(Address, AccountInfoSender),
-    /// Fetch a storage slot
-    Storage(Address, U256, StorageSender),
+    /// Fetch the account info, as a prefetch if the flag is set
+    Basic(Address, AccountInfoSender, bool),
+    /// Fetch a storage slot, as a prefetch if the flag is set
+    Storage(Address, U256, StorageSender, bool),
     /// Fetch a block hash
     BlockHash(u64, BlockHashSender),
     /// Fetch an entire block with transactions
@@ -278,14 +278,21 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
     ///     progress (e.g. another Sender just requested the same account)
     fn on_request(&mut self, req: BackendRequest<N>) {
         match req {
-            BackendRequest::Basic(addr, sender) => {
+            BackendRequest::Basic(addr, sender, prefetch) => {
                 trace!(target: "backendhandler", "received request basic address={:?}", addr);
                 let acc = self.db.accounts().read().get(&addr).cloned();
                 if let Some(basic) = acc {
                     self.db.cache().record_cache_hit();
                     let _ = sender.send(Ok(basic));
                 } else {
+                    // A prefetch that joins a pending read still counts as read.
+                    if prefetch && !self.account_requests.contains_key(&addr) {
+                        self.db.unread_prefetches().write().insert((addr, None));
+                    }
                     self.request_account(addr, sender);
+                }
+                if !prefetch {
+                    self.db.unread_prefetches().write().remove(&(addr, None));
                 }
             }
             BackendRequest::BlockHash(number, sender) => {
@@ -311,7 +318,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             BackendRequest::Transaction(tx, sender) => {
                 self.request_transaction(tx, sender);
             }
-            BackendRequest::Storage(addr, idx, sender) => {
+            BackendRequest::Storage(addr, idx, sender, prefetch) => {
                 // account is already stored in the cache
                 let value =
                     self.db.storage().read().get(&addr).and_then(|acc| acc.get(&idx).copied());
@@ -319,8 +326,15 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                     self.db.cache().record_cache_hit();
                     let _ = sender.send(Ok(value));
                 } else {
+                    // A prefetch that joins a pending read still counts as read.
+                    if prefetch && !self.storage_requests.contains_key(&(addr, idx)) {
+                        self.db.unread_prefetches().write().insert((addr, Some(idx)));
+                    }
                     // account present but not storage -> fetch storage
                     self.request_account_storage(addr, idx, sender);
+                }
+                if !prefetch {
+                    self.db.unread_prefetches().write().remove(&(addr, Some(idx)));
                 }
             }
             BackendRequest::SetPinnedBlock(block_id) => {
@@ -1148,19 +1162,43 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
         })
     }
 
-    fn do_get_basic(&self, address: Address) -> DatabaseResult<Option<AccountInfo>> {
+    /// Fetches an account like [`DatabaseRef::basic_ref`], but does not count it as read.
+    ///
+    /// The cache file leaves out a prefetched account until a normal read requests it, so a wrong
+    /// prediction does not persist. Errors are returned without logging.
+    pub fn prefetch_basic(&self, address: Address) -> DatabaseResult<()> {
+        self.do_get_basic(address, true).map(drop)
+    }
+
+    /// Fetches a storage slot like [`DatabaseRef::storage_ref`], but does not count it as read.
+    ///
+    /// See [`Self::prefetch_basic`].
+    pub fn prefetch_storage(&self, address: Address, index: U256) -> DatabaseResult<()> {
+        self.do_get_storage(address, index, true).map(drop)
+    }
+
+    fn do_get_basic(
+        &self,
+        address: Address,
+        prefetch: bool,
+    ) -> DatabaseResult<Option<AccountInfo>> {
         self.blocking_mode.run(|| {
             let (sender, rx) = oneshot_channel();
-            let req = BackendRequest::Basic(address, sender);
+            let req = BackendRequest::Basic(address, sender, prefetch);
             self.backend.unbounded_send(req)?;
             rx.recv()?.map(Some)
         })
     }
 
-    fn do_get_storage(&self, address: Address, index: U256) -> DatabaseResult<U256> {
+    fn do_get_storage(
+        &self,
+        address: Address,
+        index: U256,
+        prefetch: bool,
+    ) -> DatabaseResult<U256> {
         self.blocking_mode.run(|| {
             let (sender, rx) = oneshot_channel();
-            let req = BackendRequest::Storage(address, index, sender);
+            let req = BackendRequest::Storage(address, index, sender, prefetch);
             self.backend.unbounded_send(req)?;
             rx.recv()?
         })
@@ -1289,7 +1327,7 @@ impl<N: Network, B: ForkBlockEnv> DatabaseRef for SharedBackend<N, B> {
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         trace!(target: "sharedbackend", %address, "request basic");
-        self.do_get_basic(address).inspect_err(|err| {
+        self.do_get_basic(address, false).inspect_err(|err| {
             error!(target: "sharedbackend", %err, %address, "Failed to send/recv `basic`");
             if err.is_possibly_non_archive_node_error() {
                 error!(target: "sharedbackend", "{NON_ARCHIVE_NODE_WARNING}");
@@ -1303,7 +1341,7 @@ impl<N: Network, B: ForkBlockEnv> DatabaseRef for SharedBackend<N, B> {
 
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
         trace!(target: "sharedbackend", "request storage {:?} at {:?}", address, index);
-        self.do_get_storage(address, index).inspect_err(|err| {
+        self.do_get_storage(address, index, false).inspect_err(|err| {
             error!(target: "sharedbackend", %err, %address, %index, "Failed to send/recv `storage`");
             if err.is_possibly_non_archive_node_error() {
                 error!(target: "sharedbackend", "{NON_ARCHIVE_NODE_WARNING}");
@@ -1665,6 +1703,55 @@ mod tests {
         assert_eq!(backend.storage_ref(address, slot).unwrap(), U256::from(42));
         assert_eq!(backend.cache_hits(), 1);
         assert_eq!(backend.cache_misses(), 1);
+
+        server_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_file_skips_unread_prefetches() {
+        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
+        let endpoint = format!("http://{}", server.server_addr());
+
+        let server_handle = std::thread::spawn(move || {
+            #[derive(Debug, Deserialize)]
+            struct Request {
+                id: serde_json::Value,
+            }
+
+            for _ in 0..2 {
+                let mut request = server.recv().unwrap();
+                let rpc_request: Request =
+                    serde_json::from_reader(request.as_reader()).expect("failed parsing request");
+                request
+                    .respond(Response::from_string(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": rpc_request.id,
+                            "result": "0x2a",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let provider = get_http_provider(&endpoint);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
+        let db = BlockchainDb::new(meta, Some(path.clone()));
+        let backend = SharedBackend::spawn_backend(Arc::new(provider), db, None).await;
+        let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
+
+        backend.prefetch_storage(address, U256::from(1)).unwrap();
+        backend.prefetch_storage(address, U256::from(2)).unwrap();
+        assert_eq!(backend.storage_ref(address, U256::from(2)).unwrap(), U256::from(42));
+        assert_eq!(backend.storage()[&address].len(), 2);
+        backend.flush_cache();
+
+        let cache = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
+        let storage = cache.db().storage.read();
+        assert_eq!(storage[&address].keys().collect::<Vec<_>>(), [&U256::from(2)]);
 
         server_handle.join().unwrap();
     }
@@ -2270,7 +2357,7 @@ mod tests {
             for _ in 1..max_slots {
                 for (address, info) in &storage_data {
                     for (index, value) in info {
-                        let result_storage = backend.do_get_storage(*address, *index);
+                        let result_storage = backend.do_get_storage(*address, *index, false);
                         match result_storage {
                             Ok(stg_db) => {
                                 assert_eq!(
@@ -2402,7 +2489,7 @@ mod tests {
             for _ in 1..max_slots {
                 for (address, info) in &storage_data {
                     for (index, value) in info {
-                        let result_storage = backend.do_get_storage(*address, *index);
+                        let result_storage = backend.do_get_storage(*address, *index, false);
                         match result_storage {
                             Ok(stg_db) => {
                                 assert_eq!(
