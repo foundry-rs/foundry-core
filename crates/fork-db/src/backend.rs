@@ -345,11 +345,13 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 self.block_generation = self.block_generation.wrapping_add(1);
             }
             BackendRequest::UpdateAddress(address_data) => {
+                self.db.db().forget_unread_prefetches(address_data.keys().copied());
                 for (address, data) in address_data {
                     self.db.accounts().write().insert(address, data);
                 }
             }
             BackendRequest::UpdateStorage(storage_data) => {
+                self.db.db().forget_unread_prefetches(storage_data.keys().copied());
                 for (address, data) in storage_data {
                     self.db.storage().write().insert(address, data);
                 }
@@ -771,6 +773,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 Ok(res) => res,
                                 Err(err) => {
                                     let err = Arc::new(err);
+                                    pin.db.unread_prefetches().write().remove(&(addr, None));
                                     if let Some(listeners) = pin.account_requests.remove(&addr) {
                                         for l in listeners {
                                             let _ = l.send(Err(DatabaseError::GetAccount(
@@ -816,6 +819,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 Err(err) => {
                                     // notify all listeners
                                     let err = Arc::new(err);
+                                    pin.db.unread_prefetches().write().remove(&(addr, Some(idx)));
                                     if let Some(listeners) =
                                         pin.storage_requests.remove(&(addr, idx))
                                     {
@@ -1720,7 +1724,7 @@ mod tests {
                 id: serde_json::Value,
             }
 
-            for _ in 0..2 {
+            for _ in 0..4 {
                 let mut request = server.recv().unwrap();
                 let rpc_request: Request =
                     serde_json::from_reader(request.as_reader()).expect("failed parsing request");
@@ -1745,15 +1749,26 @@ mod tests {
         let backend = SharedBackend::spawn_backend(Arc::new(provider), db, None).await;
         let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
 
+        let unread = Address::with_last_byte(1);
+        let written = Address::with_last_byte(2);
+
         backend.prefetch_storage(address, U256::from(1)).unwrap();
         backend.prefetch_storage(address, U256::from(2)).unwrap();
+        backend.prefetch_storage(unread, U256::from(1)).unwrap();
+        backend.prefetch_storage(written, U256::from(1)).unwrap();
         assert_eq!(backend.storage_ref(address, U256::from(2)).unwrap(), U256::from(42));
-        assert_eq!(backend.storage()[&address].len(), 2);
+        let mut storage_data = StorageData::default();
+        storage_data.insert(written, StorageInfo::from_iter([(U256::from(1), U256::from(7))]));
+        backend.insert_or_update_storage(storage_data);
+        // A cached read is answered after the update, so the update is applied before the flush.
+        backend.storage_ref(address, U256::from(2)).unwrap();
         backend.flush_cache();
 
         let cache = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
         let storage = cache.db().storage.read();
         assert_eq!(storage[&address].keys().collect::<Vec<_>>(), [&U256::from(2)]);
+        assert!(!storage.contains_key(&unread));
+        assert_eq!(storage[&written][&U256::from(1)], U256::from(7));
 
         server_handle.join().unwrap();
     }

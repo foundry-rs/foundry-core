@@ -3,7 +3,7 @@
 use alloy_chains::Chain;
 use alloy_primitives::{
     Address, B256, U256,
-    map::{HashSet, U256Map},
+    map::{AddressHashSet, HashSet, U256Map},
 };
 use parking_lot::RwLock;
 use revm::{
@@ -379,11 +379,13 @@ impl MemDb {
 
     // Inserts the account, replacing it if it exists already
     pub fn do_insert_account(&self, address: Address, account: AccountInfo) {
+        self.forget_unread_prefetches([address]);
         self.accounts.write().insert(address, account);
     }
 
     /// The implementation of [DatabaseCommit::commit()]
     pub fn do_commit(&self, changes: AddressHashMap<Account>) {
+        self.forget_unread_prefetches(changes.keys().copied());
         let mut storage = self.storage.write();
         let mut accounts = self.accounts.write();
         for (add, mut acc) in changes {
@@ -421,6 +423,16 @@ impl MemDb {
                 }
             }
         }
+    }
+
+    /// Clears the unread prefetch marks of `addresses`, so values written to them reach the cache
+    /// file.
+    pub(crate) fn forget_unread_prefetches(&self, addresses: impl IntoIterator<Item = Address>) {
+        if self.unread_prefetches.read().is_empty() {
+            return;
+        }
+        let addresses = addresses.into_iter().collect::<AddressHashSet>();
+        self.unread_prefetches.write().retain(|(address, _)| !addresses.contains(address));
     }
 }
 
@@ -650,6 +662,7 @@ impl<B: Serialize + Clone> Serialize for JsonBlockCacheData<B> {
             for (address, slots) in &mut storage {
                 slots.retain(|slot, _| !unread.contains(&(*address, Some(*slot))));
             }
+            storage.retain(|_, slots| !slots.is_empty());
             map.serialize_entry("accounts", &accounts)?;
             map.serialize_entry("storage", &storage)?;
         }
