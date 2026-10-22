@@ -280,6 +280,10 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         match req {
             BackendRequest::Basic(addr, sender, prefetch) => {
                 trace!(target: "backendhandler", "received request basic address={:?}", addr);
+                // Mark the key read before the reply, so a flush after the reply keeps it.
+                if !prefetch {
+                    self.db.unread_prefetches().write().remove(&(addr, None));
+                }
                 let acc = self.db.accounts().read().get(&addr).cloned();
                 if let Some(basic) = acc {
                     self.db.cache().record_cache_hit();
@@ -290,9 +294,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                         self.db.unread_prefetches().write().insert((addr, None));
                     }
                     self.request_account(addr, sender);
-                }
-                if !prefetch {
-                    self.db.unread_prefetches().write().remove(&(addr, None));
                 }
             }
             BackendRequest::BlockHash(number, sender) => {
@@ -319,6 +320,10 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 self.request_transaction(tx, sender);
             }
             BackendRequest::Storage(addr, idx, sender, prefetch) => {
+                // Mark the key read before the reply, so a flush after the reply keeps it.
+                if !prefetch {
+                    self.db.unread_prefetches().write().remove(&(addr, Some(idx)));
+                }
                 // account is already stored in the cache
                 let value =
                     self.db.storage().read().get(&addr).and_then(|acc| acc.get(&idx).copied());
@@ -332,9 +337,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                     }
                     // account present but not storage -> fetch storage
                     self.request_account_storage(addr, idx, sender);
-                }
-                if !prefetch {
-                    self.db.unread_prefetches().write().remove(&(addr, Some(idx)));
                 }
             }
             BackendRequest::SetPinnedBlock(block_id) => {
