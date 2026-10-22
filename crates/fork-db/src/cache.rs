@@ -1,10 +1,7 @@
 //! Cache related abstraction
 
 use alloy_chains::Chain;
-use alloy_primitives::{
-    Address, B256, U256,
-    map::{HashSet, U256Map},
-};
+use alloy_primitives::{Address, B256, U256, map::U256Map};
 use parking_lot::RwLock;
 use revm::{
     DatabaseCommit,
@@ -133,11 +130,6 @@ impl<B: ForkBlockEnv> BlockchainDb<B> {
     /// Returns the map that holds all the block hashes
     pub fn block_hashes(&self) -> &RwLock<U256Map<B256>> {
         &self.db.block_hashes
-    }
-
-    /// Returns the prefetched accounts and slots that no read has requested yet
-    pub(crate) fn unread_prefetches(&self) -> &RwLock<HashSet<(Address, Option<U256>)>> {
-        &self.db.unread_prefetches
     }
 
     /// Returns the Env related metadata
@@ -363,9 +355,6 @@ pub struct MemDb {
     pub storage: RwLock<AddressHashMap<StorageInfo>>,
     /// All retrieved block hashes
     pub block_hashes: RwLock<U256Map<B256>>,
-    /// Prefetched accounts (`None`) and slots that no read has requested yet. The cache file
-    /// leaves them out.
-    unread_prefetches: RwLock<HashSet<(Address, Option<U256>)>>,
 }
 
 impl MemDb {
@@ -374,25 +363,15 @@ impl MemDb {
         self.accounts.write().clear();
         self.storage.write().clear();
         self.block_hashes.write().clear();
-        self.unread_prefetches.write().clear();
     }
 
     // Inserts the account, replacing it if it exists already
     pub fn do_insert_account(&self, address: Address, account: AccountInfo) {
-        self.forget_unread_prefetches(|a, slot| a == address && slot.is_none());
         self.accounts.write().insert(address, account);
     }
 
     /// The implementation of [DatabaseCommit::commit()]
     pub fn do_commit(&self, changes: AddressHashMap<Account>) {
-        self.forget_unread_prefetches(|address, slot| {
-            changes.get(&address).is_some_and(|acc| {
-                acc.is_empty()
-                    || acc.is_selfdestructed()
-                    || acc.status.contains(AccountStatus::Created)
-                    || slot.is_none_or(|slot| acc.storage.contains_key(&slot))
-            })
-        });
         let mut storage = self.storage.write();
         let mut accounts = self.accounts.write();
         for (add, mut acc) in changes {
@@ -431,18 +410,6 @@ impl MemDb {
             }
         }
     }
-
-    /// Clears the unread prefetch marks of the accounts (`None`) and slots that `written` selects,
-    /// so values written to them reach the cache file.
-    pub(crate) fn forget_unread_prefetches(
-        &self,
-        mut written: impl FnMut(Address, Option<U256>) -> bool,
-    ) {
-        if self.unread_prefetches.read().is_empty() {
-            return;
-        }
-        self.unread_prefetches.write().retain(|(address, slot)| !written(*address, *slot));
-    }
 }
 
 impl Clone for MemDb {
@@ -451,7 +418,6 @@ impl Clone for MemDb {
             storage: RwLock::new(self.storage.read().clone()),
             accounts: RwLock::new(self.accounts.read().clone()),
             block_hashes: RwLock::new(self.block_hashes.read().clone()),
-            unread_prefetches: RwLock::new(self.unread_prefetches.read().clone()),
         }
     }
 }
@@ -660,21 +626,8 @@ impl<B: Serialize + Clone> Serialize for JsonBlockCacheData<B> {
         let mut map = serializer.serialize_map(Some(5))?;
 
         map.serialize_entry("meta", &self.meta.read().clone())?;
-        let unread = self.data.unread_prefetches.read();
-        if unread.is_empty() {
-            map.serialize_entry("accounts", &*self.data.accounts.read())?;
-            map.serialize_entry("storage", &*self.data.storage.read())?;
-        } else {
-            let mut accounts = self.data.accounts.read().clone();
-            accounts.retain(|address, _| !unread.contains(&(*address, None)));
-            let mut storage = self.data.storage.read().clone();
-            for (address, slots) in &mut storage {
-                slots.retain(|slot, _| !unread.contains(&(*address, Some(*slot))));
-            }
-            storage.retain(|_, slots| !slots.is_empty());
-            map.serialize_entry("accounts", &accounts)?;
-            map.serialize_entry("storage", &storage)?;
-        }
+        map.serialize_entry("accounts", &*self.data.accounts.read())?;
+        map.serialize_entry("storage", &*self.data.storage.read())?;
         map.serialize_entry("block_hashes", &*self.data.block_hashes.read())?;
         map.serialize_entry("block_hash_cache_version", &BLOCK_HASH_CACHE_VERSION)?;
 
@@ -706,7 +659,6 @@ impl<'de, B: DeserializeOwned + Default + Serialize> Deserialize<'de> for JsonBl
                 accounts: RwLock::new(accounts),
                 storage: RwLock::new(storage),
                 block_hashes: RwLock::new(block_hashes),
-                unread_prefetches: Default::default(),
             }),
         })
     }

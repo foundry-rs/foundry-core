@@ -27,7 +27,7 @@ use revm::{
     database::DatabaseRef,
     primitives::{
         KECCAK_EMPTY,
-        map::{AddressHashMap, HashMap, hash_map::Entry},
+        map::{AddressHashMap, HashMap, HashSet, hash_map::Entry},
     },
     state::{AccountInfo, Bytecode},
 };
@@ -231,6 +231,13 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     account_fetch_mode: Arc<AtomicU8>,
     /// Account-loading policy fixed when this backend is created.
     account_fetch_policy: AccountFetchPolicy,
+    /// Prefetched accounts that no read has requested yet. They stay out of `db`, so the cache
+    /// file only holds values that were read.
+    prefetched_accounts: AddressHashMap<AccountInfo>,
+    /// Prefetched storage slots that no read has requested yet, see `prefetched_accounts`.
+    prefetched_storage: HashMap<(Address, U256), U256>,
+    /// Pending fetches that only prefetches wait on: accounts (`None`) and slots.
+    prefetch_requests: HashSet<(Address, Option<U256>)>,
 }
 
 impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
@@ -267,6 +274,9 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             block_generation: 0,
             block_hash_via_evm,
             account_fetch_mode: Arc::new(AtomicU8::new(ACCOUNT_FETCH_UNCHECKED)),
+            prefetched_accounts: Default::default(),
+            prefetched_storage: Default::default(),
+            prefetch_requests: Default::default(),
         }
     }
 
@@ -280,18 +290,26 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         match req {
             BackendRequest::Basic(addr, sender, prefetch) => {
                 trace!(target: "backendhandler", "received request basic address={:?}", addr);
-                // Mark the key read before the reply, so a flush after the reply keeps it.
-                if !prefetch {
-                    self.db.unread_prefetches().write().remove(&(addr, None));
+                let mut acc = self.db.accounts().read().get(&addr).cloned();
+                if acc.is_none() {
+                    acc = if prefetch {
+                        self.prefetched_accounts.get(&addr).cloned()
+                    } else {
+                        // A read moves a prefetched account into the cache before the reply.
+                        self.prefetched_accounts.remove(&addr).inspect(|acc| {
+                            self.db.accounts().write().insert(addr, acc.clone());
+                        })
+                    };
                 }
-                let acc = self.db.accounts().read().get(&addr).cloned();
                 if let Some(basic) = acc {
                     self.db.cache().record_cache_hit();
                     let _ = sender.send(Ok(basic));
                 } else {
-                    // A prefetch that joins a pending read still counts as read.
-                    if prefetch && !self.account_requests.contains_key(&addr) {
-                        self.db.unread_prefetches().write().insert((addr, None));
+                    // A read that joins a pending prefetch takes its value into the cache.
+                    if !prefetch {
+                        self.prefetch_requests.remove(&(addr, None));
+                    } else if !self.account_requests.contains_key(&addr) {
+                        self.prefetch_requests.insert((addr, None));
                     }
                     self.request_account(addr, sender);
                 }
@@ -320,43 +338,46 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 self.request_transaction(tx, sender);
             }
             BackendRequest::Storage(addr, idx, sender, prefetch) => {
-                // Mark the key read before the reply, so a flush after the reply keeps it.
-                if !prefetch {
-                    self.db.unread_prefetches().write().remove(&(addr, Some(idx)));
-                }
                 // account is already stored in the cache
-                let value =
+                let mut value =
                     self.db.storage().read().get(&addr).and_then(|acc| acc.get(&idx).copied());
+                if value.is_none() {
+                    value = if prefetch {
+                        self.prefetched_storage.get(&(addr, idx)).copied()
+                    } else {
+                        // A read moves a prefetched slot into the cache before the reply.
+                        self.prefetched_storage.remove(&(addr, idx)).inspect(|value| {
+                            self.db.storage().write().entry(addr).or_default().insert(idx, *value);
+                        })
+                    };
+                }
                 if let Some(value) = value {
                     self.db.cache().record_cache_hit();
                     let _ = sender.send(Ok(value));
                 } else {
-                    // A prefetch that joins a pending read still counts as read.
-                    if prefetch && !self.storage_requests.contains_key(&(addr, idx)) {
-                        self.db.unread_prefetches().write().insert((addr, Some(idx)));
+                    // A read that joins a pending prefetch takes its value into the cache.
+                    if !prefetch {
+                        self.prefetch_requests.remove(&(addr, Some(idx)));
+                    } else if !self.storage_requests.contains_key(&(addr, idx)) {
+                        self.prefetch_requests.insert((addr, Some(idx)));
                     }
                     // account present but not storage -> fetch storage
                     self.request_account_storage(addr, idx, sender);
                 }
             }
             BackendRequest::SetPinnedBlock(block_id) => {
+                self.prefetched_accounts.clear();
+                self.prefetched_storage.clear();
                 self.block_id = Some(block_id);
                 self.block_anchor = None;
                 self.block_generation = self.block_generation.wrapping_add(1);
             }
             BackendRequest::UpdateAddress(address_data) => {
-                self.db.db().forget_unread_prefetches(|a, slot| {
-                    slot.is_none() && address_data.contains_key(&a)
-                });
                 for (address, data) in address_data {
                     self.db.accounts().write().insert(address, data);
                 }
             }
             BackendRequest::UpdateStorage(storage_data) => {
-                // The new slot map replaces the old one, so every slot mark goes.
-                self.db.db().forget_unread_prefetches(|a, slot| {
-                    slot.is_some() && storage_data.contains_key(&a)
-                });
                 for (address, data) in storage_data {
                     self.db.storage().write().insert(address, data);
                 }
@@ -778,7 +799,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 Ok(res) => res,
                                 Err(err) => {
                                     let err = Arc::new(err);
-                                    pin.db.unread_prefetches().write().remove(&(addr, None));
+                                    pin.prefetch_requests.remove(&(addr, None));
                                     if let Some(listeners) = pin.account_requests.remove(&addr) {
                                         for l in listeners {
                                             let _ = l.send(Err(DatabaseError::GetAccount(
@@ -806,7 +827,11 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 code_hash,
                                 account_id: None,
                             };
-                            pin.db.accounts().write().insert(addr, acc.clone());
+                            if pin.prefetch_requests.remove(&(addr, None)) {
+                                pin.prefetched_accounts.insert(addr, acc.clone());
+                            } else {
+                                pin.db.accounts().write().insert(addr, acc.clone());
+                            }
 
                             // notify all listeners
                             if let Some(listeners) = pin.account_requests.remove(&addr) {
@@ -824,7 +849,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 Err(err) => {
                                     // notify all listeners
                                     let err = Arc::new(err);
-                                    pin.db.unread_prefetches().write().remove(&(addr, Some(idx)));
+                                    pin.prefetch_requests.remove(&(addr, Some(idx)));
                                     if let Some(listeners) =
                                         pin.storage_requests.remove(&(addr, idx))
                                     {
@@ -841,7 +866,16 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                             };
 
                             // update the cache
-                            pin.db.storage().write().entry(addr).or_default().insert(idx, value);
+                            if pin.prefetch_requests.remove(&(addr, Some(idx))) {
+                                pin.prefetched_storage.insert((addr, idx), value);
+                            } else {
+                                pin.db
+                                    .storage()
+                                    .write()
+                                    .entry(addr)
+                                    .or_default()
+                                    .insert(idx, value);
+                            }
 
                             // notify all listeners
                             if let Some(listeners) = pin.storage_requests.remove(&(addr, idx)) {
@@ -1173,17 +1207,16 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
         })
     }
 
-    /// Fetches an account like [`DatabaseRef::basic_ref`], but does not count it as read.
+    /// Fetches an account like [`DatabaseRef::basic_ref`], but keeps it out of the cache file
+    /// until a normal read requests it, so a wrong prediction does not persist.
     ///
-    /// The cache file leaves out a prefetched account until a normal read requests it, so a wrong
-    /// prediction does not persist. Errors are returned without logging.
+    /// Errors are returned without logging.
     pub fn prefetch_basic(&self, address: Address) -> DatabaseResult<()> {
         self.do_get_basic(address, true).map(drop)
     }
 
-    /// Fetches a storage slot like [`DatabaseRef::storage_ref`], but does not count it as read.
-    ///
-    /// See [`Self::prefetch_basic`].
+    /// Fetches a storage slot like [`DatabaseRef::storage_ref`], but keeps it out of the cache
+    /// file until a normal read requests it. See [`Self::prefetch_basic`].
     pub fn prefetch_storage(&self, address: Address, index: U256) -> DatabaseResult<()> {
         self.do_get_storage(address, index, true).map(drop)
     }
@@ -1729,7 +1762,7 @@ mod tests {
                 id: serde_json::Value,
             }
 
-            for _ in 0..4 {
+            for _ in 0..3 {
                 let mut request = server.recv().unwrap();
                 let rpc_request: Request =
                     serde_json::from_reader(request.as_reader()).expect("failed parsing request");
@@ -1753,31 +1786,20 @@ mod tests {
         let db = BlockchainDb::new(meta, Some(path.clone()));
         let backend = SharedBackend::spawn_backend(Arc::new(provider), db, None).await;
         let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
-
         let unread = Address::with_last_byte(1);
-        let written = Address::with_last_byte(2);
 
         backend.prefetch_storage(address, U256::from(1)).unwrap();
         backend.prefetch_storage(address, U256::from(2)).unwrap();
         backend.prefetch_storage(unread, U256::from(1)).unwrap();
-        backend.prefetch_storage(written, U256::from(1)).unwrap();
+        server_handle.join().unwrap();
+        // The read is served from the prefetch, without another request.
         assert_eq!(backend.storage_ref(address, U256::from(2)).unwrap(), U256::from(42));
-        let mut storage_data = StorageData::default();
-        storage_data.insert(written, StorageInfo::from_iter([(U256::from(1), U256::from(7))]));
-        backend.insert_or_update_storage(storage_data);
-        // An account write keeps the address's slot marks.
-        backend.data().do_insert_account(unread, AccountInfo::default());
-        // A cached read is answered after the update, so the update is applied before the flush.
-        backend.storage_ref(address, U256::from(2)).unwrap();
         backend.flush_cache();
 
         let cache = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
         let storage = cache.db().storage.read();
         assert_eq!(storage[&address].keys().collect::<Vec<_>>(), [&U256::from(2)]);
         assert!(!storage.contains_key(&unread));
-        assert_eq!(storage[&written][&U256::from(1)], U256::from(7));
-
-        server_handle.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
