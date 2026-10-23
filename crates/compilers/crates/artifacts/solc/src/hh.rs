@@ -67,11 +67,12 @@ impl From<HardhatArtifact> for ContractBytecode {
             bcode
         });
 
-        let deployed_bytecode: Option<DeployedBytecode> = artifact.bytecode.as_ref().map(|t| {
-            let mut bcode: Bytecode = t.clone().into();
-            bcode.link_references = artifact.deployed_link_references.clone();
-            bcode.into()
-        });
+        let deployed_bytecode: Option<DeployedBytecode> =
+            artifact.deployed_bytecode.as_ref().map(|t| {
+                let mut bcode: Bytecode = t.clone().into();
+                bcode.link_references = artifact.deployed_link_references.clone();
+                bcode.into()
+            });
 
         Self { abi: Some(artifact.abi), bytecode, deployed_bytecode }
     }

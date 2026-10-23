@@ -71,8 +71,4 @@ license-files = [{ path = "LICENSE-UNICODE", hash = 0x3fb01745 }]
 unknown-registry = "warn"
 # Lint level for what to happen when a crate from a git repository that is not
 # in the allow list is encountered
-unknown-git = "deny"
-allow-git = [
-    "https://github.com/paradigmxyz/reth",
-    "https://github.com/tempoxyz/tempo",
-]
+unknown-git = "allow"
