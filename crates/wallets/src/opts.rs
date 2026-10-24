@@ -21,7 +21,8 @@ pub type MaybeTempoWallet = ();
 /// 5. AWS KMS
 /// 6. Google Cloud KMS
 /// 7. Turnkey
-/// 8. Browser wallet
+/// 8. Azure Key Vault
+/// 9. Browser wallet
 #[derive(Clone, Debug, Default, Serialize, Parser)]
 #[command(next_help_heading = "Wallet options", about = None, long_about = None)]
 pub struct WalletOpts {
@@ -111,6 +112,16 @@ pub struct WalletOpts {
     /// See: <https://docs.turnkey.com/getting-started/quickstart>
     #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "turnkey"))]
     pub turnkey: bool,
+
+    /// Use Azure Key Vault.
+    ///
+    /// Ensure the AZURE_KEY_VAULT_KEY_ID environment variable is set to the key identifier, e.g.
+    /// `https://<vault>.vault.azure.net/keys/<name>/<version>`. Without a version, the latest
+    /// version is used, so the address changes when the key is rotated.
+    ///
+    /// See: <https://learn.microsoft.com/azure/key-vault/keys/about-keys>
+    #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "azure-key-vault"))]
+    pub azure: bool,
 
     /// Tempo access key private key.
     ///
@@ -216,6 +227,9 @@ impl WalletOpts {
                 eyre::eyre!("TURNKEY_ADDRESS could not be parsed as an Ethereum address")
             })?;
             WalletSigner::from_turnkey(api_private_key, organization_id, address)?
+        } else if self.azure {
+            let key_id = get_env("AZURE_KEY_VAULT_KEY_ID")?;
+            WalletSigner::from_azure(key_id).await?
         } else if let Some(raw_wallet) = self.raw.signer()? {
             raw_wallet
         } else if let Some(path) = utils::maybe_get_keystore_path(
@@ -271,6 +285,7 @@ flag to set your key via:
 --aws
 --gcp
 --turnkey
+--azure
 --trezor
 --ledger
 --browser
@@ -341,6 +356,7 @@ mod tests {
             aws: false,
             gcp: false,
             turnkey: false,
+            azure: false,
             tempo_access_key: None,
             tempo_root_account: None,
         };
