@@ -29,6 +29,7 @@ impl From<Bytecode> for solc_artifacts::Bytecode {
             function_debug_data: Default::default(),
             generated_sources: Default::default(),
             link_references: Default::default(),
+            ethdebug: Default::default(),
         }
     }
 }

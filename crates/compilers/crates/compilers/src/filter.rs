@@ -5,9 +5,9 @@ use crate::{
     compilers::{CompilerSettings, ParsedSource, multi::MultiCompilerParsedSource},
     resolver::{GraphEdges, parse::SolData},
 };
-use foundry_compilers_artifacts::output_selection::OutputSelection;
+use foundry_compilers_artifacts::output_selection::{ContractOutputSelection, OutputSelection};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fmt,
     path::{Path, PathBuf},
 };
@@ -167,6 +167,27 @@ impl<'a> SparseOutputFilter<'a> {
                 .as_mut()
                 .remove("*")
                 .unwrap_or_else(OutputSelection::default_file_output_selection);
+
+            // Solc reads the global ETHDebug outputs only from the `*` file and contract
+            // selection.
+            let ethdebug = default_selection
+                .get("*")
+                .into_iter()
+                .flatten()
+                .filter(|output| {
+                    matches!(
+                        output.parse::<ContractOutputSelection>(),
+                        Ok(ContractOutputSelection::EthdebugResources
+                            | ContractOutputSelection::EthdebugCompilation)
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !ethdebug.is_empty() {
+                selection
+                    .as_mut()
+                    .insert("*".to_string(), BTreeMap::from([("*".to_string(), ethdebug)]));
+            }
 
             // set output selections
             for file in sources.0.keys() {
