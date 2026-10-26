@@ -111,15 +111,24 @@ impl Compiler for SolcCompiler {
 fn compiler_output(
     solc: &Solc,
     input: &SolcVersionedInput,
-    output: foundry_compilers_artifacts::CompilerOutput,
+    mut output: foundry_compilers_artifacts::CompilerOutput,
 ) -> Result<CompilerOutput<Error, Contract>> {
+    // The global ETHDebug output describes this compiler run, so keep it in the build info
+    // metadata.
+    let metadata = output
+        .ethdebug
+        .take()
+        .map(|ethdebug| ("ethdebug".to_string(), ethdebug))
+        .into_iter()
+        .collect();
     let build_info = lossless_build_info(solc, input, &output)?;
-    let foundry_compilers_artifacts::CompilerOutput { errors, sources, contracts } = output;
+    let foundry_compilers_artifacts::CompilerOutput { errors, sources, contracts, ethdebug: _ } =
+        output;
     Ok(CompilerOutput {
         errors,
         sources: filesystem_projection(&input.input, sources),
         contracts: filesystem_projection(&input.input, contracts),
-        metadata: BTreeMap::new(),
+        metadata,
         build_info,
     })
 }
@@ -696,6 +705,7 @@ mod tests {
             )]),
             contracts: BTreeMap::new(),
             errors: Vec::new(),
+            ethdebug: None,
         };
 
         assert!(compiler_output(&solc(), &input, output).unwrap().build_info.is_none());
@@ -732,6 +742,7 @@ mod tests {
                 ),
             ]),
             errors: Vec::new(),
+            ethdebug: None,
         };
 
         let temp = tempfile::tempdir().unwrap();
@@ -761,6 +772,49 @@ mod tests {
                 (3, PathBuf::from("generated.sol")),
             ])
         );
+    }
+
+    #[test]
+    fn keeps_ethdebug_output_in_build_info_metadata() {
+        let input = SolcVersionedInput::build(
+            Sources::from([(PathBuf::from("src/file.sol"), Source::new("contract File {}"))]),
+            Default::default(),
+            SolcLanguage::Solidity,
+            Version::new(0, 8, 37),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("src/file.sol");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "contract File {}").unwrap();
+        let mut solc = solc();
+        solc.base_path = Some(temp.path().to_path_buf());
+        let ethdebug = serde_json::json!({ "compilation": { "sources": [] } });
+
+        // A path-equivalent alias makes the build info keep the raw compiler output.
+        for names in [&["src/file.sol"][..], &["src/file.sol", "src//file.sol"]] {
+            let output = CompilerOutput {
+                sources: names
+                    .iter()
+                    .zip(1..)
+                    .map(|(name, id)| (name.to_string().into(), SourceFile { id, ast: None }))
+                    .collect(),
+                contracts: BTreeMap::new(),
+                errors: Vec::new(),
+                ethdebug: Some(ethdebug.clone()),
+            };
+
+            let output = compiler_output(&solc, &input, output).unwrap();
+            assert_eq!(output.build_info.is_some(), names.len() > 1);
+            assert_eq!(
+                output.metadata,
+                BTreeMap::from([("ethdebug".to_string(), ethdebug.clone())])
+            );
+
+            let build_info = RawBuildInfo::new(&input, &output, true).unwrap();
+            let output = &build_info.build_info["output"];
+            assert_eq!(output["metadata"]["ethdebug"], ethdebug);
+            assert!(output.get("ethdebug").is_none());
+        }
     }
 
     #[test]
