@@ -1319,9 +1319,10 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 .remappings
                 .iter()
                 .cloned()
-                .map(|mut remapping| {
-                    remapping.strip_prefix(&project.paths.root);
-                    remapping
+                .map(|remapping| {
+                    // Relativize both the target and the context; `Remapping::strip_prefix` only
+                    // touches the target.
+                    remapping.into_relative(&project.paths.root).to_relative_remapping()
                 })
                 .collect::<Vec<_>>();
 
@@ -1901,11 +1902,19 @@ mod tests {
             fs::create_dir_all(root.join("lib").join("dep")).unwrap();
             let paths = ProjectPathsConfig::builder().no_remappings().build_with_root(root);
             let mut project = Project::builder().paths(paths).build(Default::default()).unwrap();
-            project.paths.remappings = vec![Remapping {
-                context: None,
-                name: "dep/".into(),
-                path: project.paths.root.join("lib").join("dep").display().to_string(),
-            }];
+            let lib = project.paths.root.join("lib");
+            project.paths.remappings = vec![
+                Remapping {
+                    context: None,
+                    name: "dep/".into(),
+                    path: format!("{}/", lib.join("dep").display()),
+                },
+                Remapping {
+                    context: Some(format!("{}/", lib.join("owner").display())),
+                    name: "dep/".into(),
+                    path: format!("{}/", lib.join("dep").display()),
+                },
+            ];
             project
         };
 
@@ -1916,7 +1925,10 @@ mod tests {
         else {
             panic!("expected persistent cache");
         };
-        assert_eq!(original.cache.remappings[0].to_string(), "dep/=lib/dep/");
+        assert_eq!(
+            original.cache.remappings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["dep/=lib/dep/", "lib/owner/:dep/=lib/dep/"]
+        );
         original.cache.profiles.insert("cached-profile".into(), Default::default());
         original.cache.write(&old.paths.cache).unwrap();
 
