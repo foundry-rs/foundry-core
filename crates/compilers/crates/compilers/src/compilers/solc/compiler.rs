@@ -5,10 +5,10 @@ use crate::resolver::parse::SolData;
 use foundry_compilers_artifacts::{CompilerOutput, SolcInput, sources::Source};
 use foundry_compilers_core::{
     error::{Result, SolcError},
-    utils::{SUPPORTS_BASE_PATH, SUPPORTS_INCLUDE_PATH},
+    utils::{AMSTERDAM_SOLC, SUPPORTS_BASE_PATH, SUPPORTS_INCLUDE_PATH},
 };
 use itertools::Itertools;
-use semver::{Version, VersionReq};
+use semver::{BuildMetadata, Version, VersionReq};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::BTreeSet,
@@ -715,16 +715,39 @@ fn is_solar_binary(path: &Path) -> bool {
 
 fn version_from_output(output: Output) -> Result<Version> {
     if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let version = stdout
-            .lines()
-            .rfind(|l| !l.trim().is_empty())
-            .ok_or_else(|| SolcError::msg("Version not found in Solc output"))?;
-        // NOTE: semver doesn't like `+` in g++ in build metadata which is invalid semver
-        Ok(Version::from_str(&version.trim_start_matches("Version: ").replace(".g++", ".gcc"))?)
+        parse_version_output(&String::from_utf8_lossy(&output.stdout))
     } else {
         Err(SolcError::solc_output(&output))
     }
+}
+
+fn parse_version_output(stdout: &str) -> Result<Version> {
+    let version = stdout
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .ok_or_else(|| SolcError::msg("Version not found in Solc output"))?;
+    // NOTE: semver doesn't like `+` in g++ in build metadata which is invalid semver
+    match Version::from_str(&version.trim_start_matches("Version: ").replace(".g++", ".gcc")) {
+        Ok(version) => Ok(version),
+        Err(_) if stdout.contains("solar") => Ok(solar_native_version(stdout)),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Solar's native `--version` output, printed without `SOLC_WRAPPER=1`, has no solc version, so
+/// assume the latest solc release. The build metadata keeps Solar's own version, as in its
+/// solc-compatible output.
+fn solar_native_version(stdout: &str) -> Version {
+    #[cfg(feature = "svm-solc")]
+    let latest = RELEASES.1.last();
+    #[cfg(not(feature = "svm-solc"))]
+    let latest = None::<&Version>;
+    let mut version = latest.map_or(AMSTERDAM_SOLC, |v| Version::new(v.major, v.minor, v.patch));
+    let solar = stdout.lines().find_map(|l| l.split_once("Version: ")).map(|(_, v)| v.trim());
+    version.build = solar
+        .and_then(|v| BuildMetadata::new(&format!("solar.{v}")).ok())
+        .unwrap_or_else(|| BuildMetadata::new("solar").unwrap());
+    version
 }
 
 impl AsRef<Path> for Solc {
@@ -738,6 +761,24 @@ impl AsRef<Path> for Solc {
 mod tests {
     use super::*;
     use crate::Artifact;
+
+    #[test]
+    fn parses_solar_versions() {
+        let wrapped = "solar the Solidity compiler\nVersion: 0.8.38+commit.4c23216.solar.0.1.8\n";
+        let version = parse_version_output(wrapped).unwrap();
+        assert_eq!(version, Version::from_str("0.8.38+commit.4c23216.solar.0.1.8").unwrap());
+
+        let native = "solar Version: 0.1.8\nCommit SHA: 4c23216\nBuild Profile: release\n";
+        let version = parse_version_output(native).unwrap();
+        let latest = RELEASES.1.last().unwrap();
+        assert_eq!(
+            (version.major, version.minor, version.patch),
+            (latest.major, latest.minor, latest.patch)
+        );
+        assert_eq!(version.build.as_str(), "solar.0.1.8");
+
+        assert!(parse_version_output("Build Profile: release\n").is_err());
+    }
 
     #[test]
     fn test_version_parse() {
