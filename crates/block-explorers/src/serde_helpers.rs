@@ -42,7 +42,7 @@ impl TryFrom<StringifiedNumeric> for U64 {
 
     fn try_from(value: StringifiedNumeric) -> Result<Self, Self::Error> {
         let value = U256::try_from(value)?;
-        Ok(value.wrapping_to::<U64>())
+        u64::try_from(value).map(U64::from).map_err(|err| err.to_string())
     }
 }
 
@@ -203,6 +203,19 @@ mod tests {
         let json = r#"{ "bn": "0xffffffffffffffff" }"#;
         let tx: Txn = serde_json::from_str(json).unwrap();
         assert_eq!(tx.bn, BlockNumber::Number(U64::MAX));
+    }
+
+    #[test]
+    fn u64_conversion_rejects_values_above_u64_max() {
+        let max = StringifiedNumeric::String("18446744073709551615".to_string());
+        assert_eq!(U64::try_from(max).unwrap(), U64::MAX);
+
+        // u64::MAX + 1 used to wrap around to 0
+        let too_big = StringifiedNumeric::String("18446744073709551616".to_string());
+        assert!(U64::try_from(too_big).is_err());
+
+        let too_big_hex = StringifiedNumeric::String("0x10000000000000001".to_string());
+        assert!(U64::try_from(too_big_hex).is_err());
     }
 
     #[test]
