@@ -155,8 +155,9 @@ impl fmt::Display for Remapping {
         if let Some(context) = self.context.as_ref() {
             #[cfg(target_os = "windows")]
             {
-                // ensure we have `/` slashes on windows
-                s.push_str(&std::path::Path::new(context).to_slash_lossy());
+                // ensure we have `/` slashes on windows, keeping the trailing separator that
+                // marks the context as a directory prefix
+                s.push_str(&slash_prefix(context));
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -195,22 +196,27 @@ impl Remapping {
     pub fn slash_path(&mut self) {
         #[cfg(windows)]
         {
-            let slash = |path: &str| {
-                let has_boundary = path.ends_with(['/', '\\']);
-                let mut path = Path::new(path).to_slash_lossy().into_owned();
-                // Remapping targets and contexts are lexical prefixes, so their trailing
-                // separators must survive conversion (including repeated conversion).
-                if has_boundary && !path.ends_with('/') {
-                    path.push('/');
-                }
-                path
-            };
-            self.path = slash(&self.path);
+            self.path = slash_prefix(&self.path);
             if let Some(context) = self.context.as_mut() {
-                *context = slash(context);
+                *context = slash_prefix(context);
             }
         }
     }
+}
+
+/// Converts Windows separators in a remapping target or context to `/`.
+///
+/// Remapping targets and contexts are lexical prefixes, so a trailing separator must survive the
+/// conversion (including repeated conversion). `to_slash_lossy` only keeps a trailing `\`, so a
+/// prefix that already ends in `/` would otherwise lose it.
+#[cfg(windows)]
+fn slash_prefix(path: &str) -> String {
+    let has_boundary = path.ends_with(['/', '\\']);
+    let mut path = Path::new(path).to_slash_lossy().into_owned();
+    if has_boundary && !path.ends_with('/') {
+        path.push('/');
+    }
+    path
 }
 
 /// A relative [`Remapping`] that's aware of the current location
@@ -266,8 +272,9 @@ impl fmt::Display for RelativeRemapping {
         if let Some(context) = self.context.as_ref() {
             #[cfg(target_os = "windows")]
             {
-                // ensure we have `/` slashes on windows
-                s.push_str(&std::path::Path::new(context).to_slash_lossy());
+                // ensure we have `/` slashes on windows, keeping the trailing separator that
+                // marks the context as a directory prefix
+                s.push_str(&slash_prefix(context));
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -540,6 +547,16 @@ mod tests {
             }
         );
         assert_eq!(remapping.to_string(), "@my-lib/B.sol=lib/my-lib/B.sol".to_string());
+    }
+
+    #[test]
+    fn display_keeps_trailing_slash_of_context() {
+        for remapping in ["lib/owner/:dep/=lib/dep/", "lib/owner:dep/=lib/dep/"] {
+            let parsed = Remapping::from_str(remapping).unwrap();
+            assert_eq!(parsed.to_string(), remapping);
+            let relative = RelativeRemapping::from(parsed);
+            assert_eq!(relative.to_string(), remapping);
+        }
     }
 
     #[cfg(windows)]
