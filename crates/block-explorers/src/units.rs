@@ -40,7 +40,9 @@ impl TryFrom<i32> for Units {
     type Error = ConversionError;
 
     fn try_from(value: i32) -> Result<Self, Self::Error> {
-        Ok(Units::Other(value as u32))
+        u32::try_from(value)
+            .map(Units::Other)
+            .map_err(|_| ConversionError::UnrecognizedUnits(value.to_string()))
     }
 }
 
@@ -48,7 +50,9 @@ impl TryFrom<usize> for Units {
     type Error = ConversionError;
 
     fn try_from(value: usize) -> Result<Self, Self::Error> {
-        Ok(Units::Other(value as u32))
+        u32::try_from(value)
+            .map(Units::Other)
+            .map_err(|_| ConversionError::UnrecognizedUnits(value.to_string()))
     }
 }
 
@@ -169,5 +173,20 @@ mod tests {
         assert_eq!(Units::try_from(&"twei".to_string()).unwrap(), Twei);
         assert_eq!(Units::try_from(&"pwei".to_string()).unwrap(), Pwei);
         assert_eq!(Units::try_from(&"ether".to_string()).unwrap(), Ether);
+    }
+
+    #[test]
+    fn test_try_from_integers() {
+        assert_eq!(Units::try_from(18u32).unwrap(), Other(18));
+        assert_eq!(Units::try_from(18i32).unwrap(), Other(18));
+        assert_eq!(Units::try_from(18usize).unwrap(), Other(18));
+
+        // used to wrap around to `Other(u32::MAX)`
+        assert!(Units::try_from(-1i32).is_err());
+
+        // used to be truncated to `Other(18)` on 64-bit targets
+        if let Some(too_big) = (u32::MAX as usize).checked_add(19) {
+            assert!(Units::try_from(too_big).is_err());
+        }
     }
 }
