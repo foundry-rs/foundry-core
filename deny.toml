@@ -10,6 +10,11 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2026-0173 proc-macro-error2 is unmaintained
     # TODO: Remove after next alloy-rs/core release that no longer depends on proc-macro-error2.
     "RUSTSEC-2026-0173",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0387 crypto-bigint constant-time fixes
+    # are only released in 0.7.6; crypto-bigint 0.5.5 is still pulled in through
+    # elliptic-curve 0.13 (k256/alloy-signer) and has no patched release.
+    # TODO: Remove once the 0.13 elliptic-curve stack is no longer in the tree.
+    "RUSTSEC-2026-0387",
 ]
 
 # This section is considered when running `cargo deny check bans`.
