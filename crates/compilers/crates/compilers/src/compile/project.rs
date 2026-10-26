@@ -122,12 +122,10 @@ use foundry_compilers_core::{
 use rayon::prelude::*;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
-use std::path::Path;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
     fmt::Debug,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -319,6 +317,22 @@ pub trait Preprocessor<C: Compiler>: Debug {
     ) -> Result<()> {
         self.preprocess(compiler, input, paths, mocks)
     }
+
+    /// Whether a cached source can be preprocessed differently when the source-unit set changes.
+    ///
+    /// `source` is an absolute path and may be outside the current compilation request. Returning
+    /// `false` preserves its artifacts unless an affected dependency requires invalidation. The
+    /// default invalidates every cached source. Overrides must include sources whose rewriting
+    /// eligibility can change, even if they were not rewritten previously.
+    ///
+    /// Increment [`Self::cache_version`] when changing this policy.
+    fn is_source_context_sensitive(
+        &self,
+        _source: &Path,
+        _paths: &ProjectPathsConfig<C::Language>,
+    ) -> bool {
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -419,9 +433,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         // which is unix style `/`
         sources.slash_paths();
 
-        let preprocessor_version =
-            preprocessor.as_ref().map(|preprocessor| preprocessor.cache_version());
-        let mut cache = ArtifactsCache::new(project, edges, preprocessor_version)?;
+        let mut cache = ArtifactsCache::new(project, edges, preprocessor.as_deref())?;
         // retain and compile only dirty sources and all their imports
         sources.filter(&mut cache);
 
@@ -537,13 +549,11 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 };
             let (normal_artifacts, normal_builds, edges) =
                 cache.consume(&Artifacts::default(), &Vec::new(), false)?;
-            let secondary_preprocessor_version =
-                preprocessor.as_ref().map(|preprocessor| preprocessor.cache_version());
             let mut cache = ArtifactsCache::with_storage(
                 project,
                 edges,
-                secondary_preprocessor_version,
                 Some(store.paths(&project.paths)),
+                preprocessor.as_deref(),
             )?;
             let mut mocks = cache.mocks();
             mocks.extend(normal_mocks.iter().cloned());
@@ -1232,8 +1242,6 @@ mod tests {
     };
     #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
-    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
-    use std::path::Path;
 
     fn known(paths: &[&str]) -> NativeDependencyState {
         NativeDependencyState::Known(paths.iter().map(PathBuf::from).collect::<BTreeSet<_>>())
