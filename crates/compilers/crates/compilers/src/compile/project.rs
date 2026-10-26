@@ -318,14 +318,17 @@ pub trait Preprocessor<C: Compiler>: Debug {
         self.preprocess(compiler, input, paths, mocks)
     }
 
-    /// Whether a cached source can be preprocessed differently when the source-unit set changes.
+    /// Whether a source can be preprocessed differently when the source-unit set changes.
     ///
-    /// `source` is an absolute path and may be outside the current compilation request. Returning
-    /// `false` preserves its artifacts unless an affected dependency requires invalidation. The
-    /// default invalidates every cached source. Overrides must include sources whose rewriting
-    /// eligibility can change, even if they were not rewritten previously.
+    /// `source` is an absolute path and may be outside the current compilation request, lack its
+    /// own cache entry, or no longer exist. Implementations must use a pure path predicate rather
+    /// than depend on file contents or existence. Returning `false` preserves its artifacts unless
+    /// an affected dependency requires invalidation. The default invalidates every cached source.
+    /// Overrides must include sources whose rewriting eligibility can change, even if they were
+    /// not rewritten previously.
     ///
-    /// Increment [`Self::cache_version`] when changing this policy.
+    /// Increment [`Self::cache_version`] when a previously insensitive source can become sensitive.
+    /// Narrowing this policy without changing preprocessing output does not require a new version.
     fn is_source_context_sensitive(
         &self,
         _source: &Path,
