@@ -207,20 +207,19 @@ where
         if amount_str == "-" {
             Ok(ParseUnits::I256(I256::ZERO))
         } else {
-            let _fi = U256::from(10_i64);
-            let mut n = I256::from_str(&amount_str)?;
-            n *= I256::from_raw(U256::from(10))
+            let n = I256::from_str(&amount_str)?;
+            let multiplier = I256::from_raw(U256::from(10))
                 .checked_pow(U256::from(exponent) - U256::from(dec_len))
                 .ok_or(ConversionError::ParseOverflow)?;
-            Ok(ParseUnits::I256(n))
+            Ok(ParseUnits::I256(n.checked_mul(multiplier).ok_or(ConversionError::ParseOverflow)?))
         }
     } else {
-        let mut a_uint = U256::from_str(&amount_str)
+        let a_uint = U256::from_str(&amount_str)
             .map_err(|e| ConversionError::FromDecStrError(e.to_string()))?;
-        a_uint *= U256::from(10)
+        let multiplier = U256::from(10)
             .checked_pow(U256::from(exponent - dec_len))
             .ok_or(ConversionError::ParseOverflow)?;
-        Ok(ParseUnits::U256(a_uint))
+        Ok(ParseUnits::U256(a_uint.checked_mul(multiplier).ok_or(ConversionError::ParseOverflow)?))
     }
 }
 
@@ -289,5 +288,25 @@ mod tests {
         let json = r#"{"source_code": "source code text"}"#;
         let de: Test = serde_json::from_str(json).unwrap();
         assert_eq!(de.source_code.source_code(), src);
+    }
+
+    #[test]
+    fn parse_units_rejects_overflow() {
+        // 2^256 / 10^18 rounded up: scaling by 1e18 no longer fits in a U256.
+        let too_big = "115792089237316195423570985008687907853269984665640564039458";
+        assert!(matches!(parse_units(too_big, "ether"), Err(ConversionError::ParseOverflow)));
+        assert!(matches!(
+            parse_units(format!("-{too_big}"), "ether"),
+            Err(ConversionError::ParseOverflow)
+        ));
+        assert!(matches!(
+            parse_units("1.5", "ether"),
+            Ok(ParseUnits::U256(v)) if v == U256::from(1_500_000_000_000_000_000u128)
+        ));
+        // The largest whole-ether amount still fits.
+        let max_ether = (U256::MAX / U256::from(10).pow(U256::from(18))).to_string();
+        assert!(parse_units(&max_ether, "ether").is_ok());
+        let min_ether = format!("-{}", (I256::MAX / I256::exp10(18)));
+        assert!(parse_units(&min_ether, "ether").is_ok());
     }
 }
