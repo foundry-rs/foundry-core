@@ -9,20 +9,20 @@ importers:
   .:
     dependencies:
       accounts:
-        specifier: ^0.19.1
-        version: 0.19.1(@types/react@19.3.0)(react@19.3.0)(typescript@7.0.2)(viem@2.57.4(typescript@7.0.2)(zod@4.6.5))
+        specifier: ^0.21.0
+        version: 0.21.0(@types/react@19.3.0)(react@19.3.1)(typescript@7.0.2)(viem@2.57.7(typescript@7.0.2)(zod@4.6.7))
       ox:
         specifier: ^0.14.30
-        version: 0.14.30(typescript@7.0.2)(zod@4.6.5)
+        version: 0.14.30(typescript@7.0.2)(zod@4.6.7)
       react:
-        specifier: ^19.3.0
-        version: 19.3.0
+        specifier: ^19.3.1
+        version: 19.3.1
       react-dom:
-        specifier: ^19.3.0
-        version: 19.3.0(react@19.3.0)
+        specifier: ^19.3.1
+        version: 19.3.1(react@19.3.1)
       viem:
-        specifier: ^2.57.4
-        version: 2.57.4(typescript@7.0.2)(zod@4.6.5)
+        specifier: ^2.57.7
+        version: 2.57.7(typescript@7.0.2)(zod@4.6.7)
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.5.15
@@ -429,8 +429,8 @@ packages:
       zod:
         optional: true
 
-  accounts@0.19.1:
-    resolution: {integrity: sha512-ka2NF2tFdHl/MKK6du2kQaaH7xFMacxhQttdBnio1/FaieO86phc8z3N2q5j+95DkV6rkS/drJ/gCWD7mYMTBA==}
+  accounts@0.21.0:
+    resolution: {integrity: sha512-O1GorMiji8r+cssybPp4OY2IREEb9bRIQJa5ax4wJV8yp7mrUPoQ0ZdKARTspGk8i3kM9bGmKuXv29AB3NKfiw==}
     peerDependencies:
       '@privy-io/react-auth': '>=3.25.0'
       '@react-native-async-storage/async-storage': ^3.0.2
@@ -647,16 +647,8 @@ packages:
       typescript:
         optional: true
 
-  ox@0.14.53:
-    resolution: {integrity: sha512-VYDH+wwlNX8ysfrbUJDZHVvXNyhfXtspXjWz0Rg6mFmSQNXzXWihADyEOlcq553/RNRkyWyg2NNeCGVmnMAeFQ==}
-    peerDependencies:
-      typescript: '>=5.4.0'
-    peerDependenciesMeta:
-      typescript:
-        optional: true
-
-  ox@0.14.54:
-    resolution: {integrity: sha512-52PGH6ldJmWY9+iy/TBSJUsCSy5NmLvkVBYTINmO8srsjRrCmCdO575kGizmZ1jpNQ1gnlpVwiciIpU37fcULA==}
+  ox@0.14.56:
+    resolution: {integrity: sha512-Feinlj+deWEam6RIwurRE+eHZ2N3hoUb3AAjQ10BmxRCYIymfqNkv0eZ+4ln4GkgDmSGLD2rGtTMqsFYSVDC6w==}
     peerDependencies:
       typescript: '>=5.4.0'
     peerDependenciesMeta:
@@ -674,13 +666,13 @@ packages:
     resolution: {integrity: sha512-49cGhUbXj8Qenv0iTMxA1cFBzxXoctpC9Ujd77t1WcbJIr6nF/eI7g/8MgxrYldFRuAXvja7xQRwavoW7kgrxQ==}
     engines: {node: ^10 || ^12 || >=14}
 
-  react-dom@19.3.0:
-    resolution: {integrity: sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q==}
+  react-dom@19.3.1:
+    resolution: {integrity: sha512-Y0bARz53lhEC1NMCASs0/j+faB/zqt3R8hpvg1e8+61ZVJ4UL0UdC4cBbXfZMcIuhrfgeILTLe+ZeBCavQPtKQ==}
     peerDependencies:
-      react: ^19.3.0
+      react: ^19.3.1
 
-  react@19.3.0:
-    resolution: {integrity: sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog==}
+  react@19.3.1:
+    resolution: {integrity: sha512-QNhWdt7nrgVWWQG58QuGsAR3jv3Hbe4mb4vz7w2csnHavciZJgda1CPNaldF6eVxv90ud3jUXpKlHL69gO38yw==}
     engines: {node: '>=0.10.0'}
 
   rolldown@1.2.13:
@@ -711,8 +703,8 @@ packages:
   undici-types@8.9.0:
     resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
-  viem@2.57.4:
-    resolution: {integrity: sha512-ro+8AKrcGU6tPfou0gBRYv6bxnU3tPxxJGY4qpJwjiR40eHCWzeGhrAgYMlIncFtlnry2/yGjz57WOC67oshCQ==}
+  viem@2.57.7:
+    resolution: {integrity: sha512-x3UqqrcQuESaRVK6a0BvNmoNP0SVhu913uxEAxYLJx1lNYnj6ylTntfUdakCUKjk1+T+63gkdwFGJQ2O5C/nRw==}
     peerDependencies:
       typescript: '>=5.0.4'
     peerDependenciesMeta:
@@ -793,8 +785,8 @@ packages:
     engines: {node: '>= 14.6'}
     hasBin: true
 
-  zod@4.6.5:
-    resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
   zustand@5.0.15:
     resolution: {integrity: sha512-MpSEjRiBkA9crSYeOUH32rJC7SVqAbm0Fqcqge/bUi2PPoLcBWKOsG+C8mevmpr8TwXHBVkChbbJiyvkE+i/3A==}
@@ -1010,36 +1002,36 @@ snapshots:
       '@rolldown/pluginutils': 1.0.1
       vite: 8.3.4(@types/node@26.6.5)(yaml@2.9.0)
 
-  abitype@1.2.3(typescript@7.0.2)(zod@4.6.5):
+  abitype@1.2.3(typescript@7.0.2)(zod@4.6.7):
     optionalDependencies:
       typescript: 7.0.2
-      zod: 4.6.5
+      zod: 4.6.7
 
-  abitype@1.2.4(typescript@7.0.2)(zod@4.6.5):
+  abitype@1.2.4(typescript@7.0.2)(zod@4.6.7):
     optionalDependencies:
       typescript: 7.0.2
-      zod: 4.6.5
+      zod: 4.6.7
 
-  abitype@1.3.0(typescript@7.0.2)(zod@4.6.5):
+  abitype@1.3.0(typescript@7.0.2)(zod@4.6.7):
     optionalDependencies:
       typescript: 7.0.2
-      zod: 4.6.5
+      zod: 4.6.7
 
-  accounts@0.19.1(@types/react@19.3.0)(react@19.3.0)(typescript@7.0.2)(viem@2.57.4(typescript@7.0.2)(zod@4.6.5)):
+  accounts@0.21.0(@types/react@19.3.0)(react@19.3.1)(typescript@7.0.2)(viem@2.57.7(typescript@7.0.2)(zod@4.6.7)):
     dependencies:
       hono: 4.13.13
       idb-keyval: 6.3.0
       jose: 6.2.12
       mipd: 0.0.7(typescript@7.0.2)
-      mppx: 0.12.0(hono@4.13.13)(typescript@7.0.2)(viem@2.57.4(typescript@7.0.2)(zod@4.6.5))
-      ox: 0.14.53(typescript@7.0.2)(zod@4.6.5)
-      wata: 0.4.2(react@19.3.0)(typescript@7.0.2)
-      webauthx: 0.1.2(typescript@7.0.2)(zod@4.6.5)
-      zod: 4.6.5
-      zustand: 5.0.15(@types/react@19.3.0)(react@19.3.0)
+      mppx: 0.12.0(hono@4.13.13)(typescript@7.0.2)(viem@2.57.7(typescript@7.0.2)(zod@4.6.7))
+      ox: 0.14.56(typescript@7.0.2)(zod@4.6.7)
+      wata: 0.4.2(react@19.3.1)(typescript@7.0.2)
+      webauthx: 0.1.2(typescript@7.0.2)(zod@4.6.7)
+      zod: 4.6.7
+      zustand: 5.0.15(@types/react@19.3.0)(react@19.3.1)
     optionalDependencies:
-      react: 19.3.0
-      viem: 2.57.4(typescript@7.0.2)(zod@4.6.5)
+      react: 19.3.1
+      viem: 2.57.7(typescript@7.0.2)(zod@4.6.7)
     transitivePeerDependencies:
       - '@modelcontextprotocol/sdk'
       - '@types/react'
@@ -1134,14 +1126,14 @@ snapshots:
     optionalDependencies:
       typescript: 7.0.2
 
-  mppx@0.12.0(hono@4.13.13)(typescript@7.0.2)(viem@2.57.4(typescript@7.0.2)(zod@4.6.5)):
+  mppx@0.12.0(hono@4.13.13)(typescript@7.0.2)(viem@2.57.7(typescript@7.0.2)(zod@4.6.7)):
     dependencies:
       '@stripe/stripe-js': 9.13.0
       eventsource-parser: 3.1.1
-      ox: 0.14.45(typescript@7.0.2)(zod@4.6.5)
+      ox: 0.14.45(typescript@7.0.2)(zod@4.6.7)
       structured-headers: 2.0.3
-      viem: 2.57.4(typescript@7.0.2)(zod@4.6.5)
-      zod: 4.6.5
+      viem: 2.57.7(typescript@7.0.2)(zod@4.6.7)
+      zod: 4.6.7
     optionalDependencies:
       hono: 4.13.13
     transitivePeerDependencies:
@@ -1149,7 +1141,7 @@ snapshots:
 
   nanoid@3.3.20: {}
 
-  ox@0.14.30(typescript@7.0.2)(zod@4.6.5):
+  ox@0.14.30(typescript@7.0.2)(zod@4.6.7):
     dependencies:
       '@adraffy/ens-normalize': 1.11.1
       '@noble/ciphers': 1.3.0
@@ -1157,14 +1149,14 @@ snapshots:
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
-      abitype: 1.2.4(typescript@7.0.2)(zod@4.6.5)
+      abitype: 1.2.4(typescript@7.0.2)(zod@4.6.7)
       eventemitter3: 5.0.1
     optionalDependencies:
       typescript: 7.0.2
     transitivePeerDependencies:
       - zod
 
-  ox@0.14.45(typescript@7.0.2)(zod@4.6.5):
+  ox@0.14.45(typescript@7.0.2)(zod@4.6.7):
     dependencies:
       '@adraffy/ens-normalize': 1.11.1
       '@noble/ciphers': 1.3.0
@@ -1172,14 +1164,14 @@ snapshots:
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
-      abitype: 1.3.0(typescript@7.0.2)(zod@4.6.5)
+      abitype: 1.3.0(typescript@7.0.2)(zod@4.6.7)
       eventemitter3: 5.0.1
     optionalDependencies:
       typescript: 7.0.2
     transitivePeerDependencies:
       - zod
 
-  ox@0.14.53(typescript@7.0.2)(zod@4.6.5):
+  ox@0.14.56(typescript@7.0.2)(zod@4.6.7):
     dependencies:
       '@adraffy/ens-normalize': 1.11.1
       '@noble/ciphers': 1.3.0
@@ -1187,22 +1179,7 @@ snapshots:
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
-      abitype: 1.3.0(typescript@7.0.2)(zod@4.6.5)
-      eventemitter3: 5.0.1
-    optionalDependencies:
-      typescript: 7.0.2
-    transitivePeerDependencies:
-      - zod
-
-  ox@0.14.54(typescript@7.0.2)(zod@4.6.5):
-    dependencies:
-      '@adraffy/ens-normalize': 1.11.1
-      '@noble/ciphers': 1.3.0
-      '@noble/curves': 1.9.1
-      '@noble/hashes': 1.8.0
-      '@scure/bip32': 1.7.0
-      '@scure/bip39': 1.6.0
-      abitype: 1.3.0(typescript@7.0.2)(zod@4.6.5)
+      abitype: 1.3.0(typescript@7.0.2)(zod@4.6.7)
       eventemitter3: 5.0.1
     optionalDependencies:
       typescript: 7.0.2
@@ -1219,12 +1196,12 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.2
 
-  react-dom@19.3.0(react@19.3.0):
+  react-dom@19.3.1(react@19.3.1):
     dependencies:
-      react: 19.3.0
+      react: 19.3.1
       scheduler: 0.28.0
 
-  react@19.3.0: {}
+  react@19.3.1: {}
 
   rolldown@1.2.13:
     dependencies:
@@ -1283,15 +1260,15 @@ snapshots:
 
   undici-types@8.9.0: {}
 
-  viem@2.57.4(typescript@7.0.2)(zod@4.6.5):
+  viem@2.57.7(typescript@7.0.2)(zod@4.6.7):
     dependencies:
       '@noble/curves': 1.9.1
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
-      abitype: 1.2.3(typescript@7.0.2)(zod@4.6.5)
+      abitype: 1.2.3(typescript@7.0.2)(zod@4.6.7)
       isows: 1.0.7(ws@8.21.0)
-      ox: 0.14.54(typescript@7.0.2)(zod@4.6.5)
+      ox: 0.14.56(typescript@7.0.2)(zod@4.6.7)
       ws: 8.21.0
     optionalDependencies:
       typescript: 7.0.2
@@ -1312,22 +1289,22 @@ snapshots:
       fsevents: 2.3.3
       yaml: 2.9.0
 
-  wata@0.4.2(react@19.3.0)(typescript@7.0.2):
+  wata@0.4.2(react@19.3.1)(typescript@7.0.2):
     dependencies:
       '@hono/node-server': 1.19.17(hono@4.13.13)
       '@noble/ciphers': 2.4.0
       '@noble/hashes': 2.4.0
       hono: 4.13.13
-      ox: 0.14.30(typescript@7.0.2)(zod@4.6.5)
-      zod: 4.6.5
+      ox: 0.14.30(typescript@7.0.2)(zod@4.6.7)
+      zod: 4.6.7
     optionalDependencies:
-      react: 19.3.0
+      react: 19.3.1
     transitivePeerDependencies:
       - typescript
 
-  webauthx@0.1.2(typescript@7.0.2)(zod@4.6.5):
+  webauthx@0.1.2(typescript@7.0.2)(zod@4.6.7):
     dependencies:
-      ox: 0.14.30(typescript@7.0.2)(zod@4.6.5)
+      ox: 0.14.30(typescript@7.0.2)(zod@4.6.7)
     transitivePeerDependencies:
       - typescript
       - zod
@@ -1337,9 +1314,9 @@ snapshots:
   yaml@2.9.0:
     optional: true
 
-  zod@4.6.5: {}
+  zod@4.6.7: {}
 
-  zustand@5.0.15(@types/react@19.3.0)(react@19.3.0):
+  zustand@5.0.15(@types/react@19.3.0)(react@19.3.1):
     optionalDependencies:
       '@types/react': 19.3.0
-      react: 19.3.0
+      react: 19.3.1
