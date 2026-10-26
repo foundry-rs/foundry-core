@@ -1312,6 +1312,19 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         ) -> (CompilerCache<C::Settings>, bool, BTreeSet<String>) {
             // the currently configured paths
             let paths = project.paths.paths_relative();
+            // Store remappings relative to the root, like `paths` and `files`, so the cache stays
+            // valid when the project directory is moved or copied.
+            let remappings = project
+                .paths
+                .remappings
+                .iter()
+                .cloned()
+                .map(|remapping| {
+                    // Relativize both the target and the context; `Remapping::strip_prefix` only
+                    // touches the target.
+                    remapping.into_relative(&project.paths.root).to_relative_remapping()
+                })
+                .collect::<Vec<_>>();
 
             let mut discarded_builds = BTreeSet::new();
             if storage.cache.exists()
@@ -1323,9 +1336,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                     && preprocessor_version == cache.preprocessor_version
                     // Compare the serialized compiler form: remapping serialization normalizes
                     // Windows separators and trailing slashes. Keep order significant.
-                    && project
-                        .paths
-                        .remappings
+                    && remappings
                         .iter()
                         .map(ToString::to_string)
                         .eq(cache.remappings.iter().map(ToString::to_string))
@@ -1357,7 +1368,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 CompilerCache {
                     preprocessor_version,
                     preprocessor_source_units: current_source_units.clone(),
-                    remappings: project.paths.remappings.clone(),
+                    remappings,
                     ..CompilerCache::new(Default::default(), paths, preprocessed)
                 },
                 false,
@@ -1882,6 +1893,56 @@ mod tests {
             };
             assert!(reloaded.cache.profiles.is_empty(), "remapping change {change}");
         }
+    }
+
+    #[test]
+    fn cached_remappings_survive_moving_the_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_at = |root: &Path| {
+            fs::create_dir_all(root.join("lib").join("dep")).unwrap();
+            let paths = ProjectPathsConfig::builder().no_remappings().build_with_root(root);
+            let mut project = Project::builder().paths(paths).build(Default::default()).unwrap();
+            let lib = project.paths.root.join("lib");
+            project.paths.remappings = vec![
+                Remapping {
+                    context: None,
+                    name: "dep/".into(),
+                    path: format!("{}/", lib.join("dep").display()),
+                },
+                Remapping {
+                    context: Some(format!("{}/", lib.join("owner").display())),
+                    name: "dep/".into(),
+                    path: format!("{}/", lib.join("dep").display()),
+                },
+            ];
+            project
+        };
+
+        let old = project_at(&temp.path().join("a"));
+        let (_, edges) =
+            Graph::resolve_sources(&old.paths, Default::default()).unwrap().into_sources();
+        let ArtifactsCache::Cached(mut original) = ArtifactsCache::new(&old, edges, None).unwrap()
+        else {
+            panic!("expected persistent cache");
+        };
+        assert_eq!(
+            original.cache.remappings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["dep/=lib/dep/", "lib/owner/:dep/=lib/dep/"]
+        );
+        original.cache.profiles.insert("cached-profile".into(), Default::default());
+        original.cache.write(&old.paths.cache).unwrap();
+
+        // Copy the project, including its cache, to another directory.
+        let new = project_at(&temp.path().join("b"));
+        fs::create_dir_all(new.paths.cache.parent().unwrap()).unwrap();
+        fs::copy(&old.paths.cache, &new.paths.cache).unwrap();
+        let (_, edges) =
+            Graph::resolve_sources(&new.paths, Default::default()).unwrap().into_sources();
+        let ArtifactsCache::Cached(reloaded) = ArtifactsCache::new(&new, edges, None).unwrap()
+        else {
+            panic!("expected persistent cache");
+        };
+        assert!(reloaded.cache.profiles.contains_key("cached-profile"));
     }
 
     #[test]
