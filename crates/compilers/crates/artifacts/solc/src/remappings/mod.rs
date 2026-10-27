@@ -157,6 +157,10 @@ impl fmt::Display for Remapping {
             {
                 // ensure we have `/` slashes on windows
                 s.push_str(&std::path::Path::new(context).to_slash_lossy());
+                // `to_slash_lossy` drops trailing `/`, but contexts are lexical prefixes.
+                if context.ends_with(['/', '\\']) && !s.ends_with('/') {
+                    s.push('/');
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -268,6 +272,10 @@ impl fmt::Display for RelativeRemapping {
             {
                 // ensure we have `/` slashes on windows
                 s.push_str(&std::path::Path::new(context).to_slash_lossy());
+                // `to_slash_lossy` drops trailing `/`, but contexts are lexical prefixes.
+                if context.ends_with(['/', '\\']) && !s.ends_with('/') {
+                    s.push('/');
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -565,6 +573,38 @@ mod tests {
                 assert_eq!(remapping.path, expected);
                 assert_eq!(remapping.context.as_deref(), Some(expected));
                 assert_eq!(remapping.name, "forge-std/");
+            }
+        }
+    }
+
+    #[test]
+    fn serialization_preserves_context_boundaries() {
+        for (context, expected) in [
+            ("lib/owner/", "lib/owner/:dep/=lib/dep/"),
+            ("lib/owner", "lib/owner:dep/=lib/dep/"),
+            ("lib/Owner.sol", "lib/Owner.sol:dep/=lib/dep/"),
+            ("/", "/:dep/=lib/dep/"),
+            #[cfg(windows)]
+            (r"lib\owner\", "lib/owner/:dep/=lib/dep/"),
+            #[cfg(windows)]
+            (r"lib\owner/", "lib/owner/:dep/=lib/dep/"),
+        ] {
+            let remapping = Remapping {
+                context: Some(context.into()),
+                name: "dep/".into(),
+                path: "lib/dep/".into(),
+            };
+            let relative = RelativeRemapping::from(remapping.clone());
+            let expected = serde_json::to_string(expected).unwrap();
+            for json in [
+                serde_json::to_string(&remapping).unwrap(),
+                serde_json::to_string(&relative).unwrap(),
+            ] {
+                assert_eq!(json, expected);
+                let reloaded = serde_json::from_str::<Remapping>(&json).unwrap();
+                assert_eq!(serde_json::to_string(&reloaded).unwrap(), expected);
+                let reloaded = serde_json::from_str::<RelativeRemapping>(&json).unwrap();
+                assert_eq!(serde_json::to_string(&reloaded).unwrap(), expected);
             }
         }
     }
