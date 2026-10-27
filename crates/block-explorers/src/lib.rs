@@ -453,12 +453,13 @@ impl Cache {
             let _ = serde_json::to_writer(
                 &mut writer,
                 &CacheEnvelope {
+                    // A TTL too large to add to the current time (e.g. `Duration::MAX`) means the
+                    // item never expires, so saturate instead of panicking.
                     expiry: SystemTime::now()
-                        .checked_add(self.ttl)
-                        .expect("cache ttl overflowed")
                         .duration_since(UNIX_EPOCH)
                         .expect("system time is before unix epoch")
-                        .as_secs(),
+                        .checked_add(self.ttl)
+                        .map_or(u64::MAX, |expiry| expiry.as_secs()),
                     data: item,
                 },
             );
@@ -562,6 +563,18 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256};
     use std::process::Command;
+
+    #[test]
+    fn cache_with_max_ttl_does_not_panic() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path().to_path_buf(), Duration::MAX);
+        let address = Address::repeat_byte(0x11);
+        let abi = JsonAbi::default();
+
+        cache.set_abi(address, Some(&abi));
+
+        assert_eq!(cache.get_abi(address), Some(Some(abi)));
+    }
 
     // <https://github.com/foundry-rs/foundry/issues/4406>
     #[test]
