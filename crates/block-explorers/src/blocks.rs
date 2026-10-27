@@ -51,11 +51,15 @@ impl Client {
 /// The value comes from the explorer, so a malformed one is reported as an error instead of
 /// panicking.
 fn parse_block_number(result: &str) -> Result<BlockNumber> {
-    result.parse::<BlockNumber>().map_err(|err| {
-        EtherscanError::Unknown(format!(
+    match result.parse::<BlockNumber>() {
+        Ok(BlockNumber::Number(number)) => Ok(BlockNumber::Number(number)),
+        Ok(_) => Err(EtherscanError::Unknown(format!(
+            "invalid block number {result:?} in getblocknobytime response"
+        ))),
+        Err(err) => Err(EtherscanError::Unknown(format!(
             "invalid block number {result:?} in getblocknobytime response: {err}"
-        ))
-    })
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -71,7 +75,17 @@ mod tests {
 
     #[test]
     fn malformed_block_number_result_is_an_error() {
-        for result in ["", "Error! No closest block found", "-1", "18446744073709551616"] {
+        for result in [
+            "",
+            "Error! No closest block found",
+            "-1",
+            "18446744073709551616",
+            "latest",
+            "safe",
+            "finalized",
+            "earliest",
+            "pending",
+        ] {
             let err = parse_block_number(result).unwrap_err();
             assert!(
                 matches!(&err, EtherscanError::Unknown(msg) if msg.contains("getblocknobytime")),
