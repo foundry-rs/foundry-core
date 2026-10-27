@@ -40,14 +40,13 @@ impl SourceTree {
 
 /// Remove any components in a smart contract source path that could cause a directory traversal.
 pub(crate) fn sanitize_path(path: impl AsRef<Path>) -> PathBuf {
-    let sanitized = path
-        .as_ref()
+    path.as_ref()
         .components()
-        .filter(|x| x.as_os_str() != Component::ParentDir.as_os_str())
-        .collect::<PathBuf>();
-
-    // Force absolute paths to be relative
-    sanitized.strip_prefix("/").map(PathBuf::from).unwrap_or(sanitized)
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -102,5 +101,35 @@ mod tests {
         assert!(paths.contains(&tempdir.path().join("a")));
         assert!(paths.contains(&tempdir.path().join("b")));
         assert!(paths.contains(&tempdir.path().join("c")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_source_tree_write() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let outside = tempdir.path().join("outside.sol");
+        std::fs::write(&outside, "Original").unwrap();
+        let dir = tempdir.path().join("sources");
+        let relative = outside.strip_prefix(outside.ancestors().last().unwrap()).unwrap();
+        let path = outside.to_str().unwrap();
+
+        for (path, expected) in [
+            (outside.clone(), relative.to_path_buf()),
+            (PathBuf::from(path.replace('\\', "/")), relative.to_path_buf()),
+            (PathBuf::from(path.replacen(":\\", ":", 1)), relative.to_path_buf()),
+            (PathBuf::from(r"\\server\share\unc.sol"), PathBuf::from("unc.sol")),
+            (PathBuf::from(r"\\?\C:\verbatim.sol"), PathBuf::from("verbatim.sol")),
+            (
+                PathBuf::from(r"\\?\UNC\server\share\verbatim-unc.sol"),
+                PathBuf::from("verbatim-unc.sol"),
+            ),
+        ] {
+            let st = SourceTree {
+                entries: vec![SourceTreeEntry { path, contents: String::from("Source") }],
+            };
+            st.write_to(&dir).unwrap();
+            assert_eq!(std::fs::read_to_string(&outside).unwrap(), "Original");
+            assert_eq!(std::fs::read_to_string(dir.join(expected)).unwrap(), "Source");
+        }
     }
 }
