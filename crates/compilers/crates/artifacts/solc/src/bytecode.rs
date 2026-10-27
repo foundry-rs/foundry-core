@@ -6,8 +6,9 @@ use crate::{
 };
 use alloy_primitives::{Address, Bytes, hex};
 use foundry_compilers_core::utils;
+use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::LazyLock};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -350,7 +351,7 @@ impl BytecodeObject {
         match &self {
             Self::Bytecode(bytes) => Some(bytes.clone()),
             Self::Unlinked(s) => {
-                // Replace all __$xxx$__ placeholders with 32 zero bytes
+                // Replace all __$xxx$__ placeholders with 20 zero bytes
                 let bytes = replace_placeholders_and_decode(s).ok()?;
                 Some(bytes.into())
             }
@@ -443,10 +444,11 @@ where
     }
 }
 
-// Replace all __$xxx$__ placeholders with 32 zero bytes
+// Replace all __$xxx$__ placeholders with 20 zero bytes
 pub fn replace_placeholders_and_decode(s: &str) -> Result<Vec<u8>, hex::FromHexError> {
-    let re = regex::Regex::new(r"_\$.{34}\$_").expect("invalid regex");
-    let s = re.replace_all(s, "00".repeat(40));
+    static RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"__\$[0-9a-fA-F]{34}\$__").expect("invalid regex"));
+    let s = RE.replace_all(s, "00".repeat(20));
     hex::decode(s.as_bytes())
 }
 
@@ -615,6 +617,19 @@ mod tests {
             BytecodeObject::Unlinked("60__".into())
         );
     }
+
+    #[test]
+    fn strip_bytecode_placeholders_replaces_library_placeholder() {
+        let placeholder = format!("__{}__", utils::library_hash_placeholder("src/Lib.sol:Lib"));
+        let object = BytecodeObject::Unlinked(format!("6000{placeholder}6000"));
+
+        let mut expected = vec![0x60, 0x00];
+        expected.extend([0; 20]);
+        expected.extend([0x60, 0x00]);
+        assert_eq!(replace_placeholders_and_decode(object.as_str().unwrap()).unwrap(), expected);
+        assert_eq!(object.strip_bytecode_placeholders(), Some(expected.into()));
+    }
+
     #[test]
     fn unlinked_serialization_preserves_prefix_and_escaping() {
         for value in ["", "0x", "__Library__", "0x__Library__", "é\n\"\\"] {
