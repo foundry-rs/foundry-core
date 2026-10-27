@@ -7,7 +7,7 @@ use crate::{
     compilers::{Compiler, CompilerSettings, Language},
     output::Builds,
     project::{
-        NativeDependencyContexts, NativeDependencyState, NativeDependencyUpdates,
+        NativeDependencyContexts, NativeDependencyState, NativeDependencyUpdates, Preprocessor,
         collapse_native_dependency_contexts,
     },
     resolver::GraphEdges,
@@ -160,6 +160,54 @@ impl<S: CompilerSettings> CompilerCache<S> {
             });
             !versions.is_empty()
         });
+    }
+
+    /// Finds context-sensitive sources and every cached consumer of their artifacts.
+    fn source_context_dirty_sources(
+        &self,
+        root: &Path,
+        is_sensitive: impl Fn(&Path) -> bool,
+    ) -> HashSet<PathBuf> {
+        let mut dirty = self
+            .files
+            .keys()
+            .filter(|source| is_sensitive(source))
+            .cloned()
+            .collect::<HashSet<_>>();
+        if !dirty.is_empty() && dirty.len() == self.files.len() {
+            return dirty;
+        }
+
+        let mut importers = self.reverse_imports(root);
+        let mut conservative = Vec::new();
+        for (source, state) in collapse_native_dependency_contexts(&self.native_dependencies) {
+            if is_sensitive(&source) {
+                dirty.insert(source.clone());
+            }
+            match state {
+                NativeDependencyState::Known(dependencies) => {
+                    for dependency in dependencies {
+                        importers.entry(dependency).or_default().push(source.clone());
+                    }
+                }
+                NativeDependencyState::Conservative => conservative.push(source),
+            }
+        }
+        // An optimized dependency's own artifact may be absent while cached consumers survive.
+        dirty.extend(importers.keys().filter(|source| is_sensitive(source)).cloned());
+        if dirty.is_empty() {
+            return dirty;
+        }
+        dirty.extend(conservative);
+        let mut pending = dirty.iter().cloned().collect::<Vec<_>>();
+        while let Some(source) = pending.pop() {
+            for importer in importers.get(&source).into_iter().flatten() {
+                if dirty.insert(importer.clone()) {
+                    pending.push(importer.clone());
+                }
+            }
+        }
+        dirty
     }
 
     /// How many entries the cache contains where each entry represents a source file
@@ -1273,19 +1321,19 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     pub fn new(
         project: &'a Project<C, T>,
         edges: GraphEdges<C::Parser>,
-        preprocessor_version: Option<u64>,
+        preprocessor: Option<&dyn Preprocessor<C>>,
     ) -> Result<Self> {
-        Self::with_storage(project, edges, preprocessor_version, None)
+        Self::with_storage(project, edges, None, preprocessor)
     }
 
     pub fn with_storage(
         project: &'a Project<C, T>,
         edges: GraphEdges<C::Parser>,
-        preprocessor_version: Option<u64>,
         storage_paths: Option<Box<ProjectPathsConfig<C::Language>>>,
+        preprocessor: Option<&dyn Preprocessor<C>>,
     ) -> Result<Self> {
-        let preprocessed = preprocessor_version.is_some();
-        let preprocessor_version = preprocessor_version.unwrap_or_default();
+        let preprocessed = preprocessor.is_some();
+        let preprocessor_version = preprocessor.map_or(0, Preprocessor::cache_version);
         let current_source_units = if preprocessed {
             edges
                 .files()
@@ -1312,6 +1360,19 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         ) -> (CompilerCache<C::Settings>, bool, BTreeSet<String>) {
             // the currently configured paths
             let paths = project.paths.paths_relative();
+            // Store remappings relative to the root, like `paths` and `files`, so the cache stays
+            // valid when the project directory is moved or copied.
+            let remappings = project
+                .paths
+                .remappings
+                .iter()
+                .cloned()
+                .map(|remapping| {
+                    // Relativize both the target and the context; `Remapping::strip_prefix` only
+                    // touches the target.
+                    remapping.into_relative(&project.paths.root).to_relative_remapping()
+                })
+                .collect::<Vec<_>>();
 
             let mut discarded_builds = BTreeSet::new();
             if storage.cache.exists()
@@ -1323,9 +1384,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                     && preprocessor_version == cache.preprocessor_version
                     // Compare the serialized compiler form: remapping serialization normalizes
                     // Windows separators and trailing slashes. Keep order significant.
-                    && project
-                        .paths
-                        .remappings
+                    && remappings
                         .iter()
                         .map(ToString::to_string)
                         .eq(cache.remappings.iter().map(ToString::to_string))
@@ -1357,7 +1416,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 CompilerCache {
                     preprocessor_version,
                     preprocessor_source_units: current_source_units.clone(),
-                    remappings: project.paths.remappings.clone(),
+                    remappings,
                     ..CompilerCache::new(Default::default(), paths, preprocessed)
                 },
                 false,
@@ -1420,10 +1479,12 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             });
 
             let dirty_sources = if source_context_changed {
-                // Every cached artifact was preprocessed under a different source-unit context.
-                // Purge all of them, including files outside this narrower request, so they cannot
-                // be reused after the expanded context has been persisted.
-                cache.files.keys().cloned().collect()
+                // Include cached sources outside this request before persisting the new context.
+                cache.source_context_dirty_sources(&project.paths.root, |source| {
+                    preprocessor.is_none_or(|preprocessor| {
+                        preprocessor.is_source_context_sensitive(source, &project.paths)
+                    })
+                })
             } else {
                 HashSet::new()
             };
@@ -1885,6 +1946,56 @@ mod tests {
     }
 
     #[test]
+    fn cached_remappings_survive_moving_the_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_at = |root: &Path| {
+            fs::create_dir_all(root.join("lib").join("dep")).unwrap();
+            let paths = ProjectPathsConfig::builder().no_remappings().build_with_root(root);
+            let mut project = Project::builder().paths(paths).build(Default::default()).unwrap();
+            let lib = project.paths.root.join("lib");
+            project.paths.remappings = vec![
+                Remapping {
+                    context: None,
+                    name: "dep/".into(),
+                    path: format!("{}/", lib.join("dep").display()),
+                },
+                Remapping {
+                    context: Some(format!("{}/", lib.join("owner").display())),
+                    name: "dep/".into(),
+                    path: format!("{}/", lib.join("dep").display()),
+                },
+            ];
+            project
+        };
+
+        let old = project_at(&temp.path().join("a"));
+        let (_, edges) =
+            Graph::resolve_sources(&old.paths, Default::default()).unwrap().into_sources();
+        let ArtifactsCache::Cached(mut original) = ArtifactsCache::new(&old, edges, None).unwrap()
+        else {
+            panic!("expected persistent cache");
+        };
+        assert_eq!(
+            original.cache.remappings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["dep/=lib/dep/", "lib/owner/:dep/=lib/dep/"]
+        );
+        original.cache.profiles.insert("cached-profile".into(), Default::default());
+        original.cache.write(&old.paths.cache).unwrap();
+
+        // Copy the project, including its cache, to another directory.
+        let new = project_at(&temp.path().join("b"));
+        fs::create_dir_all(new.paths.cache.parent().unwrap()).unwrap();
+        fs::copy(&old.paths.cache, &new.paths.cache).unwrap();
+        let (_, edges) =
+            Graph::resolve_sources(&new.paths, Default::default()).unwrap().into_sources();
+        let ArtifactsCache::Cached(reloaded) = ArtifactsCache::new(&new, edges, None).unwrap()
+        else {
+            panic!("expected persistent cache");
+        };
+        assert!(reloaded.cache.profiles.contains_key("cached-profile"));
+    }
+
+    #[test]
     fn dependency_paths_follow_cache_root() {
         let old_root = PathBuf::from("old-root");
         let new_root = PathBuf::from("new-root");
@@ -2004,5 +2115,59 @@ mod tests {
         }
         assert_eq!(matcher.touched.len(), 16);
         assert!(matcher.matches(&file, &expected));
+    }
+
+    #[test]
+    fn source_context_invalidation_follows_cached_dependency_edges() {
+        let root = Path::new("/project");
+        let sensitive = root.join("test/Sensitive.sol");
+        let importer = root.join("src/Importer.sol");
+        let native = root.join("src/Native.sol");
+        let conservative = root.join("src/Conservative.sol");
+        let unrelated = root.join("src/Unrelated.sol");
+        let mut cache = CompilerCache::<SolcSettings>::default();
+        for source in [&sensitive, &importer, &native, &conservative, &unrelated] {
+            cache.files.insert(
+                source.clone(),
+                CacheEntry {
+                    last_modification_date: 0,
+                    content_hash: String::new(),
+                    interface_repr_hash: None,
+                    source_name: source.strip_prefix(root).unwrap().to_path_buf(),
+                    imports: BTreeSet::new(),
+                    version_requirement: None,
+                    artifacts: Default::default(),
+                    seen_by_compiler: true,
+                },
+            );
+        }
+        // Persisted imports are root-relative; native dependency paths are joined on cache read.
+        cache.files.get_mut(&importer).unwrap().imports.insert(PathBuf::from("test/Sensitive.sol"));
+        cache.native_dependencies.insert(
+            native.clone(),
+            context(NativeDependencyState::Known(BTreeSet::from([importer.clone()]))),
+        );
+        cache
+            .native_dependencies
+            .insert(conservative.clone(), context(NativeDependencyState::Conservative));
+        assert_eq!(
+            cache.source_context_dirty_sources(root, |source| source == sensitive),
+            HashSet::from([
+                sensitive.clone(),
+                importer.clone(),
+                native.clone(),
+                conservative.clone()
+            ])
+        );
+        assert!(cache.source_context_dirty_sources(root, |_| false).is_empty());
+        assert_eq!(
+            cache.source_context_dirty_sources(root, |_| true),
+            cache.files.keys().cloned().collect()
+        );
+        cache.files.remove(&sensitive);
+        assert_eq!(
+            cache.source_context_dirty_sources(root, |source| source == sensitive),
+            HashSet::from([sensitive, importer, native, conservative])
+        );
     }
 }

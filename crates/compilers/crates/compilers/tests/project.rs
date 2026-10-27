@@ -6463,6 +6463,12 @@ fn preprocessor_version_invalidates_cache() {
     assert!(compile(1).is_unchanged());
     assert!(!compile(2).is_unchanged());
     assert!(compile(2).is_unchanged());
+
+    project.add_source("Added", "pragma solidity ^0.8.0; contract Added {}").unwrap();
+    let output = compile(2);
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 2);
+    assert!(compile(2).is_unchanged());
 }
 
 #[test]
@@ -7717,4 +7723,140 @@ contract/* SPDX-License-Identifier: MIT */C {}
     );
     let flattened = project.add_source("Flattened", result).unwrap();
     project.project().compile_file(flattened).unwrap().assert_success();
+}
+
+#[derive(Debug)]
+struct ContextSensitivePreprocessor;
+
+impl Preprocessor<MultiCompiler> for ContextSensitivePreprocessor {
+    fn preprocess(
+        &self,
+        _compiler: &MultiCompiler,
+        _input: &mut MultiCompilerInput,
+        _paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+        _mocks: &mut HashSet<PathBuf>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn preprocess_with_dependencies(
+        &self,
+        _compiler: &MultiCompiler,
+        input: &mut MultiCompilerInput,
+        _paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+        _mocks: &mut HashSet<PathBuf>,
+        _state: &mut PreprocessorState,
+        source_units: &[PathBuf],
+    ) -> Result<()> {
+        if let MultiCompilerInput::Solc(input) = input
+            && source_units.iter().any(|path| path == Path::new("src/Added.sol"))
+            && let Some(source) = input.input.sources.get_mut(Path::new("test/Sensitive.t.sol"))
+        {
+            source.content = source.content.replace("return 1;", "return 2;").into();
+        }
+        Ok(())
+    }
+
+    fn is_source_context_sensitive(
+        &self,
+        source: &Path,
+        paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+    ) -> bool {
+        paths.is_test_or_script(source)
+    }
+}
+
+#[test]
+fn preprocessor_context_growth_preserves_insensitive_sources() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    for i in 0..5 {
+        project
+            .add_source(&format!("C{i}"), format!("pragma solidity ^0.8.0; contract C{i} {{}}"))
+            .unwrap();
+    }
+    let compile = || {
+        ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(ContextSensitivePreprocessor)
+            .compile()
+            .unwrap()
+    };
+    let output = compile();
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 5);
+
+    project.add_test("Sensitive.t.sol", "pragma solidity ^0.8.0; contract Sensitive { function value() public pure returns (uint) { return 1; } }").unwrap();
+    let output = compile();
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 1);
+    assert!(output.compiled_artifacts().find_first("Sensitive").is_some());
+    assert!(compile().is_unchanged());
+}
+
+#[test]
+fn preprocessor_context_growth_invalidates_out_of_scope_consumers() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Unrelated", "pragma solidity ^0.8.0; contract Unrelated {}").unwrap();
+    project.add_test("Sensitive.t.sol", "pragma solidity ^0.8.0; contract Sensitive { function value() public pure returns (uint) { return 1; } }").unwrap();
+    project.add_source("Consumer", "pragma solidity ^0.8.0; import '../test/Sensitive.t.sol'; contract Consumer is Sensitive {}").unwrap();
+    let compile = || {
+        ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(ContextSensitivePreprocessor)
+            .compile()
+            .unwrap()
+    };
+    let before = compile();
+    before.assert_success();
+    let added = project.add_source("Added", "pragma solidity ^0.8.0; contract Added {}").unwrap();
+    let output =
+        ProjectCompiler::with_sources(project.project(), Source::read_all([added]).unwrap())
+            .unwrap()
+            .with_preprocessor(ContextSensitivePreprocessor)
+            .compile()
+            .unwrap();
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 1);
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    assert_eq!(
+        cache.files.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([PathBuf::from("src/Added.sol"), PathBuf::from("src/Unrelated.sol")])
+    );
+
+    let after = compile();
+    after.assert_success();
+    assert_eq!(after.compiled_artifacts().artifact_files().count(), 2);
+    assert_ne!(
+        before.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap(),
+        after.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap()
+    );
+    assert!(compile().is_unchanged());
+
+    project.project_mut().cached = false;
+    let clean = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ContextSensitivePreprocessor)
+        .compile()
+        .unwrap();
+    clean.assert_success();
+    assert_eq!(
+        after.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap(),
+        clean.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap()
+    );
+
+    project.project_mut().cached = true;
+    fs::remove_file(project.paths().sources.join("Added.sol")).unwrap();
+    let removed = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ContextSensitivePreprocessor)
+        .compile()
+        .unwrap();
+    removed.assert_success();
+    assert_eq!(removed.compiled_artifacts().artifact_files().count(), 2);
+    assert_eq!(
+        before.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap(),
+        removed.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap()
+    );
 }
