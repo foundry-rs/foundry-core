@@ -4284,6 +4284,35 @@ fn can_detect_invalid_version() {
 }
 
 #[test]
+fn solar_resolves_mixed_exact_pragmas() {
+    let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
+    tmp.add_source("A", "pragma solidity =0.8.19; contract A {}").unwrap();
+    tmp.add_source("B", "pragma solidity =0.8.28; contract B {}").unwrap();
+
+    let solar = Version::parse("0.8.38+commit.3a70399.solar.0.2.0").unwrap();
+    tmp.project_mut().compiler.solc =
+        Some(SolcCompiler::Specific(Solc::new_with_version("/nonexistent/solar", solar)));
+    let graph = Graph::<MultiCompilerParser>::resolve(tmp.paths()).unwrap();
+    let resolved = graph.into_sources_by_version(tmp.project()).unwrap();
+    let mut versions = resolved
+        .sources
+        .values()
+        .flatten()
+        .map(|(version, ..)| version.to_string())
+        .collect::<Vec<_>>();
+    versions.sort();
+    assert_eq!(versions, ["0.8.19", "0.8.28"]);
+
+    // A solc binary still serves only its own version.
+    tmp.project_mut().compiler.solc = Some(SolcCompiler::Specific(Solc::new_with_version(
+        "/nonexistent/solc",
+        Version::new(0, 8, 38),
+    )));
+    let graph = Graph::<MultiCompilerParser>::resolve(tmp.paths()).unwrap();
+    assert!(graph.into_sources_by_version(tmp.project()).is_err());
+}
+
+#[test]
 fn test_severity_warnings() {
     let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
     // also treat warnings as error
