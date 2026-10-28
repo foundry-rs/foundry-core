@@ -11,16 +11,26 @@ static SOLC_BIN_LIST_URL: &str = "https://binaries.soliditylang.org/bin/list.txt
 /// e.g. `0.8.13` -> `0.8.13+commit.abaa5c0e`
 pub async fn lookup_compiler_version(version: &Version) -> Result<Version> {
     let response = reqwest::get(SOLC_BIN_LIST_URL).await?.text().await?;
+    find_compiler_version(&response, version)
+}
+
+/// Finds the full SemVer of `version` in the `list.txt` of solc builds.
+///
+/// The list is fetched over the network, so an entry that is not valid SemVer is reported as an
+/// error instead of panicking.
+fn find_compiler_version(list: &str, version: &Version) -> Result<Version> {
     // Ignore extra metadata (`pre` or `build`)
     let version = format!("{}.{}.{}", version.major, version.minor, version.patch);
     let prefix = format!("soljson-v{version}+");
-    let v = response
+    let v = list
         .lines()
         .find(|l| l.starts_with(&prefix))
         .map(|l| l.trim_start_matches("soljson-v").trim_end_matches(".js"))
         .ok_or_else(|| EtherscanError::MissingSolcVersion(version))?;
 
-    Ok(v.parse().expect("failed to parse semver"))
+    v.parse().map_err(|err| {
+        EtherscanError::Unknown(format!("invalid solc version {v:?} in {SOLC_BIN_LIST_URL}: {err}"))
+    })
 }
 
 /// Return None if empty, otherwise parse as [Address].
@@ -227,6 +237,27 @@ where
 mod tests {
     use super::*;
     use crate::contract::SourceCodeLanguage;
+
+    #[test]
+    fn finds_compiler_version_in_list() {
+        let list = "soljson-v0.8.12+commit.f00d7308.js\nsoljson-v0.8.13+commit.abaa5c0e.js\n";
+        let v = find_compiler_version(list, &Version::new(0, 8, 13)).unwrap();
+        assert_eq!(v, "0.8.13+commit.abaa5c0e".parse::<Version>().unwrap());
+    }
+
+    #[test]
+    fn missing_compiler_version_in_list() {
+        let list = "soljson-v0.8.12+commit.f00d7308.js\n";
+        let err = find_compiler_version(list, &Version::new(0, 8, 13)).unwrap_err();
+        assert!(matches!(err, EtherscanError::MissingSolcVersion(v) if v == "0.8.13"));
+    }
+
+    #[test]
+    fn malformed_compiler_version_in_list_is_an_error() {
+        let list = "soljson-v0.8.13+commit.abaa5c0e!.js\n";
+        let err = find_compiler_version(list, &Version::new(0, 8, 13)).unwrap_err();
+        assert!(matches!(err, EtherscanError::Unknown(_)), "{err:?}");
+    }
 
     #[test]
     fn can_deserialize_address_opt() {
