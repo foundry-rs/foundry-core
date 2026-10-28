@@ -39,9 +39,58 @@ impl Client {
             "0" => Err(EtherscanError::BlockNumberByTimestampFailed),
             "1" => Ok(BlockNumberByTimestamp {
                 timestamp,
-                block_number: response.result.parse::<BlockNumber>().unwrap(),
+                block_number: parse_block_number(&response.result)?,
             }),
             err => Err(EtherscanError::BadStatusCode(err.to_string())),
+        }
+    }
+}
+
+/// Parses the `result` of a successful `getblocknobytime` response.
+///
+/// The value comes from the explorer, so a malformed one is reported as an error instead of
+/// panicking.
+fn parse_block_number(result: &str) -> Result<BlockNumber> {
+    match result.parse::<BlockNumber>() {
+        Ok(BlockNumber::Number(number)) => Ok(BlockNumber::Number(number)),
+        Ok(_) => Err(EtherscanError::Unknown(format!(
+            "invalid block number {result:?} in getblocknobytime response"
+        ))),
+        Err(err) => Err(EtherscanError::Unknown(format!(
+            "invalid block number {result:?} in getblocknobytime response: {err}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::U64;
+
+    #[test]
+    fn parses_block_number_result() {
+        assert_eq!(parse_block_number("12345").unwrap(), BlockNumber::Number(U64::from(12345)));
+        assert_eq!(parse_block_number("0x3039").unwrap(), BlockNumber::Number(U64::from(12345)));
+    }
+
+    #[test]
+    fn malformed_block_number_result_is_an_error() {
+        for result in [
+            "",
+            "Error! No closest block found",
+            "-1",
+            "18446744073709551616",
+            "latest",
+            "safe",
+            "finalized",
+            "earliest",
+            "pending",
+        ] {
+            let err = parse_block_number(result).unwrap_err();
+            assert!(
+                matches!(&err, EtherscanError::Unknown(msg) if msg.contains("getblocknobytime")),
+                "{result:?}: {err:?}"
+            );
         }
     }
 }
