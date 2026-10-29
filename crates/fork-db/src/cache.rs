@@ -1,14 +1,12 @@
 //! Cache related abstraction
 
+use crate::AccountInfo;
 use alloy_chains::Chain;
-use alloy_primitives::{Address, B256, U256, map::U256Map};
-use parking_lot::RwLock;
-use revm::{
-    DatabaseCommit,
-    context::BlockEnv,
-    primitives::{KECCAK_EMPTY, StorageKeyMap, map::AddressHashMap},
-    state::{Account, AccountInfo, AccountStatus},
+use alloy_primitives::{
+    Address, B256, U256,
+    map::{AddressHashMap, U256Map},
 };
+use parking_lot::RwLock;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeMap,
 };
@@ -27,7 +25,7 @@ use url::Url;
 #[cfg(feature = "zstd")]
 use zstd::{Encoder, decode_all};
 
-pub type StorageInfo = StorageKeyMap<U256>;
+pub type StorageInfo = U256Map<U256>;
 
 /// Zstd frame magic number: `0x28B52FFD` (little-endian).
 const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
@@ -48,7 +46,7 @@ pub enum AccountFetchPolicy {
 
 /// A shareable Block database
 #[derive(Clone, Debug)]
-pub struct BlockchainDb<B = BlockEnv> {
+pub struct BlockchainDb<B = serde_json::Value> {
     /// Contains all the data
     db: Arc<MemDb>,
     /// metadata of the current config
@@ -284,13 +282,13 @@ impl<'de, B: DeserializeOwned + Default + Serialize> Deserialize<'de>
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut value = serde_json::Value::deserialize(deserializer)?;
 
-        // we check for any missing fields here
-        if let Some(obj) = value.as_object_mut() {
-            let default_value = serde_json::to_value(B::default()).unwrap();
-            for (key, value) in default_value.as_object().unwrap() {
-                if !obj.contains_key(key) {
-                    obj.insert(key.clone(), value.clone());
-                }
+        // Fill missing fields only for object defaults; serde_json::Value defaults to null.
+        if let Some(obj) = value.as_object_mut()
+            && let serde_json::Value::Object(defaults) =
+                serde_json::to_value(B::default()).map_err(serde::de::Error::custom)?
+        {
+            for (key, value) in defaults {
+                obj.entry(key).or_insert(value);
             }
         }
 
@@ -369,47 +367,6 @@ impl MemDb {
     pub fn do_insert_account(&self, address: Address, account: AccountInfo) {
         self.accounts.write().insert(address, account);
     }
-
-    /// The implementation of [DatabaseCommit::commit()]
-    pub fn do_commit(&self, changes: AddressHashMap<Account>) {
-        let mut storage = self.storage.write();
-        let mut accounts = self.accounts.write();
-        for (add, mut acc) in changes {
-            if acc.is_empty() || acc.is_selfdestructed() {
-                accounts.remove(&add);
-                storage.remove(&add);
-            } else {
-                // insert account
-                if let Some(code_hash) = acc
-                    .info
-                    .code
-                    .as_ref()
-                    .filter(|code| !code.is_empty())
-                    .map(|code| code.hash_slow())
-                {
-                    acc.info.code_hash = code_hash;
-                } else if acc.info.code_hash.is_zero() {
-                    acc.info.code_hash = KECCAK_EMPTY;
-                }
-                accounts.insert(add, acc.info);
-
-                let acc_storage = storage.entry(add).or_default();
-                if acc.status.contains(AccountStatus::Created) {
-                    acc_storage.clear();
-                }
-                for (index, value) in acc.storage {
-                    if value.present_value().is_zero() {
-                        acc_storage.remove(&index);
-                    } else {
-                        acc_storage.insert(index, value.present_value());
-                    }
-                }
-                if acc_storage.is_empty() {
-                    storage.remove(&add);
-                }
-            }
-        }
-    }
 }
 
 impl Clone for MemDb {
@@ -419,12 +376,6 @@ impl Clone for MemDb {
             accounts: RwLock::new(self.accounts.read().clone()),
             block_hashes: RwLock::new(self.block_hashes.read().clone()),
         }
-    }
-}
-
-impl DatabaseCommit for MemDb {
-    fn commit(&mut self, changes: AddressHashMap<Account>) {
-        self.do_commit(changes)
     }
 }
 
@@ -683,6 +634,9 @@ impl<B: Serialize + Clone> Drop for FlushJsonBlockCacheDB<B> {
 mod tests {
     use super::*;
 
+    use crate::test_utils::BlockEnv;
+    use alloy_primitives::{Bytes, hex, keccak256};
+
     #[test]
     fn can_deserialize_cache() {
         let s = r#"{
@@ -837,7 +791,9 @@ mod tests {
                     .with_account_fetch_policy(stored);
                 let db = BlockchainDb::new(meta.clone(), Some(path.clone()));
                 let address = Address::with_last_byte(1);
-                db.accounts().write().insert(address, AccountInfo::from_balance(U256::from(42)));
+                db.accounts()
+                    .write()
+                    .insert(address, AccountInfo { balance: U256::from(42), ..Default::default() });
                 db.cache().flush();
 
                 // Matching semantics preserve the actual balance, including nonzero values.
@@ -870,7 +826,7 @@ mod tests {
     fn roundtrip_meta_block_env() {
         let meta = BlockchainDbMeta {
             chain: Some(Chain::mainnet()),
-            block_env: BlockEnv { number: U256::from(1u64), ..Default::default() },
+            block_env: BlockEnv { number: U256::from(1u64) },
             hosts: BTreeSet::from(["eth-mainnet.alchemyapi.io".to_string()]),
             fork_hash: Some(B256::with_last_byte(1)),
             source_id: Some(B256::with_last_byte(2)),
@@ -879,6 +835,12 @@ mod tests {
         let json = serde_json::to_string(&meta).unwrap();
         let recovered: BlockchainDbMeta<BlockEnv> = serde_json::from_str(&json).unwrap();
         assert_eq!(meta, recovered);
+
+        let mut value = serde_json::to_value(&meta).unwrap();
+        value["block_env"] = serde_json::json!({});
+        let recovered: BlockchainDbMeta<BlockEnv> = serde_json::from_value(value).unwrap();
+        assert_eq!(recovered.block_env.number, U256::ZERO);
+        assert_eq!(recovered.fork_hash, meta.fork_hash);
     }
 
     #[test]
@@ -1021,5 +983,98 @@ mod tests {
         // Should load fine even with zstd feature enabled
         let loaded = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
         assert_eq!(loaded.db().accounts.read().len(), 0);
+    }
+
+    #[test]
+    fn persisted_revm_and_native_bytecode_roundtrip() {
+        let address = Address::with_last_byte(1);
+        let delegate = Address::with_last_byte(0x42);
+        let delegation =
+            Bytes::from_static(&hex!("ef01000000000000000000000000000000000000000042"));
+        for (code, original, delegated_address) in [
+            (
+                serde_json::json!({"LegacyAnalyzed": {
+                    "bytecode": "0x605b5b000000000000000000000000000000000000000000000000000000000000000000",
+                    "original_len": 4,
+                    "jump_table": {
+                        "order": "bitvec::order::Lsb0",
+                        "head": {"width": 8, "index": 0},
+                        "bits": 4,
+                        "data": [4]
+                    }
+                }}),
+                Bytes::from_static(&[0x60, 0x5b, 0x5b, 0x00]),
+                None,
+            ),
+            (
+                serde_json::json!({"Eip7702": {
+                    "delegated_address": delegate,
+                    "version": 0,
+                    "raw": delegation
+                }}),
+                delegation.clone(),
+                Some(delegate),
+            ),
+            (serde_json::json!(delegation), delegation, Some(delegate)),
+            // Historical legacy code may have an incomplete EIP-7702 prefix.
+            (serde_json::json!("0xef0100"), Bytes::from_static(&[0xef, 0x01, 0x00]), None),
+        ] {
+            let hash = keccak256(&original);
+            let fork_hash = B256::with_last_byte(2);
+            let source_id = B256::with_last_byte(3);
+            let json = serde_json::to_vec(&serde_json::json!({
+                "meta": {
+                    "block_env": {"number": "0xa", "timestamp": 123},
+                    "hosts": ["localhost"],
+                    "fork_hash": fork_hash,
+                    "source_id": source_id
+                },
+                "accounts": {address.to_string(): {
+                    "balance": "0x2a", "nonce": 7, "code_hash": hash, "code": code
+                }},
+                "storage": {address.to_string(): {"0x5": "0x63"}},
+                "block_hashes": {"0x9": B256::with_last_byte(4)},
+                "block_hash_cache_version": 1
+            }))
+            .unwrap();
+            #[cfg(not(feature = "zstd"))]
+            let payloads = [json];
+            #[cfg(feature = "zstd")]
+            let payloads = [json.clone(), zstd::encode_all(json.as_slice(), 3).unwrap()];
+
+            for payload in payloads {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("cache.json");
+                fs::write(&path, payload).unwrap();
+                let meta = BlockchainDbMeta::new(
+                    serde_json::json!({"number": "0xa", "timestamp": 123}),
+                    "http://localhost".into(),
+                )
+                .with_fork_identity(fork_hash, source_id);
+                // Exercise the default metadata type as well as disk loading and flushing.
+                for _ in 0..2 {
+                    let loaded = JsonBlockCacheDB::<serde_json::Value>::load(&path).unwrap();
+                    assert_eq!(*loaded.meta().read(), meta);
+                    let db: BlockchainDb = BlockchainDb::new(meta.clone(), Some(path.clone()));
+                    let accounts = db.accounts().read();
+                    let account = &accounts[&address];
+                    assert_eq!(account.balance, U256::from(42));
+                    assert_eq!(account.nonce, 7);
+                    assert_eq!(account.code_hash, hash);
+                    let bytecode = account.code.as_ref().unwrap();
+                    assert_eq!(bytecode.original_bytes(), original);
+                    assert_eq!(bytecode.eip7702_address(), delegated_address);
+                    if original.as_ref() == [0x60, 0x5b, 0x5b, 0x00] {
+                        let jumps = bytecode.legacy_jump_table().unwrap();
+                        assert!(!jumps.is_valid(1)); // PUSH data is not a JUMPDEST.
+                        assert!(jumps.is_valid(2));
+                    }
+                    drop(accounts);
+                    assert_eq!(db.storage().read()[&address][&U256::from(5)], U256::from(99));
+                    assert_eq!(db.block_hashes().read()[&U256::from(9)], B256::with_last_byte(4));
+                    db.cache().flush();
+                }
+            }
+        }
     }
 }

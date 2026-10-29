@@ -9,12 +9,14 @@ use std::{
 /// Result alias with `DatabaseError` as error
 pub type DatabaseResult<T> = Result<T, DatabaseError>;
 
-/// Errors that can happen when working with [`revm::Database`]
+/// Errors encountered while loading fork state.
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum DatabaseError {
     #[error("missing bytecode for code hash {0}")]
     MissingCode(B256),
+    #[error("block number exceeds the RPC range: {0}")]
+    BlockNumberOverflow(U256),
     #[error(transparent)]
     Recv(#[from] RecvError),
     #[error(transparent)]
@@ -45,7 +47,11 @@ impl DatabaseError {
             Self::GetTransaction(_, err) => Some(err),
             Self::AnyRequest(err) => Some(err),
             // Enumerate explicitly to make sure errors are updated if a new one is added.
-            Self::MissingCode(_) | Self::Recv(_) | Self::Send(_) | Self::BlockNotFound(_) => None,
+            Self::BlockNumberOverflow(_)
+            | Self::MissingCode(_)
+            | Self::Recv(_)
+            | Self::Send(_)
+            | Self::BlockNotFound(_) => None,
         }
     }
 
@@ -71,5 +77,3 @@ impl From<Infallible> for DatabaseError {
         match value {}
     }
 }
-
-impl revm::database::DBErrorMarker for DatabaseError {}
