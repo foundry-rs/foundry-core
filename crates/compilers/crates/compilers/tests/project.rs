@@ -4,8 +4,8 @@ use alloy_primitives::{Address, Bytes};
 use foundry_compilers::{
     Artifact, ConfigurableArtifacts, ExtraOutputFiles, ExtraOutputValues, Graph, Project,
     ProjectBuilder, ProjectCompileOutput, ProjectPathsConfig, RestrictionsWithVersion,
-    TestFileFilter,
-    buildinfo::BuildInfo,
+    TestFileFilter, Updates, apply_updates,
+    buildinfo::{BuildInfo, SourceEdit},
     cache::{CompilerCache, SOLIDITY_FILES_CACHE_FILENAME},
     compilers::{
         CompilerOutput,
@@ -4284,6 +4284,64 @@ fn can_detect_invalid_version() {
 }
 
 #[test]
+fn solar_resolves_mixed_exact_pragmas() {
+    let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
+    tmp.add_source("A", "pragma solidity =0.8.19; contract A {}").unwrap();
+    tmp.add_source("B", "pragma solidity =0.8.28; contract B {}").unwrap();
+
+    let solar = Version::parse("0.8.38+commit.3a70399.solar.0.2.0").unwrap();
+    tmp.project_mut().compiler.solc =
+        Some(SolcCompiler::Specific(Solc::new_with_version("/nonexistent/solar", solar)));
+    let graph = Graph::<MultiCompilerParser>::resolve(tmp.paths()).unwrap();
+    let resolved = graph.into_sources_by_version(tmp.project()).unwrap();
+    let mut versions = resolved
+        .sources
+        .values()
+        .flatten()
+        .map(|(version, ..)| version.to_string())
+        .collect::<Vec<_>>();
+    versions.sort();
+    assert_eq!(
+        versions,
+        ["0.8.19+commit.3a70399.solar.0.2.0", "0.8.28+commit.3a70399.solar.0.2.0"]
+    );
+
+    // A solc binary still serves only its own version.
+    tmp.project_mut().compiler.solc = Some(SolcCompiler::Specific(Solc::new_with_version(
+        "/nonexistent/solc",
+        Version::new(0, 8, 38),
+    )));
+    let graph = Graph::<MultiCompilerParser>::resolve(tmp.paths()).unwrap();
+    assert!(graph.into_sources_by_version(tmp.project()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn switching_from_solc_to_solar_recompiles() {
+    let solc = Solc::find_or_install(&Version::new(0, 8, 19)).unwrap();
+    let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
+    tmp.add_source("A", "pragma solidity =0.8.19; contract A {}").unwrap();
+    tmp.project_mut().compiler.solc = Some(SolcCompiler::Specific(solc.clone()));
+    tmp.compile().unwrap().assert_success();
+
+    // Stands in for Solar: it reports a Solar version and compiles with the same solc.
+    let solar = tmp.root().join("solar");
+    fs::write(
+        &solar,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n*--version*) echo 'Version: 0.8.37+commit.3a70399.solar.0.2.0';;\n*) exec '{}' \"$@\";;\nesac\n",
+            solc.solc.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&solar, fs::Permissions::from_mode(0o755)).unwrap();
+    tmp.project_mut().compiler.solc = Some(SolcCompiler::Specific(Solc::new(&solar).unwrap()));
+    let compiled = tmp.compile().unwrap();
+    compiled.assert_success();
+    assert!(!compiled.is_unchanged());
+}
+
+#[test]
 fn test_severity_warnings() {
     let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
     // also treat warnings as error
@@ -6469,6 +6527,100 @@ fn preprocessor_version_invalidates_cache() {
     output.assert_success();
     assert_eq!(output.compiled_artifacts().artifact_files().count(), 2);
     assert!(compile(2).is_unchanged());
+}
+
+#[test]
+fn build_context_maps_preprocessed_offsets() {
+    const SOURCE: &str = "pragma solidity ^0.8.0;\ncontract First { function f() public pure returns (uint) { return 1; } }\ncontract Second {}\n";
+
+    #[derive(Debug)]
+    struct EditingPreprocessor;
+
+    impl Preprocessor<MultiCompiler> for EditingPreprocessor {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            let start = SOURCE.find("1;").unwrap();
+            let updates = Updates::from([(
+                PathBuf::from("test/Edited.sol"),
+                BTreeSet::from([
+                    (start, start + 1, "1 + 2 + 3".to_string()),
+                    (SOURCE.len(), SOURCE.len(), "contract Appended {}\n".to_string()),
+                ]),
+            )]);
+            apply_updates(&mut input.input.sources, updates.clone());
+            state.record_source_updates(&updates);
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.project_mut().update_output_selection(|selection| {
+        selection
+            .0
+            .entry("*".to_string())
+            .or_default()
+            .insert(String::new(), vec!["ast".to_string()]);
+    });
+    let path = project.add_test("Edited", SOURCE).unwrap();
+    let compile = || {
+        let output = ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(EditingPreprocessor)
+            .compile()
+            .unwrap();
+        output.assert_success();
+        output
+    };
+    let edits = |output: &ProjectCompileOutput<MultiCompiler>| {
+        let (_, build) = output.builds().next().unwrap();
+        let (id, _) = build.source_id_to_path.iter().find(|(_, p)| **p == path).unwrap();
+        build.source_edits[id].clone()
+    };
+
+    let compiled = compile();
+    let start = SOURCE.find("1;").unwrap();
+    let expected = vec![
+        SourceEdit { start, end: start + 1, len: 9 },
+        SourceEdit { start: SOURCE.len(), end: SOURCE.len(), len: 21 },
+    ];
+    assert_eq!(edits(&compiled), expected);
+
+    // Solc reports locations in the edited source.
+    let ast = compiled.find_first("Second").unwrap().ast.as_ref().unwrap();
+    let second = ast
+        .nodes
+        .iter()
+        .find(|node| node.other.get("name").is_some_and(|name| name == "Second"))
+        .unwrap();
+    let compiled_start = second.src.start;
+    assert_eq!(compiled_start, SOURCE.find("contract Second").unwrap() + 8);
+    assert_eq!(
+        SourceEdit::original_offset(&expected, compiled_start),
+        SOURCE.find("contract Second").unwrap()
+    );
+
+    // Cached builds are read back from the build info.
+    let cached = compile();
+    assert!(cached.is_unchanged());
+    assert_eq!(edits(&cached), expected);
 }
 
 #[test]

@@ -76,6 +76,24 @@ impl Compiler for SolcCompiler {
 
     fn available_versions(&self, _language: &Self::Language) -> Vec<CompilerVersion> {
         match self {
+            // Solar implements every 0.8 release up to the one it reports, so sources pinned to
+            // different exact 0.8 versions can all resolve to it. Keeping its build metadata gives
+            // its artifacts a cache identity distinct from solc's.
+            Self::Specific(solc)
+                if solc.version.build.as_str().contains("solar")
+                    && solc.version.major == 0
+                    && solc.version.minor == 8 =>
+            {
+                (0..=solc.version.patch)
+                    .map(|patch| {
+                        CompilerVersion::Installed(Version {
+                            build: solc.version.build.clone(),
+                            ..Version::new(0, 8, patch)
+                        })
+                    })
+                    .collect()
+            }
+
             Self::Specific(solc) => vec![CompilerVersion::Installed(Version::new(
                 solc.version.major,
                 solc.version.minor,

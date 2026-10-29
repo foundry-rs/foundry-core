@@ -102,9 +102,9 @@
 
 use crate::{
     ArtifactOutput, CompilerSettings, ConfigurableArtifacts, Graph, Project, ProjectCompileOutput,
-    ProjectPathsConfig, Sources,
+    ProjectPathsConfig, Sources, Updates,
     artifact_output::Artifacts,
-    buildinfo::RawBuildInfo,
+    buildinfo::{RawBuildInfo, SourceEdit},
     cache::{ArtifactsCache, abi::AbiCache},
     compilers::{Compiler, CompilerInput, CompilerOutput, Language},
     filter::SparseOutputFilter,
@@ -235,6 +235,7 @@ pub struct PreprocessorState {
     active_replacements: HashSet<PathBuf>,
     updates: NativeDependencyUpdates,
     processed_sources: HashSet<PathBuf>,
+    source_edits: BTreeMap<PathBuf, Vec<SourceEdit>>,
 }
 
 impl PreprocessorState {
@@ -281,8 +282,24 @@ impl PreprocessorState {
         first_update
     }
 
+    /// Records the source updates applied to the current compiler job's input.
+    ///
+    /// The edits are stored in the job's build context so that compiler source locations can be
+    /// mapped back to the original sources. Only record updates that remain in the input.
+    pub fn record_source_updates(&mut self, updates: &Updates) {
+        for (file, updates) in updates {
+            self.source_edits.entry(file.clone()).or_default().extend(updates.iter().map(
+                |(start, end, update)| SourceEdit { start: *start, end: *end, len: update.len() },
+            ));
+        }
+    }
+
     fn into_updates(self) -> NativeDependencyUpdates {
         self.updates
+    }
+
+    fn take_source_edits(&mut self) -> BTreeMap<PathBuf, Vec<SourceEdit>> {
+        std::mem::take(&mut self.source_edits)
     }
 }
 
@@ -977,6 +994,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
         };
 
         let mut jobs = Vec::new();
+        let mut jobs_source_edits = Vec::new();
         for (language, versioned_sources) in self.sources {
             for (version, sources, (profile, opt_settings)) in versioned_sources {
                 let mut opt_settings = opt_settings.clone();
@@ -1043,6 +1061,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                     )?;
                 }
 
+                jobs_source_edits.push(preprocessor_state.take_source_edits());
                 jobs.push((input, profile, actually_dirty));
             }
         }
@@ -1068,7 +1087,9 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
 
         let mut aggregated = AggregatedCompilerOutput::default();
 
-        for (input, mut output, profile, actually_dirty) in results {
+        for ((input, mut output, profile, actually_dirty), source_edits) in
+            results.into_iter().zip(jobs_source_edits)
+        {
             let version = input.version();
 
             // Mark all files as seen by the compiler
@@ -1076,7 +1097,11 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                 cache.compiler_seen(file);
             }
 
-            let build_info = RawBuildInfo::new(&input, &output, project.build_info)?;
+            let mut build_info = RawBuildInfo::new(&input, &output, project.build_info)?;
+            build_info.build_context.source_edits = source_edits
+                .into_iter()
+                .filter_map(|(file, edits)| Some((output.sources.get(&file)?.id, edits)))
+                .collect();
 
             #[cfg(windows)]
             {
