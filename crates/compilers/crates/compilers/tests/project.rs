@@ -4341,6 +4341,25 @@ fn switching_from_solc_to_solar_recompiles() {
     assert!(!compiled.is_unchanged());
 }
 
+#[cfg(unix)]
+#[test]
+fn solar_reports_solc_version_under_any_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Stands in for Solar installed as `solc`: like Solar, it prints its native version unless
+    // `SOLC_WRAPPER=1` is set.
+    let solar = tmp.path().join("solc");
+    fs::write(
+        &solar,
+        "#!/bin/sh\nif [ \"$SOLC_WRAPPER\" = 1 ]; then\necho 'solar the Solidity compiler'\necho 'Version: 0.8.37+commit.82e7755.solar.0.2.0'\nelse\necho 'solar Version: 0.2.0'\necho 'Build Profile: dist'\nfi\n",
+    )
+    .unwrap();
+    fs::set_permissions(&solar, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        Solc::new(&solar).unwrap().version,
+        Version::parse("0.8.37+commit.82e7755.solar.0.2.0").unwrap()
+    );
+}
+
 #[test]
 fn test_severity_warnings() {
     let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
