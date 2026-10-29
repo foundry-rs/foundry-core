@@ -75,7 +75,10 @@ async fn external_can_verify_contract_json_multi_file_mainnet() {
 
     // This is an unverified address so we can check the verify failure message.
     // That message ensured that the contract successfully compiled on the etherscan side.
-    let address = "0x495f947276749Ce646f68AC8c248420045cb7b5e".parse().unwrap();
+    // It is an MEV bot whose source is not public, so it should stay unverified. The OpenSea
+    // Shared Storefront address used before has since been verified, and Etherscan now rejects
+    // the submission with "Contract source code already verified".
+    let address = "0xA69babEF1cA67A37Ffaf7a485DfFF3382056e78C".parse().unwrap();
     let contract = project.clone().standard_json_input(&root.join("ProtocolRewards.sol"));
     let contract_name = "test-data/rewards/ProtocolRewards.sol:ProtocolRewards".to_owned();
     let contract_json_string =

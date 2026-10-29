@@ -40,6 +40,11 @@ pub struct BuildContext<L> {
     pub source_id_to_path: BTreeMap<u32, PathBuf>,
     /// Language of the compiler.
     pub language: L,
+    /// Preprocessor edits by source id, sorted by start offset.
+    ///
+    /// Compiler source locations refer to the edited sources.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_edits: BTreeMap<u32, Vec<SourceEdit>>,
 }
 
 impl<L: Language> BuildContext<L> {
@@ -56,7 +61,7 @@ impl<L: Language> BuildContext<L> {
             }
         }
 
-        Ok(Self { source_id_to_path, language: input.language() })
+        Ok(Self { source_id_to_path, language: input.language(), source_edits: BTreeMap::new() })
     }
 
     pub fn join_all(&mut self, root: &Path) {
@@ -68,6 +73,37 @@ impl<L: Language> BuildContext<L> {
     pub fn with_joined_paths(mut self, root: &Path) -> Self {
         self.join_all(root);
         self
+    }
+}
+
+/// A replacement a preprocessor applied to a source before compilation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceEdit {
+    /// Start of the replaced byte range in the original source.
+    pub start: usize,
+    /// End of the replaced byte range in the original source.
+    pub end: usize,
+    /// Byte length of the replacement.
+    pub len: usize,
+}
+
+impl SourceEdit {
+    /// Maps a byte offset in the edited source back to the original source.
+    ///
+    /// `edits` must be sorted by start offset. Offsets inside a replacement map to its start.
+    pub fn original_offset(edits: &[Self], offset: usize) -> usize {
+        let mut shift = 0isize;
+        for edit in edits {
+            let start = edit.start.saturating_add_signed(shift);
+            if offset < start {
+                break;
+            }
+            if offset < start + edit.len {
+                return edit.start;
+            }
+            shift += edit.len as isize - (edit.end - edit.start) as isize;
+        }
+        offset.saturating_add_signed(-shift)
     }
 }
 
@@ -97,6 +133,7 @@ impl<L: Language> RawBuildInfo<L> {
             BuildContext {
                 source_id_to_path: payload.source_id_to_path.clone(),
                 language: input.language(),
+                source_edits: BTreeMap::new(),
             }
         } else {
             BuildContext::new(input, output)?
@@ -138,6 +175,18 @@ mod tests {
     use super::*;
     use crate::compilers::solc::SolcVersionedInput;
     use foundry_compilers_artifacts::{Contract, Error, SolcLanguage, Sources, sources::Source};
+
+    #[test]
+    fn maps_edited_offsets_to_original() {
+        // "abcdef" -> "aXXXcef": "b" grows to three bytes and "d" is removed.
+        let edits =
+            [SourceEdit { start: 1, end: 2, len: 3 }, SourceEdit { start: 3, end: 4, len: 0 }];
+        let original = [0, 1, 1, 1, 2, 4, 5];
+        for (offset, expected) in original.into_iter().enumerate() {
+            assert_eq!(SourceEdit::original_offset(&edits, offset), expected, "offset {offset}");
+        }
+        assert_eq!(SourceEdit::original_offset(&[], 7), 7);
+    }
 
     #[test]
     fn build_info_serde() {
