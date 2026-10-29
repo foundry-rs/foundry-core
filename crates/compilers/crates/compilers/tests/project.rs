@@ -4,8 +4,8 @@ use alloy_primitives::{Address, Bytes};
 use foundry_compilers::{
     Artifact, ConfigurableArtifacts, ExtraOutputFiles, ExtraOutputValues, Graph, Project,
     ProjectBuilder, ProjectCompileOutput, ProjectPathsConfig, RestrictionsWithVersion,
-    TestFileFilter,
-    buildinfo::BuildInfo,
+    TestFileFilter, Updates, apply_updates,
+    buildinfo::{BuildInfo, SourceEdit},
     cache::{CompilerCache, SOLIDITY_FILES_CACHE_FILENAME},
     compilers::{
         CompilerOutput,
@@ -6527,6 +6527,100 @@ fn preprocessor_version_invalidates_cache() {
     output.assert_success();
     assert_eq!(output.compiled_artifacts().artifact_files().count(), 2);
     assert!(compile(2).is_unchanged());
+}
+
+#[test]
+fn build_context_maps_preprocessed_offsets() {
+    const SOURCE: &str = "pragma solidity ^0.8.0;\ncontract First { function f() public pure returns (uint) { return 1; } }\ncontract Second {}\n";
+
+    #[derive(Debug)]
+    struct EditingPreprocessor;
+
+    impl Preprocessor<MultiCompiler> for EditingPreprocessor {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            let start = SOURCE.find("1;").unwrap();
+            let updates = Updates::from([(
+                PathBuf::from("test/Edited.sol"),
+                BTreeSet::from([
+                    (start, start + 1, "1 + 2 + 3".to_string()),
+                    (SOURCE.len(), SOURCE.len(), "contract Appended {}\n".to_string()),
+                ]),
+            )]);
+            apply_updates(&mut input.input.sources, updates.clone());
+            state.record_source_updates(&updates);
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.project_mut().update_output_selection(|selection| {
+        selection
+            .0
+            .entry("*".to_string())
+            .or_default()
+            .insert(String::new(), vec!["ast".to_string()]);
+    });
+    let path = project.add_test("Edited", SOURCE).unwrap();
+    let compile = || {
+        let output = ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(EditingPreprocessor)
+            .compile()
+            .unwrap();
+        output.assert_success();
+        output
+    };
+    let edits = |output: &ProjectCompileOutput<MultiCompiler>| {
+        let (_, build) = output.builds().next().unwrap();
+        let (id, _) = build.source_id_to_path.iter().find(|(_, p)| **p == path).unwrap();
+        build.source_edits[id].clone()
+    };
+
+    let compiled = compile();
+    let start = SOURCE.find("1;").unwrap();
+    let expected = vec![
+        SourceEdit { start, end: start + 1, len: 9 },
+        SourceEdit { start: SOURCE.len(), end: SOURCE.len(), len: 21 },
+    ];
+    assert_eq!(edits(&compiled), expected);
+
+    // Solc reports locations in the edited source.
+    let ast = compiled.find_first("Second").unwrap().ast.as_ref().unwrap();
+    let second = ast
+        .nodes
+        .iter()
+        .find(|node| node.other.get("name").is_some_and(|name| name == "Second"))
+        .unwrap();
+    let compiled_start = second.src.start;
+    assert_eq!(compiled_start, SOURCE.find("contract Second").unwrap() + 8);
+    assert_eq!(
+        SourceEdit::original_offset(&expected, compiled_start),
+        SOURCE.find("contract Second").unwrap()
+    );
+
+    // Cached builds are read back from the build info.
+    let cached = compile();
+    assert!(cached.is_unchanged());
+    assert_eq!(edits(&cached), expected);
 }
 
 #[test]
