@@ -256,7 +256,10 @@ mod tests {
     fn malformed_compiler_version_in_list_is_an_error() {
         let list = "soljson-v0.8.13+commit.abaa5c0e!.js\n";
         let err = find_compiler_version(list, &Version::new(0, 8, 13)).unwrap_err();
-        assert!(matches!(err, EtherscanError::Unknown(_)), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "Unknown error: invalid solc version \"0.8.13+commit.abaa5c0e!\" in https://binaries.soliditylang.org/bin/list.txt: unexpected character '!' after build metadata"
+        );
     }
 
     #[test]
