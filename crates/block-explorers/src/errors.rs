@@ -21,7 +21,7 @@ pub enum EtherscanError {
     #[error(transparent)]
     EnvVarNotFound(#[from] VarError),
     #[error(transparent)]
-    Reqwest(#[from] reqwest::Error),
+    Reqwest(reqwest::Error),
     #[error("Failed to deserialize content: {error}\n{content}")]
     Serde { error: serde_json::Error, content: String },
     #[error("Contract source code not verified: {0}")]
@@ -89,5 +89,61 @@ mod tests {
         let resp = "<!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 7]>    <html class=\"no-js ie7 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if IE 8]>    <html class=\"no-js ie8 oldie\" lang=\"en-US\"> <![endif]-->\n<!--[if gt IE 8]><!--> <html class=\"no-js\" lang=\"en-US\"> <!--<![endif]-->\n<head>\n<title>Attention Required! | Cloudflare</title>\n<meta charset=\"UTF-8\" />\n<meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\" />\n<meta http-equiv=\"X-UA-Compatible\" content=\"IE=Edge\" />\n<meta name=\"robots\" content=\"noindex, nofollow\" />\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />\n<link rel=\"stylesheet\" id=\"cf_styles-css\" href=\"/cdn-cgi/styles/cf.errors.css\" />\n<!--[if lt IE 9]><link rel=\"stylesheet\" id='cf_styles-ie-css' href=\"/cdn-cgi/styles/cf.errors.ie.css\" /><![endif]-->\n<style>body{margin:0;padding:0}</style>\n\n\n<!--[if gte IE 10]><!-->\n<script>\n  if (!navigator.cookieEnabled) {\n    window.addEventListener('DOMContentLoaded', function () {\n      var cookieEl = document.getElementById('cookie-alert');\n      cookieEl.style.display = 'block';\n    })\n  }\n</script>\n<!--<![endif]-->\n\n\n</head>\n<body>\n  <div id=\"cf-wrapper\">\n    <div class=\"cf-alert cf-alert-error cf-cookie-error\" id=\"cookie-alert\" data-translate=\"enable_cookies\">Please enable cookies.</div>\n    <div id=\"cf-error-details\" class=\"cf-error-details-wrapper\">\n      <div class=\"cf-wrapper cf-header cf-error-overview\">\n        <h1 data-translate=\"block_headline\">Sorry, you have been blocked</h1>\n        <h2 class=\"cf-subheadline\"><span data-translate=\"unable_to_access\">You are unable to access</span> polygonscan.com</h2>\n      </div><!-- /.header -->\n\n      <div class=\"cf-section cf-highlight\">\n        <div class=\"cf-wrapper\">\n          <div class=\"cf-screenshot-container cf-screenshot-full\">\n            \n              <span class=\"cf-no-screenshot error\"></span>\n            \n          </div>\n        </div>\n      </div><!-- /.captcha-container -->\n\n      <div class=\"cf-section cf-wrapper\">\n        <div class=\"cf-columns two\">\n          <div class=\"cf-column\">\n            <h2 data-translate=\"blocked_why_headline\">Why have I been blocked?</h2>\n\n            <p data-translate=\"blocked_why_detail\">This website is using a security service to protect itself from online attacks. The action you just performed triggered the security solution. There are several actions that could trigger this block including submitting a certain word or phrase, a SQL command or malformed data.</p>\n          </div>\n\n          <div class=\"cf-column\">\n            <h2 data-translate=\"blocked_resolve_headline\">What can I do to resolve this?</h2>\n\n            <p data-translate=\"blocked_resolve_detail\">You can email the site owner to let them know you were blocked. Please include what you were doing when this page came up and the Cloudflare Ray ID found at the bottom of this page.</p>\n          </div>\n        </div>\n      </div><!-- /.section -->\n\n      <div class=\"cf-error-footer cf-wrapper w-240 lg:w-full py-10 sm:py-4 sm:px-8 mx-auto text-center sm:text-left border-solid border-0 border-t border-gray-300\">\n  <p class=\"text-13\">\n    <span class=\"cf-footer-item sm:block sm:mb-1\">Cloudflare Ray ID: <strong class=\"font-semibold\">74d2aa5ed9e27367</strong></span>\n    <span class=\"cf-footer-separator sm:hidden\">&bull;</span>\n    <span id=\"cf-footer-item-ip\" class=\"cf-footer-item hidden sm:block sm:mb-1\">\n      Your IP:\n      <button type=\"button\" id=\"cf-footer-ip-reveal\" class=\"cf-footer-ip-reveal-btn\">Click to reveal</button>\n      <span class=\"hidden\" id=\"cf-footer-ip\">62.96.232.178</span>\n      <span class=\"cf-footer-separator sm:hidden\">&bull;</span>\n    </span>\n    <span class=\"cf-footer-item sm:block sm:mb-1\"><span>Performance &amp; security by</span> <a rel=\"noopener noreferrer\" href=\"https://www.cloudflare.com/5xx-error-landing\" id=\"brand_link\" target=\"_blank\">Cloudflare</a></span>\n    \n  </p>\n  <script>(function(){function d(){var b=a.getElementById(\"cf-footer-item-ip\"),c=a.getElementById(\"cf-footer-ip-reveal\");b&&\"classList\"in b&&(b.classList.remove(\"hidden\"),c.addEventListener(\"click\",function(){c.classList.add(\"hidden\");a.getElementById(\"cf-footer-ip\").classList.remove(\"hidden\")}))}var a=document;document.addEventListener&&a.addEventListener(\"DOMContentLoaded\",d)})();</script>\n</div><!-- /.error-footer -->\n\n\n    </div><!-- /#cf-error-details -->\n  </div><!-- /#cf-wrapper -->\n\n  <script>\n  window._cf_translation = {};\n  \n  \n</script>\n\n</body>\n</html>\n";
 
         assert!(is_blocked_by_cloudflare_response(resp));
+    }
+}
+
+impl From<reqwest::Error> for EtherscanError {
+    fn from(mut err: reqwest::Error) -> Self {
+        // Requests carry the API key as a query parameter, and the error message includes the URL.
+        if let Some(url) = err.url_mut() {
+            redact_api_key(url);
+        }
+        Self::Reqwest(err)
+    }
+}
+
+/// Replaces the value of the `apikey` query parameter, if any.
+fn redact_api_key(url: &mut reqwest::Url) {
+    if !url.query_pairs().any(|(key, _)| key.eq_ignore_ascii_case("apikey")) {
+        return;
+    }
+    let pairs = url
+        .query_pairs()
+        .map(|(key, value)| {
+            let value = if key.eq_ignore_ascii_case("apikey") {
+                "REDACTED".into()
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect::<Vec<_>>();
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn request_errors_do_not_show_the_api_key() {
+        // Nothing listens on the discard port, so the request fails with its URL in the error.
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:9/v2/api?chainid=1&apikey=SECRETKEY123&module=contract")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("SECRETKEY123"));
+
+        let message = EtherscanError::from(err).to_string();
+        assert!(!message.contains("SECRETKEY123"), "{message}");
+        assert!(message.contains("chainid=1&apikey=REDACTED&module=contract"), "{message}");
+    }
+
+    #[test]
+    fn urls_without_a_key_are_unchanged() {
+        let mut url = reqwest::Url::parse("https://api.etherscan.io/v2/api?chainid=1").unwrap();
+        redact_api_key(&mut url);
+        assert_eq!(url.as_str(), "https://api.etherscan.io/v2/api?chainid=1");
     }
 }
