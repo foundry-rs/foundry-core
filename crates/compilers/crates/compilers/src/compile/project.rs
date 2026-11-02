@@ -353,6 +353,20 @@ pub trait Preprocessor<C: Compiler>: Debug {
     ) -> bool {
         true
     }
+
+    /// Whether changing the source-unit set from `previous` to `current` can change the
+    /// preprocessing output of any cached source.
+    ///
+    /// Called only when the sets differ. Paths inside the project root are root-relative, and
+    /// other paths are absolute. Returning `false` keeps every cached artifact and records
+    /// `current` as the new context. The default treats every change as relevant.
+    fn is_source_context_change_relevant(
+        &self,
+        _previous: &BTreeSet<PathBuf>,
+        _current: &BTreeSet<PathBuf>,
+    ) -> bool {
+        true
+    }
 }
 
 #[derive(Debug)]
