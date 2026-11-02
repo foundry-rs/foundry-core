@@ -5440,7 +5440,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -7103,7 +7103,7 @@ dependencies = [
 [[package]]
 name = "solar-ast"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "alloy-primitives",
  "bumpalo",
@@ -7118,7 +7118,7 @@ dependencies = [
 [[package]]
 name = "solar-compiler"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "alloy-primitives",
  "idna_adapter",
@@ -7136,7 +7136,7 @@ dependencies = [
 [[package]]
 name = "solar-config"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "alloy-primitives",
  "colorchoice",
@@ -7147,7 +7147,7 @@ dependencies = [
 [[package]]
 name = "solar-data-structures"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "bumpalo",
  "diff",
@@ -7162,7 +7162,7 @@ dependencies = [
 [[package]]
 name = "solar-evmir"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "alloy-primitives",
  "smallvec",
@@ -7177,7 +7177,7 @@ dependencies = [
 [[package]]
 name = "solar-interface"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "annotate-snippets",
  "anstream",
@@ -7186,7 +7186,7 @@ dependencies = [
  "derive_more",
  "dunce",
  "inturn",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "once_map",
  "rayon",
  "scoped-tls",
@@ -7196,7 +7196,7 @@ dependencies = [
  "solar-config",
  "solar-data-structures",
  "solar-macros",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "tracing",
  "unicode-width",
 ]
@@ -7204,7 +7204,7 @@ dependencies = [
 [[package]]
 name = "solar-ir"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "alloy-primitives",
  "smallvec",
@@ -7217,7 +7217,7 @@ dependencies = [
 [[package]]
 name = "solar-lint"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "rayon",
  "solar-ast",
@@ -7228,7 +7228,7 @@ dependencies = [
 [[package]]
 name = "solar-macros"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7238,12 +7238,12 @@ dependencies = [
 [[package]]
 name = "solar-parse"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "alloy-primitives",
  "bitflags 2.13.2",
  "bumpalo",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "memchr",
  "num-bigint 0.5.1",
  "num-rational",
@@ -7259,7 +7259,7 @@ dependencies = [
 [[package]]
 name = "solar-sema"
 version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?rev=a2b4435466bff1b91459a1bc64b04e5e8144ed9f#a2b4435466bff1b91459a1bc64b04e5e8144ed9f"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
 dependencies = [
  "alloy-json-abi",
  "alloy-primitives",
@@ -7392,7 +7392,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "url",
  "zip",
 ]
@@ -7476,7 +7476,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.52.0",

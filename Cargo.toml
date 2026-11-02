@@ -239,7 +239,6 @@ yansi = "1.0.1"
 # cross-group crate dependencies
 foundry-compilers = { version = "0.21.0", path = "crates/compilers/crates/compilers" }
 
-# Socket blocks crates.io downloads of recently published versions in CI, so pull solar from git
-# until 0.3.0 clears the policy.
+# Always point solar at a release tag, never a branch revision.
 [patch.crates-io]
-solar-compiler = { git = "https://github.com/paradigmxyz/solar", rev = "a2b4435466bff1b91459a1bc64b04e5e8144ed9f" }
+solar-compiler = { git = "https://github.com/paradigmxyz/solar", tag = "v0.3.0" }
