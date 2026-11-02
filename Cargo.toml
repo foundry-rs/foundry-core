@@ -238,3 +238,7 @@ yansi = "1.0.1"
 
 # cross-group crate dependencies
 foundry-compilers = { version = "0.21.0", path = "crates/compilers/crates/compilers" }
+
+# Always point solar at a release tag, never a branch revision.
+[patch.crates-io]
+solar-compiler = { git = "https://github.com/paradigmxyz/solar", tag = "v0.3.0" }
