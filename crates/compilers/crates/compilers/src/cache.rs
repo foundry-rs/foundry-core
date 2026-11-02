@@ -1333,7 +1333,6 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         preprocessor: Option<&dyn Preprocessor<C>>,
     ) -> Result<Self> {
         let preprocessed = preprocessor.is_some();
-        let preprocessor_version = preprocessor.map_or(0, Preprocessor::cache_version);
         let current_source_units = if preprocessed {
             edges
                 .files()
@@ -1354,10 +1353,11 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             project: &Project<C, T>,
             storage: &ProjectPathsConfig<C::Language>,
             invalidate_cache: bool,
-            preprocessed: bool,
-            preprocessor_version: u64,
+            preprocessor: Option<&dyn Preprocessor<C>>,
             current_source_units: &BTreeSet<PathBuf>,
         ) -> (CompilerCache<C::Settings>, bool, BTreeSet<String>) {
+            let preprocessed = preprocessor.is_some();
+            let preprocessor_version = preprocessor.map_or(0, Preprocessor::cache_version);
             // the currently configured paths
             let paths = project.paths.paths_relative();
             // Store remappings relative to the root, like `paths` and `files`, so the cache stays
@@ -1399,11 +1399,16 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                         path.exists()
                     });
                     cache.preprocessor_source_units.extend(current_source_units.iter().cloned());
-                    if cache.preprocessor_source_units == previous_source_units {
-                        // Unchanged project paths, preprocessor policy, and source-unit context.
-                        return (cache, false, discarded_builds);
-                    }
-                    return (cache, true, discarded_builds);
+                    // Unchanged project paths and preprocessor policy. The source-unit context
+                    // changed only if the preprocessor can produce different output for it.
+                    let context_changed = cache.preprocessor_source_units != previous_source_units
+                        && preprocessor.is_none_or(|preprocessor| {
+                            preprocessor.is_source_context_change_relevant(
+                                &previous_source_units,
+                                &cache.preprocessor_source_units,
+                            )
+                        });
+                    return (cache, context_changed, discarded_builds);
                 }
                 // The new cache no longer references these build infos.
                 discarded_builds = cache.builds;
@@ -1431,14 +1436,8 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             let invalidate_cache = !edges.unresolved_imports().is_empty();
 
             // read the cache file if it already exists
-            let (mut cache, source_context_changed, discarded_builds) = get_cache(
-                project,
-                storage,
-                invalidate_cache,
-                preprocessed,
-                preprocessor_version,
-                &current_source_units,
-            );
+            let (mut cache, source_context_changed, discarded_builds) =
+                get_cache(project, storage, invalidate_cache, preprocessor, &current_source_units);
 
             cache.remove_missing_files();
 
