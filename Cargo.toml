@@ -193,6 +193,7 @@ alloy-primitives = { version = "1.6.0", features = [
 alloy-rlp = "0.3.15"
 alloy-signer = "2.2.0"
 alloy-signer-aws = "2.2.0"
+alloy-signer-azure = "2.5.0"
 alloy-signer-gcp = "2.2.0"
 alloy-signer-ledger = "2.2.0"
 alloy-signer-local = "2.2.0"
@@ -238,3 +239,32 @@ yansi = "1.0.1"
 
 # cross-group crate dependencies
 foundry-compilers = { version = "0.21.0", path = "crates/compilers/crates/compilers" }
+
+[patch.crates-io]
+# Temporary: `alloy-signer-azure` is merged in alloy (#4267) but not released yet.
+alloy-consensus = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-consensus-any = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-contract = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-eips = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-genesis = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-json-rpc = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-network = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-network-primitives = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-provider = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-rpc-client = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-rpc-types = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-rpc-types-any = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-rpc-types-engine = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-rpc-types-eth = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-serde = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-signer = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-signer-aws = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-signer-azure = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-signer-gcp = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-signer-ledger = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-signer-local = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-signer-trezor = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-signer-turnkey = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-transport = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-transport-http = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }
+alloy-tx-macros = { git = "https://github.com/alloy-rs/alloy", rev = "3834f7e82f850cda6a280fc63a709ac2f19b96d4" }

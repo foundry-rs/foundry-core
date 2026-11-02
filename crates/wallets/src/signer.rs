@@ -27,6 +27,9 @@ use alloy_signer_gcp::{
 #[cfg(feature = "turnkey")]
 use alloy_signer_turnkey::TurnkeySigner;
 
+#[cfg(feature = "azure-key-vault")]
+use alloy_signer_azure::AzureSigner;
+
 pub type Result<T> = std::result::Result<T, WalletSignerError>;
 
 const BIP32_HARDEN: u32 = 0x8000_0000;
@@ -49,6 +52,9 @@ pub enum WalletSigner {
     /// Wrapper around Turnkey signer.
     #[cfg(feature = "turnkey")]
     Turnkey(TurnkeySigner),
+    /// Wrapper around Azure Key Vault signer.
+    #[cfg(feature = "azure-key-vault")]
+    Azure(AzureSigner),
 }
 
 /// Probes HID availability without triggering `coins-ledger`'s panicking
@@ -182,6 +188,32 @@ impl WalletSigner {
         }
     }
 
+    /// Creates an Azure Key Vault signer from a key identifier, e.g.
+    /// `https://<vault>.vault.azure.net/keys/<name>/<version>`.
+    ///
+    /// The credential is resolved from the environment: a service principal secret
+    /// (`AZURE_CLIENT_SECRET`), workload identity (`AZURE_FEDERATED_TOKEN_FILE`), or else the
+    /// Azure CLI or Azure Developer CLI, followed by a managed identity.
+    pub async fn from_azure(key_id: String) -> Result<Self> {
+        #[cfg(feature = "azure-key-vault")]
+        {
+            let credential = crate::azure::credential()
+                .map_err(|e| WalletSignerError::Azure(Box::new(e.into())))?;
+
+            Ok(Self::Azure(
+                AzureSigner::from_key_id(&key_id, credential, None, None)
+                    .await
+                    .map_err(|e| WalletSignerError::Azure(Box::new(e)))?,
+            ))
+        }
+
+        #[cfg(not(feature = "azure-key-vault"))]
+        {
+            let _ = key_id;
+            Err(WalletSignerError::azure_unsupported())
+        }
+    }
+
     pub fn from_private_key(private_key: &B256) -> Result<Self> {
         Ok(Self::Local(PrivateKeySigner::from_bytes(private_key)?))
     }
@@ -191,7 +223,8 @@ impl WalletSigner {
     /// - for Ledger and Trezor signers the number of addresses to retrieve is specified as argument
     /// - the result for Ledger signers includes addresses available for both LedgerLive and Legacy
     ///   derivation paths
-    /// - for Local and AWS signers the result contains a single address
+    /// - for Local and remote (AWS, GCP, Turnkey, Azure) signers the result contains a single
+    ///   address
     /// - errors when retrieving addresses are logged but do not prevent returning available
     ///   addresses
     pub async fn available_senders(&self, max: usize) -> Result<Vec<Address>> {
@@ -249,6 +282,10 @@ impl WalletSigner {
             Self::Turnkey(turnkey) => {
                 senders.insert(alloy_signer::Signer::address(turnkey));
             }
+            #[cfg(feature = "azure-key-vault")]
+            Self::Azure(azure) => {
+                senders.insert(alloy_signer::Signer::address(azure));
+            }
         }
         Ok(senders.into_iter().collect())
     }
@@ -291,6 +328,8 @@ macro_rules! delegate {
             Self::Gcp($inner) => $e,
             #[cfg(feature = "turnkey")]
             Self::Turnkey($inner) => $e,
+            #[cfg(feature = "azure-key-vault")]
+            Self::Azure($inner) => $e,
         }
     };
 }
