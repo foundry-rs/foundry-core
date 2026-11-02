@@ -7935,6 +7935,14 @@ impl Preprocessor<MultiCompiler> for ContextSensitivePreprocessor {
     ) -> bool {
         paths.is_test_or_script(source)
     }
+
+    fn is_source_context_change_relevant(
+        &self,
+        previous: &BTreeSet<PathBuf>,
+        current: &BTreeSet<PathBuf>,
+    ) -> bool {
+        previous.symmetric_difference(current).any(|path| path == Path::new("src/Added.sol"))
+    }
 }
 
 #[test]
@@ -7962,6 +7970,16 @@ fn preprocessor_context_growth_preserves_insensitive_sources() {
     output.assert_success();
     assert_eq!(output.compiled_artifacts().artifact_files().count(), 1);
     assert!(output.compiled_artifacts().find_first("Sensitive").is_some());
+    assert!(compile().is_unchanged());
+
+    // Source-unit changes that cannot alter preprocessing keep context-sensitive artifacts.
+    let irrelevant =
+        project.add_source("Irrelevant", "pragma solidity ^0.8.0; contract Irrelevant {}").unwrap();
+    let output = compile();
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 1);
+    assert!(output.compiled_artifacts().find_first("Irrelevant").is_some());
+    fs::remove_file(irrelevant).unwrap();
     assert!(compile().is_unchanged());
 }
 
