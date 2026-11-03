@@ -520,6 +520,11 @@ impl<L> ProjectPathsConfig<L> {
             .remappings
             .iter()
             .filter_map(|r| {
+                // solc matches the literal prefix, so `dep//` or `dep/./` do not match `dep/A.sol`
+                // even though they are equal as paths.
+                if !import.to_string_lossy().starts_with(&r.name) {
+                    return None;
+                }
                 let stripped_import = import.strip_prefix(&r.name).ok()?;
                 if let Some(ctx) = r.context.as_ref()
                     && !path_starts_with_rooted(cwd, Path::new(ctx), &self.root)
@@ -1548,5 +1553,24 @@ mod tests {
             resolve("lib/pkg/src", "dep/sub/Lib.sol"),
             root.join("lib/pkg/lib/dep/sub/Lib.sol")
         );
+    }
+
+    #[test]
+    fn resolve_library_import_rejects_nonliteral_prefixes() {
+        let tmp = tempfile::tempdir().unwrap();
+        for prefix in ["dep//", "dep/./"] {
+            let config = ProjectPathsConfig::builder()
+                .no_remappings()
+                .remappings([
+                    "dep/=lib/good/".parse().unwrap(),
+                    format!("{prefix}=lib/bad/").parse().unwrap(),
+                ])
+                .build_with_root::<()>(tmp.path());
+            let root = &config.root;
+            assert_eq!(
+                config.resolve_library_import(&root.join("src"), Path::new("dep/A.sol")),
+                Some(root.join("lib/good/A.sol"))
+            );
+        }
     }
 }
