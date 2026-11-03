@@ -1,6 +1,7 @@
 use crate::error::WalletSignerError;
 use alloy_consensus::SignableTransaction;
 use alloy_dyn_abi::TypedData;
+use alloy_eips::eip7702::Authorization;
 use alloy_network::TxSigner;
 use alloy_primitives::{Address, B256, ChainId, Signature, hex};
 use alloy_signer::Signer;
@@ -184,6 +185,24 @@ impl WalletSigner {
 
     pub fn from_private_key(private_key: &B256) -> Result<Self> {
         Ok(Self::Local(PrivateKeySigner::from_bytes(private_key)?))
+    }
+
+    /// Signs an EIP-7702 authorization.
+    ///
+    /// Ledger devices refuse to sign raw hashes, so authorizations go to the device through the
+    /// dedicated EIP-7702 APDU, which shows the delegate address, chain ID and nonce on screen.
+    /// All other signers sign [`Authorization::signature_hash`]. Trezor does not support raw hash
+    /// signing and returns [`alloy_signer::UnsupportedSignerOperation::SignHash`].
+    pub async fn sign_authorization(
+        &self,
+        auth: &Authorization,
+    ) -> alloy_signer::Result<Signature> {
+        match self {
+            Self::Ledger(ledger) => {
+                ledger.sign_auth(auth).await.map_err(alloy_signer::Error::other)
+            }
+            _ => self.sign_hash(&auth.signature_hash()).await,
+        }
     }
 
     /// Returns a list of addresses available to use with current signer
@@ -487,5 +506,23 @@ mod tests {
                 actual: returned,
             }) if returned == actual
         ));
+    }
+
+    #[tokio::test]
+    async fn local_signer_signs_authorization_hash() {
+        let signer = WalletSigner::from_private_key(&B256::from([1_u8; 32])).unwrap();
+        let auth = Authorization {
+            chain_id: alloy_primitives::U256::from(1),
+            address: Address::repeat_byte(0x42),
+            nonce: 7,
+        };
+
+        let sig = signer.sign_authorization(&auth).await.unwrap();
+        assert_eq!(sig, signer.sign_hash(&auth.signature_hash()).await.unwrap());
+
+        assert_eq!(
+            sig.recover_address_from_prehash(&auth.signature_hash()).unwrap(),
+            Signer::address(&signer)
+        );
     }
 }

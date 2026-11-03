@@ -182,6 +182,7 @@ walkdir.opt-level = 3
 # alloy
 alloy-consensus = "2.2.0"
 alloy-dyn-abi = "1.6.0"
+alloy-eips = { version = "2.2.0", default-features = false }
 alloy-json-abi = { version = "1.3.1", features = ["serde_json"] }
 alloy-network = "2.2.0"
 alloy-primitives = { version = "1.6.0", features = [
