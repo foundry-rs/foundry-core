@@ -11,7 +11,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.98"
 authors = ["Foundry Contributors"]
 license = "MIT OR Apache-2.0"
 homepage = "https://getfoundry.sh"
@@ -222,7 +222,7 @@ serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }
 simdutf8 = "0.1.5"
 snapbox = "1.2.1"
-solar = { package = "solar-compiler", version = "=0.2.0", default-features = false }
+solar = { package = "solar-compiler", version = "=0.3.0", default-features = false }
 svm = { package = "svm-rs", version = "0.5.25", default-features = false }
 tempfile = "3.20.0"
 thiserror = "2.0.18"
@@ -238,3 +238,7 @@ yansi = "1.0.1"
 
 # cross-group crate dependencies
 foundry-compilers = { version = "0.21.0", path = "crates/compilers/crates/compilers" }
+
+# Always point solar at a release tag, never a branch revision.
+[patch.crates-io]
+solar-compiler = { git = "https://github.com/paradigmxyz/solar", tag = "v0.3.0" }

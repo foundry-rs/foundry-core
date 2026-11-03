@@ -31,7 +31,7 @@ alloy-rpc-types = { version = "2.2.0", features = ["eth"] }
 eyre.workspace = true
 futures = "0.3.32"
 
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 
 revm = { version = "43.0.0", features = ["std", "serde"] }
 
