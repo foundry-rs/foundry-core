@@ -513,15 +513,52 @@ impl<L> ProjectPathsConfig<L> {
         // if the import path starts with the name of the remapping then we get the resolved path by
         // removing the name and adding the remainder to the path of the remapping
         let cwd = cwd.strip_prefix(&self.root).unwrap_or(cwd);
-        if let Some(path) = self.remappings.iter().find_map(|r| {
-            let stripped_import = import.strip_prefix(&r.name).ok()?;
-            // only check remappings that are either global or for `cwd`
-            if let Some(ctx) = r.context.as_ref()
-                && !path_starts_with_rooted(cwd, Path::new(ctx), &self.root)
-            {
-                return None;
-            }
-
+        // Select the remapping the way solc does: among the remappings that are global or for
+        // `cwd` and whose name is a prefix of the import, the longest context wins, then the
+        // longest name, and the last one listed wins a tie. Some solc builds collapse repeated
+        // `/` in names before matching and others do not, so a name such as `dep//` that is not a
+        // literal prefix still matches once collapsed, and contexts are matched as paths. When a
+        // candidate matches only this way, solc may not select it, so the first listed candidate
+        // wins, as before. Other non-literal names such as `dep/./` never match.
+        let import_str = import.to_string_lossy();
+        let mut cwd_str = cwd.to_string_lossy().into_owned();
+        if cfg!(windows) {
+            cwd_str = cwd_str.replace('\\', "/");
+        }
+        cwd_str.push('/');
+        let candidates = self
+            .remappings
+            .iter()
+            .filter_map(|r| {
+                let literal_name = import_str.starts_with(&r.name);
+                if !literal_name {
+                    let mut name = r.name.clone();
+                    while name.contains("//") {
+                        name = name.replace("//", "/");
+                    }
+                    if !import_str.starts_with(&name) {
+                        return None;
+                    }
+                }
+                let stripped_import = import.strip_prefix(&r.name).ok()?;
+                if let Some(ctx) = r.context.as_ref()
+                    && !path_starts_with_rooted(cwd, Path::new(ctx), &self.root)
+                {
+                    return None;
+                }
+                let literal = literal_name
+                    && r.context.as_ref().is_none_or(|ctx| cwd_str.starts_with(ctx.as_str()));
+                Some((r, literal, stripped_import))
+            })
+            .collect::<Vec<_>>();
+        let best = if candidates.iter().all(|(_, literal, _)| *literal) {
+            candidates
+                .into_iter()
+                .max_by_key(|(r, ..)| (r.context.as_ref().map_or(0, |ctx| ctx.len()), r.name.len()))
+        } else {
+            candidates.into_iter().next()
+        };
+        if let Some(path) = best.map(|(r, _, stripped_import)| {
             let lib_path = if stripped_import.as_os_str().is_empty() && r.path.ends_with(".sol") {
                 r.path.clone().into()
             } else {
@@ -535,9 +572,9 @@ impl<L> ProjectPathsConfig<L> {
                 && r.path.ends_with("contracts/")
                 && !self.root.join(&lib_path).exists()
             {
-                return Some(Path::new(&r.path).join(adjusted_import));
+                return Path::new(&r.path).join(adjusted_import);
             }
-            Some(lib_path)
+            lib_path
         }) {
             Some(self.root.join(path))
         } else {
@@ -1505,5 +1542,100 @@ mod tests {
             .remapping(Remapping { context: None, name: "a/".into(), path: "b/".into() })
             .build_with_root::<()>(root);
         assert_eq!(explicit.remappings.len(), 1);
+    }
+
+    #[test]
+    fn resolve_library_import_prefers_solc_remapping_priority() {
+        let tmp = tempfile::tempdir().unwrap();
+        let remapping = |context: Option<&str>, name: &str, path: &str| Remapping {
+            context: context.map(Into::into),
+            name: name.into(),
+            path: path.into(),
+        };
+        let config = ProjectPathsConfig::builder()
+            .no_remappings()
+            .remappings([
+                remapping(None, "dep/", "lib/dep/"),
+                remapping(None, "dep/sub/", "lib/sub/"),
+                remapping(Some("lib/pkg/"), "dep/", "lib/pkg/lib/dep/"),
+                remapping(None, "dep/sub/", "lib/sub-last/"),
+            ])
+            .build_with_root::<()>(tmp.path());
+        // The builder canonicalizes the root, for example `/var` to `/private/var` on macOS.
+        let root = &config.root;
+        let resolve = |cwd: &str, import: &str| {
+            config.resolve_library_import(&root.join(cwd), Path::new(import)).unwrap()
+        };
+
+        // A context that matches the importer wins over an earlier context-free remapping.
+        assert_eq!(resolve("lib/pkg/src", "dep/Lib.sol"), root.join("lib/pkg/lib/dep/Lib.sol"));
+        // Without a matching context, the longest name wins and the last one wins a tie.
+        assert_eq!(resolve("src", "dep/Lib.sol"), root.join("lib/dep/Lib.sol"));
+        assert_eq!(resolve("src", "dep/sub/Lib.sol"), root.join("lib/sub-last/Lib.sol"));
+        // A longer context wins over a longer name.
+        assert_eq!(
+            resolve("lib/pkg/src", "dep/sub/Lib.sol"),
+            root.join("lib/pkg/lib/dep/sub/Lib.sol")
+        );
+    }
+
+    #[test]
+    fn resolve_library_import_prefers_literal_prefixes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolve = |remappings: &[&str], import: &str| {
+            let config = ProjectPathsConfig::builder()
+                .no_remappings()
+                .remappings(remappings.iter().map(|r| r.parse().unwrap()))
+                .build_with_root::<()>(tmp.path());
+            config
+                .resolve_library_import(&config.root.join("src"), Path::new(import))
+                .map(|path| path.strip_prefix(&config.root).unwrap().to_path_buf())
+        };
+
+        // Solc builds disagree when a name with repeated separators competes with a literal one,
+        // so the first listed candidate wins.
+        let good = Some(PathBuf::from("lib/good/A.sol"));
+        assert_eq!(resolve(&["dep/=lib/good/", "dep//=lib/bad/"], "dep/A.sol"), good);
+        assert_eq!(
+            resolve(&["dep//=lib/bad/", "dep/=lib/good/"], "dep/A.sol"),
+            Some(PathBuf::from("lib/bad/A.sol"))
+        );
+        assert_eq!(
+            resolve(&["dep/=lib/good/", "dep//sub/=lib/bad/"], "dep/sub/A.sol"),
+            Some(PathBuf::from("lib/good/sub/A.sol"))
+        );
+        assert_eq!(
+            resolve(&["dep//sub/=lib/nested/", "dep/=lib/good/"], "dep/sub/A.sol"),
+            Some(PathBuf::from("lib/nested/A.sol"))
+        );
+        // A context that matches only as a path does not outrank an earlier remapping.
+        let config = ProjectPathsConfig::builder()
+            .no_remappings()
+            .remappings([
+                "dep/=lib/good/".parse().unwrap(),
+                "lib/./pkg/:dep/=lib/bad/".parse().unwrap(),
+            ])
+            .build_with_root::<()>(tmp.path());
+        assert_eq!(
+            config.resolve_library_import(&config.root.join("lib/pkg/src"), Path::new("dep/A.sol")),
+            Some(config.root.join("lib/good/A.sol"))
+        );
+        // A name with repeated separators that matches literally keeps its literal length.
+        assert_eq!(
+            resolve(&["dep//sub/=lib/dep/"], "dep//sub/A.sol"),
+            Some(PathBuf::from("lib/dep/A.sol"))
+        );
+        assert_eq!(
+            resolve(&["dep//=lib/specific/", "dep/=lib/general/"], "dep//A.sol"),
+            Some(PathBuf::from("lib/specific/A.sol"))
+        );
+        // Repeated separators are collapsed, so such a name still applies on its own.
+        assert_eq!(resolve(&["dep//=lib/dep/"], "dep/A.sol"), Some(PathBuf::from("lib/dep/A.sol")));
+        // Names with `.` components never match, however many components they have.
+        assert_eq!(resolve(&["dep/=lib/good/", "dep/./=lib/bad/"], "dep/A.sol"), good);
+        assert_eq!(
+            resolve(&["dep/=lib/good/", "dep/./sub/=lib/bad/"], "dep/sub/A.sol"),
+            Some(PathBuf::from("lib/good/sub/A.sol"))
+        );
     }
 }
