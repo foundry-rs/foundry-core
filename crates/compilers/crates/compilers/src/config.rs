@@ -546,8 +546,15 @@ impl<L> ProjectPathsConfig<L> {
                 {
                     return None;
                 }
+                // Contexts reach solc with `/` separators on Windows, as the importer does.
                 let literal = literal_name
-                    && r.context.as_ref().is_none_or(|ctx| cwd_str.starts_with(ctx.as_str()));
+                    && r.context.as_ref().is_none_or(|ctx| {
+                        if cfg!(windows) {
+                            cwd_str.starts_with(&ctx.replace('\\', "/"))
+                        } else {
+                            cwd_str.starts_with(ctx.as_str())
+                        }
+                    });
                 Some((r, literal, stripped_import))
             })
             .collect::<Vec<_>>();
@@ -1636,6 +1643,32 @@ mod tests {
         assert_eq!(
             resolve(&["dep/=lib/good/", "dep/./sub/=lib/bad/"], "dep/sub/A.sol"),
             Some(PathBuf::from("lib/good/sub/A.sol"))
+        );
+    }
+
+    #[test]
+    fn resolve_library_import_ranks_native_absolute_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let root = ProjectPathsConfig::builder().build_with_root::<()>(&project).root;
+        let dependency = root.parent().unwrap().join("node_modules").join("dep");
+        // External contexts are absolute and use native separators.
+        let context = format!("{}{}", dependency.display(), std::path::MAIN_SEPARATOR);
+        let config = ProjectPathsConfig::builder()
+            .no_remappings()
+            .remappings([
+                "lib/=../node_modules/lib/".parse().unwrap(),
+                Remapping {
+                    context: Some(context),
+                    name: "lib/".into(),
+                    path: "../node_modules/dep/node_modules/lib/".into(),
+                },
+            ])
+            .build_with_root::<()>(&project);
+        assert_eq!(
+            config.resolve_library_import(&dependency.join("src"), Path::new("lib/Vm.sol")),
+            Some(root.join("../node_modules/dep/node_modules/lib/Vm.sol"))
         );
     }
 }
