@@ -94,56 +94,54 @@ mod tests {
 
 impl From<reqwest::Error> for EtherscanError {
     fn from(mut err: reqwest::Error) -> Self {
-        // Requests carry the API key as a query parameter, and the error message includes the URL.
+        // Strip query parameters, which can include API keys, but keep the endpoint for
+        // diagnostics.
         if let Some(url) = err.url_mut() {
-            redact_api_key(url);
+            url.set_query(None);
         }
         Self::Reqwest(err)
     }
-}
-
-/// Replaces the value of the `apikey` query parameter, if any.
-fn redact_api_key(url: &mut reqwest::Url) {
-    if !url.query_pairs().any(|(key, _)| key.eq_ignore_ascii_case("apikey")) {
-        return;
-    }
-    let pairs = url
-        .query_pairs()
-        .map(|(key, value)| {
-            let value = if key.eq_ignore_ascii_case("apikey") {
-                "REDACTED".into()
-            } else {
-                value.into_owned()
-            };
-            (key.into_owned(), value)
-        })
-        .collect::<Vec<_>>();
-    url.query_pairs_mut().clear().extend_pairs(pairs);
 }
 
 #[cfg(test)]
 mod redact_tests {
     use super::*;
 
-    #[tokio::test]
-    async fn request_errors_do_not_show_the_api_key() {
-        // Nothing listens on the discard port, so the request fails with its URL in the error.
-        let err = reqwest::Client::new()
-            .get("http://127.0.0.1:9/v2/api?chainid=1&apikey=SECRETKEY123&module=contract")
-            .send()
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("SECRETKEY123"));
-
-        let message = EtherscanError::from(err).to_string();
-        assert!(!message.contains("SECRETKEY123"), "{message}");
-        assert!(message.contains("chainid=1&apikey=REDACTED&module=contract"), "{message}");
+    #[test]
+    fn request_errors_strip_queries_but_keep_the_endpoint() {
+        for url in [
+            "https://api.etherscan.io/v2/api?chainid=1&apikey=SECRETKEY123&module=contract",
+            "https://api.etherscan.io/v2/api?token=SECRETKEY456",
+            "https://api.etherscan.io/v2/api",
+        ] {
+            let err = reqwest::Client::new()
+                .get("not a URL")
+                .build()
+                .unwrap_err()
+                .with_url(url.parse().unwrap());
+            let error = EtherscanError::from(err);
+            assert_eq!(
+                error.to_string(),
+                "builder error for url (https://api.etherscan.io/v2/api)"
+            );
+            assert_eq!(
+                format!("{error:?}"),
+                "Reqwest(reqwest::Error { kind: Builder, url: \"https://api.etherscan.io/v2/api\", source: RelativeUrlWithoutBase })"
+            );
+            let EtherscanError::Reqwest(err) = error else { panic!("expected a reqwest error") };
+            assert!(err.is_builder());
+            assert_eq!(err.url().unwrap().as_str(), "https://api.etherscan.io/v2/api");
+        }
     }
 
     #[test]
-    fn urls_without_a_key_are_unchanged() {
-        let mut url = reqwest::Url::parse("https://api.etherscan.io/v2/api?chainid=1").unwrap();
-        redact_api_key(&mut url);
-        assert_eq!(url.as_str(), "https://api.etherscan.io/v2/api?chainid=1");
+    fn errors_without_a_url_are_unchanged() {
+        let err = reqwest::Client::new().get("not a URL").build().unwrap_err();
+        assert!(err.url().is_none());
+        let message = err.to_string();
+        let debug = format!("Reqwest({err:?})");
+        let error = EtherscanError::from(err);
+        assert_eq!(error.to_string(), message);
+        assert_eq!(format!("{error:?}"), debug);
     }
 }
