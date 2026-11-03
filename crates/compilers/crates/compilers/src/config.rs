@@ -516,28 +516,34 @@ impl<L> ProjectPathsConfig<L> {
         // Select the remapping the way solc does: among the remappings that are global or for
         // `cwd` and whose name is a prefix of the import, the longest context wins, then the
         // longest name, and the last one listed wins a tie. Some solc builds collapse repeated
-        // `/` in names before matching and others do not, so a name such as `dep//` matches once
-        // collapsed. When such a name competes with a literal one the builds disagree, so the first
-        // listed candidate wins, as before. Other non-literal names such as `dep/./` never match.
+        // `/` in names before matching and others do not, so a name such as `dep//` that is not a
+        // literal prefix still matches once collapsed. When such a name competes with a literal
+        // one the builds disagree, so the first listed candidate wins, as before. Other
+        // non-literal names such as `dep/./` never match.
         let import_str = import.to_string_lossy();
         let candidates = self
             .remappings
             .iter()
             .filter_map(|r| {
-                let mut name = r.name.clone();
-                while name.contains("//") {
-                    name = name.replace("//", "/");
-                }
-                if !import_str.starts_with(&name) {
-                    return None;
-                }
+                let name_len = if import_str.starts_with(&r.name) {
+                    r.name.len()
+                } else {
+                    let mut name = r.name.clone();
+                    while name.contains("//") {
+                        name = name.replace("//", "/");
+                    }
+                    if !import_str.starts_with(&name) {
+                        return None;
+                    }
+                    name.len()
+                };
                 let stripped_import = import.strip_prefix(&r.name).ok()?;
                 if let Some(ctx) = r.context.as_ref()
                     && !path_starts_with_rooted(cwd, Path::new(ctx), &self.root)
                 {
                     return None;
                 }
-                Some((r, name.len(), stripped_import))
+                Some((r, name_len, stripped_import))
             })
             .collect::<Vec<_>>();
         let literal = |r: &Remapping| import_str.starts_with(&r.name);
@@ -1599,6 +1605,15 @@ mod tests {
         assert_eq!(
             resolve(&["dep//sub/=lib/nested/", "dep/=lib/good/"], "dep/sub/A.sol"),
             Some(PathBuf::from("lib/nested/A.sol"))
+        );
+        // A name with repeated separators that matches literally keeps its literal length.
+        assert_eq!(
+            resolve(&["dep//sub/=lib/dep/"], "dep//sub/A.sol"),
+            Some(PathBuf::from("lib/dep/A.sol"))
+        );
+        assert_eq!(
+            resolve(&["dep//=lib/specific/", "dep/=lib/general/"], "dep//A.sol"),
+            Some(PathBuf::from("lib/specific/A.sol"))
         );
         // Repeated separators are collapsed, so such a name still applies on its own.
         assert_eq!(resolve(&["dep//=lib/dep/"], "dep/A.sol"), Some(PathBuf::from("lib/dep/A.sol")));
