@@ -514,13 +514,13 @@ impl<L> ProjectPathsConfig<L> {
         // removing the name and adding the remainder to the path of the remapping
         let cwd = cwd.strip_prefix(&self.root).unwrap_or(cwd);
         // Select the remapping the way solc does: among the remappings that are global or for
-        // `cwd` and whose name is a literal prefix of the import, the longest context wins, then
-        // the longest name, and the last one listed wins a tie. Some solc builds collapse repeated
-        // `/` in names before matching, so a name such as `dep//` that matches only once collapsed
-        // is used only when no name matches literally. Other non-literal names such as `dep/./`
-        // never match.
+        // `cwd` and whose name is a prefix of the import, the longest context wins, then the
+        // longest name, and the last one listed wins a tie. Some solc builds collapse repeated
+        // `/` in names before matching and others do not, so a name such as `dep//` matches once
+        // collapsed. When such a name competes with a literal one the builds disagree, so the first
+        // listed candidate wins, as before. Other non-literal names such as `dep/./` never match.
         let import_str = import.to_string_lossy();
-        let best = self
+        let candidates = self
             .remappings
             .iter()
             .filter_map(|r| {
@@ -539,13 +539,17 @@ impl<L> ProjectPathsConfig<L> {
                 }
                 Some((r, name.len(), stripped_import))
             })
-            .max_by_key(|(r, name_len, _)| {
-                (
-                    import_str.starts_with(&r.name),
-                    r.context.as_ref().map_or(0, |ctx| ctx.len()),
-                    *name_len,
-                )
-            });
+            .collect::<Vec<_>>();
+        let literal = |r: &Remapping| import_str.starts_with(&r.name);
+        let ambiguous = candidates.iter().any(|(r, ..)| literal(r))
+            && candidates.iter().any(|(r, ..)| !literal(r));
+        let best = if ambiguous {
+            candidates.into_iter().next()
+        } else {
+            candidates.into_iter().max_by_key(|(r, name_len, _)| {
+                (r.context.as_ref().map_or(0, |ctx| ctx.len()), *name_len)
+            })
+        };
         if let Some(path) = best.map(|(r, _, stripped_import)| {
             let lib_path = if stripped_import.as_os_str().is_empty() && r.path.ends_with(".sol") {
                 r.path.clone().into()
@@ -1580,13 +1584,21 @@ mod tests {
                 .map(|path| path.strip_prefix(&config.root).unwrap().to_path_buf())
         };
 
-        // A literal prefix wins over any name with repeated separators.
+        // Solc builds disagree when a name with repeated separators competes with a literal one,
+        // so the first listed candidate wins.
         let good = Some(PathBuf::from("lib/good/A.sol"));
         assert_eq!(resolve(&["dep/=lib/good/", "dep//=lib/bad/"], "dep/A.sol"), good);
-        assert_eq!(resolve(&["dep//=lib/bad/", "dep/=lib/good/"], "dep/A.sol"), good);
+        assert_eq!(
+            resolve(&["dep//=lib/bad/", "dep/=lib/good/"], "dep/A.sol"),
+            Some(PathBuf::from("lib/bad/A.sol"))
+        );
         assert_eq!(
             resolve(&["dep/=lib/good/", "dep//sub/=lib/bad/"], "dep/sub/A.sol"),
             Some(PathBuf::from("lib/good/sub/A.sol"))
+        );
+        assert_eq!(
+            resolve(&["dep//sub/=lib/nested/", "dep/=lib/good/"], "dep/sub/A.sol"),
+            Some(PathBuf::from("lib/nested/A.sol"))
         );
         // Repeated separators are collapsed, so such a name still applies on its own.
         assert_eq!(resolve(&["dep//=lib/dep/"], "dep/A.sol"), Some(PathBuf::from("lib/dep/A.sol")));
