@@ -74,6 +74,17 @@ pub(crate) fn is_cloudflare_security_challenge(txt: &str) -> bool {
         || txt.to_lowercase().contains("checking if the site connection is secure")
 }
 
+impl From<reqwest::Error> for EtherscanError {
+    fn from(mut err: reqwest::Error) -> Self {
+        // Strip query parameters, which can include API keys, but keep the endpoint for
+        // diagnostics.
+        if let Some(url) = err.url_mut() {
+            url.set_query(None);
+        }
+        Self::Reqwest(err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,22 +101,6 @@ mod tests {
 
         assert!(is_blocked_by_cloudflare_response(resp));
     }
-}
-
-impl From<reqwest::Error> for EtherscanError {
-    fn from(mut err: reqwest::Error) -> Self {
-        // Strip query parameters, which can include API keys, but keep the endpoint for
-        // diagnostics.
-        if let Some(url) = err.url_mut() {
-            url.set_query(None);
-        }
-        Self::Reqwest(err)
-    }
-}
-
-#[cfg(test)]
-mod redact_tests {
-    use super::*;
 
     #[test]
     fn request_errors_strip_queries_but_keep_the_endpoint() {
