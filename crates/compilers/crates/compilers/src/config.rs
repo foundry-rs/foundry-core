@@ -517,17 +517,21 @@ impl<L> ProjectPathsConfig<L> {
         // `cwd` and whose name is a prefix of the import, the longest context wins, then the
         // longest name, and the last one listed wins a tie. Some solc builds collapse repeated
         // `/` in names before matching and others do not, so a name such as `dep//` that is not a
-        // literal prefix still matches once collapsed. When such a name competes with a literal
-        // one the builds disagree, so the first listed candidate wins, as before. Other
-        // non-literal names such as `dep/./` never match.
+        // literal prefix still matches once collapsed, and contexts are matched as paths. When a
+        // candidate matches only this way, solc may not select it, so the first listed candidate
+        // wins, as before. Other non-literal names such as `dep/./` never match.
         let import_str = import.to_string_lossy();
+        let mut cwd_str = cwd.to_string_lossy().into_owned();
+        if cfg!(windows) {
+            cwd_str = cwd_str.replace('\\', "/");
+        }
+        cwd_str.push('/');
         let candidates = self
             .remappings
             .iter()
             .filter_map(|r| {
-                let name_len = if import_str.starts_with(&r.name) {
-                    r.name.len()
-                } else {
+                let literal_name = import_str.starts_with(&r.name);
+                if !literal_name {
                     let mut name = r.name.clone();
                     while name.contains("//") {
                         name = name.replace("//", "/");
@@ -535,26 +539,24 @@ impl<L> ProjectPathsConfig<L> {
                     if !import_str.starts_with(&name) {
                         return None;
                     }
-                    name.len()
-                };
+                }
                 let stripped_import = import.strip_prefix(&r.name).ok()?;
                 if let Some(ctx) = r.context.as_ref()
                     && !path_starts_with_rooted(cwd, Path::new(ctx), &self.root)
                 {
                     return None;
                 }
-                Some((r, name_len, stripped_import))
+                let literal = literal_name
+                    && r.context.as_ref().is_none_or(|ctx| cwd_str.starts_with(ctx.as_str()));
+                Some((r, literal, stripped_import))
             })
             .collect::<Vec<_>>();
-        let literal = |r: &Remapping| import_str.starts_with(&r.name);
-        let ambiguous = candidates.iter().any(|(r, ..)| literal(r))
-            && candidates.iter().any(|(r, ..)| !literal(r));
-        let best = if ambiguous {
-            candidates.into_iter().next()
+        let best = if candidates.iter().all(|(_, literal, _)| *literal) {
+            candidates
+                .into_iter()
+                .max_by_key(|(r, ..)| (r.context.as_ref().map_or(0, |ctx| ctx.len()), r.name.len()))
         } else {
-            candidates.into_iter().max_by_key(|(r, name_len, _)| {
-                (r.context.as_ref().map_or(0, |ctx| ctx.len()), *name_len)
-            })
+            candidates.into_iter().next()
         };
         if let Some(path) = best.map(|(r, _, stripped_import)| {
             let lib_path = if stripped_import.as_os_str().is_empty() && r.path.ends_with(".sol") {
@@ -1605,6 +1607,18 @@ mod tests {
         assert_eq!(
             resolve(&["dep//sub/=lib/nested/", "dep/=lib/good/"], "dep/sub/A.sol"),
             Some(PathBuf::from("lib/nested/A.sol"))
+        );
+        // A context that matches only as a path does not outrank an earlier remapping.
+        let config = ProjectPathsConfig::builder()
+            .no_remappings()
+            .remappings([
+                "dep/=lib/good/".parse().unwrap(),
+                "lib/./pkg/:dep/=lib/bad/".parse().unwrap(),
+            ])
+            .build_with_root::<()>(tmp.path());
+        assert_eq!(
+            config.resolve_library_import(&config.root.join("lib/pkg/src"), Path::new("dep/A.sol")),
+            Some(config.root.join("lib/good/A.sol"))
         );
         // A name with repeated separators that matches literally keeps its literal length.
         assert_eq!(
