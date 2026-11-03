@@ -469,6 +469,15 @@ impl Solc {
         Version::new(self.version.major, self.version.minor, self.version.patch)
     }
 
+    /// Returns Solar's own release version if this compiler is Solar.
+    ///
+    /// Solar reports it in the build metadata of its solc-compatible version, for example
+    /// `0.8.38+commit.e7a91fc7.solar.0.3.0`.
+    pub fn solar_version(&self) -> Option<Version> {
+        let (_, version) = self.version.build.as_str().split_once("solar.")?;
+        Version::parse(version).ok()
+    }
+
     /// Invokes `solc --version` and parses the output as a SemVer [`Version`].
     pub fn version(solc: impl Into<PathBuf>) -> Result<Version> {
         Self::version_with_args(solc, &[])
