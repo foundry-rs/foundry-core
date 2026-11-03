@@ -516,9 +516,9 @@ impl<L> ProjectPathsConfig<L> {
         // Select the remapping the way solc does: among the remappings that are global or for
         // `cwd` and whose name is a literal prefix of the import, the longest context wins, then
         // the longest name, and the last one listed wins a tie. Some solc builds collapse repeated
-        // `/` in names before matching, so `dep//` is matched as `dep/`; a name that is literally
-        // a prefix wins a tie against such a collapsed one. Other non-literal names such as
-        // `dep/./` never match.
+        // `/` in names before matching, so a name such as `dep//` that matches only once collapsed
+        // is used only when no name matches literally. Other non-literal names such as `dep/./`
+        // never match.
         let import_str = import.to_string_lossy();
         let best = self
             .remappings
@@ -541,9 +541,9 @@ impl<L> ProjectPathsConfig<L> {
             })
             .max_by_key(|(r, name_len, _)| {
                 (
+                    import_str.starts_with(&r.name),
                     r.context.as_ref().map_or(0, |ctx| ctx.len()),
                     *name_len,
-                    import_str.starts_with(&r.name),
                 )
             });
         if let Some(path) = best.map(|(r, _, stripped_import)| {
@@ -1580,10 +1580,14 @@ mod tests {
                 .map(|path| path.strip_prefix(&config.root).unwrap().to_path_buf())
         };
 
-        // A literal prefix wins over an equal name with repeated separators.
+        // A literal prefix wins over any name with repeated separators.
         let good = Some(PathBuf::from("lib/good/A.sol"));
         assert_eq!(resolve(&["dep/=lib/good/", "dep//=lib/bad/"], "dep/A.sol"), good);
         assert_eq!(resolve(&["dep//=lib/bad/", "dep/=lib/good/"], "dep/A.sol"), good);
+        assert_eq!(
+            resolve(&["dep/=lib/good/", "dep//sub/=lib/bad/"], "dep/sub/A.sol"),
+            Some(PathBuf::from("lib/good/sub/A.sol"))
+        );
         // Repeated separators are collapsed, so such a name still applies on its own.
         assert_eq!(resolve(&["dep//=lib/dep/"], "dep/A.sol"), Some(PathBuf::from("lib/dep/A.sol")));
         // Names with `.` components never match, however many components they have.
