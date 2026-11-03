@@ -106,7 +106,7 @@ fn install_solar(version: &Version) -> Result<Solc> {
         ))
     })?;
     verify_checksum(&archive, &checksum, &url)?;
-    let binary = extract_binary(&archive)?;
+    let binary = if cfg!(windows) { extract_zip(&archive)? } else { extract_tar_gz(&archive)? };
 
     // Checks the binary under a fresh path before publishing it, since versions are cached by path.
     let temp = tempfile::Builder::new()
@@ -183,9 +183,8 @@ fn verify_checksum(archive: &[u8], checksum: &[u8], url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Returns the `solar` binary from a release archive.
-#[cfg(not(windows))]
-fn extract_binary(archive: &[u8]) -> Result<Vec<u8>> {
+/// Returns the `solar` binary from a `.tar.gz` release archive.
+fn extract_tar_gz(archive: &[u8]) -> Result<Vec<u8>> {
     let err = |err: std::io::Error| SolcError::msg(format!("invalid Solar release archive: {err}"));
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(archive));
     for entry in archive.entries().map_err(err)? {
@@ -201,9 +200,8 @@ fn extract_binary(archive: &[u8]) -> Result<Vec<u8>> {
     Err(SolcError::msg("Solar release archive does not contain `solar`"))
 }
 
-/// Returns the `solar.exe` binary from a release archive.
-#[cfg(windows)]
-fn extract_binary(archive: &[u8]) -> Result<Vec<u8>> {
+/// Returns the `solar.exe` binary from a `.zip` release archive.
+fn extract_zip(archive: &[u8]) -> Result<Vec<u8>> {
     let err = |err: zip::result::ZipError| {
         SolcError::msg(format!("invalid Solar release archive: {err}"))
     };
@@ -237,7 +235,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
     fn extracts_nested_binary() {
         let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
             Vec::new(),
@@ -253,8 +250,26 @@ mod tests {
             builder.append_data(&mut header, path, data).unwrap();
         }
         let archive = builder.into_inner().unwrap().finish().unwrap();
-        assert_eq!(extract_binary(&archive).unwrap(), b"binary");
-        extract_binary(b"not an archive").unwrap_err();
+        assert_eq!(extract_tar_gz(&archive).unwrap(), b"binary");
+        extract_tar_gz(b"not an archive").unwrap_err();
+    }
+
+    #[test]
+    fn extracts_zip_binary() {
+        let zip = |files: &[(&str, &[u8])]| {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for (path, data) in files {
+                writer.start_file(*path, zip::write::SimpleFileOptions::default()).unwrap();
+                writer.write_all(data).unwrap();
+            }
+            writer.finish().unwrap().into_inner()
+        };
+        let archive = zip(&[("README.md", b"readme"), ("solar-target/solar.exe", b"binary")]);
+        assert_eq!(extract_zip(&archive).unwrap(), b"binary");
+        // Releases put `solar.exe` at the archive root.
+        assert_eq!(extract_zip(&zip(&[("solar.exe", b"root")])).unwrap(), b"root");
+        extract_zip(&zip(&[("solar", b"binary")])).unwrap_err();
+        extract_zip(b"not an archive").unwrap_err();
     }
 
     #[test]
