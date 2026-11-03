@@ -1518,7 +1518,6 @@ mod tests {
     #[test]
     fn resolve_library_import_prefers_solc_remapping_priority() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
         let remapping = |context: Option<&str>, name: &str, path: &str| Remapping {
             context: context.map(Into::into),
             name: name.into(),
@@ -1532,7 +1531,9 @@ mod tests {
                 remapping(Some("lib/pkg/"), "dep/", "lib/pkg/lib/dep/"),
                 remapping(None, "dep/sub/", "lib/sub-last/"),
             ])
-            .build_with_root::<()>(root);
+            .build_with_root::<()>(tmp.path());
+        // The builder canonicalizes the root, for example `/var` to `/private/var` on macOS.
+        let root = &config.root;
         let resolve = |cwd: &str, import: &str| {
             config.resolve_library_import(&root.join(cwd), Path::new(import)).unwrap()
         };
