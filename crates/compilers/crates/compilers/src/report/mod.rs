@@ -138,6 +138,15 @@ pub trait Reporter: 'static + std::fmt::Debug {
     /// Invoked after a compiler installation failed
     fn on_solc_installation_error(&self, _version: &Version, _error: &str) {}
 
+    /// Invoked before a Solar release is installed
+    fn on_solar_installation_start(&self, _version: &Version) {}
+
+    /// Invoked after a Solar release was successfully installed
+    fn on_solar_installation_success(&self, _version: &Version) {}
+
+    /// Invoked after a Solar installation failed
+    fn on_solar_installation_error(&self, _version: &Version, _error: &str) {}
+
     /// Invoked if imports couldn't be resolved with the given remappings, where `imports` is the
     /// list of all import paths and the file they occurred in: `(import stmt, file)`
     fn on_unresolved_imports(&self, _imports: &[(&Path, &Path)], _remappings: &[Remapping]) {}
@@ -213,6 +222,21 @@ pub(crate) fn solc_installation_success(version: &Version) {
 #[allow(dead_code)]
 pub(crate) fn solc_installation_error(version: &Version, error: &str) {
     get_default(|r| r.reporter.on_solc_installation_error(version, error));
+}
+
+#[allow(dead_code)]
+pub(crate) fn solar_installation_start(version: &Version) {
+    get_default(|r| r.reporter.on_solar_installation_start(version));
+}
+
+#[allow(dead_code)]
+pub(crate) fn solar_installation_success(version: &Version) {
+    get_default(|r| r.reporter.on_solar_installation_success(version));
+}
+
+#[allow(dead_code)]
+pub(crate) fn solar_installation_error(version: &Version, error: &str) {
+    get_default(|r| r.reporter.on_solar_installation_error(version, error));
 }
 
 pub(crate) fn unresolved_imports(imports: &[(&Path, &Path)], remappings: &[Remapping]) {
@@ -419,6 +443,21 @@ impl Reporter for BasicStdoutReporter {
     fn on_solc_installation_error(&self, version: &Version, error: &str) {
         let _guard = self.lock_output();
         write_line(io::stderr().lock(), format_args!("Failed to install solc {version}: {error}"));
+    }
+
+    fn on_solar_installation_start(&self, version: &Version) {
+        let _guard = self.lock_output();
+        write_line(io::stdout().lock(), format_args!("installing solar version \"{version}\""));
+    }
+
+    fn on_solar_installation_success(&self, version: &Version) {
+        let _guard = self.lock_output();
+        write_line(io::stdout().lock(), format_args!("Successfully installed solar {version}"));
+    }
+
+    fn on_solar_installation_error(&self, version: &Version, error: &str) {
+        let _guard = self.lock_output();
+        write_line(io::stderr().lock(), format_args!("Failed to install solar {version}: {error}"));
     }
 
     fn on_unresolved_imports(&self, imports: &[(&Path, &Path)], remappings: &[Remapping]) {
