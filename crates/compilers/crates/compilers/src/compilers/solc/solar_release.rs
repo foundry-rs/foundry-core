@@ -1,4 +1,4 @@
-//! Installs Solar releases into svm's data directory.
+//! Installs Solar releases into `~/.foundry/solar`.
 
 use super::Solc;
 use alloy_primitives::hex;
@@ -42,21 +42,21 @@ const RELEASE_TARGET: Option<&str> = if cfg!(all(target_os = "macos", target_arc
 const ARCHIVE_EXTENSION: &str = if cfg!(windows) { "zip" } else { "tar.gz" };
 
 impl Solc {
-    /// Returns the Solar `version` installed in svm's data directory, if any.
+    /// Returns the Solar `version` installed in `~/.foundry/solar`, if any.
     ///
     /// Runs the installed binary to check its version.
     pub fn find_installed_solar(version: &Version) -> Option<Self> {
-        let solar = solar_binary(version);
+        let solar = solar_binary(version).ok()?;
         if !solar.is_file() {
             return None;
         }
         Self::new(solar).ok().filter(|solar| solar.solar_version().as_ref() == Some(version))
     }
 
-    /// Downloads the Solar `version` release from GitHub into svm's data directory.
+    /// Downloads the Solar `version` release from GitHub into `~/.foundry/solar`.
     ///
-    /// The archive is checked against the release's SHA-256 checksum, and the binary must report
-    /// the requested version.
+    /// The archive is checked against the release's SHA-256 checksum file, which detects corrupted
+    /// downloads, and the binary must report the requested version.
     #[instrument(name = "Solc::blocking_install_solar", skip_all)]
     pub fn blocking_install_solar(version: &Version) -> Result<Self> {
         crate::report::solar_installation_start(version);
@@ -72,10 +72,11 @@ impl Solc {
 fn install_solar(version: &Version) -> Result<Solc> {
     let target = RELEASE_TARGET.ok_or_else(|| {
         SolcError::msg(format!(
-            "Solar releases are not available for this platform; install solar {version} on PATH"
+            "Solar releases are not available for this platform; set `solc` to the path of a solar \
+             {version} binary"
         ))
     })?;
-    let dir = solar_dir(version);
+    let dir = solar_dir(version)?;
     fs::create_dir_all(&dir).map_err(|err| SolcError::io(err, &dir))?;
 
     // Serializes parallel installs of the same version. The lock file is never removed, as in svm.
@@ -130,19 +131,24 @@ fn install_solar(version: &Version) -> Result<Solc> {
             found.version
         )));
     }
-    let path = solar_binary(version);
+    let path = solar_binary(version)?;
     temp.persist(&path).map_err(|err| SolcError::io(err.error, &path))?;
     Ok(Solc::new_with_version(path, found.version))
 }
 
-/// Returns the directory of the Solar `version` installation: `<svm>/solar/<version>`.
-fn solar_dir(version: &Version) -> PathBuf {
-    svm::data_dir().join("solar").join(version.to_string())
+/// Returns the directory of the Solar `version` installation: `~/.foundry/solar/<version>`.
+///
+/// This stays outside svm's data directory, since svm-rs 0.5.26 and older fail to list installed
+/// solc versions when it contains an entry that is not a version.
+fn solar_dir(version: &Version) -> Result<PathBuf> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| SolcError::msg("could not detect the user home directory"))?;
+    Ok(home.join(".foundry").join("solar").join(version.to_string()))
 }
 
 /// Returns the path of the installed Solar `version` binary.
-fn solar_binary(version: &Version) -> PathBuf {
-    solar_dir(version).join(format!("solar{}", std::env::consts::EXE_SUFFIX))
+fn solar_binary(version: &Version) -> Result<PathBuf> {
+    Ok(solar_dir(version)?.join(format!("solar{}", std::env::consts::EXE_SUFFIX)))
 }
 
 async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
