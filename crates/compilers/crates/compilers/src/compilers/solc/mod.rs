@@ -62,6 +62,14 @@ impl Compiler for SolcCompiler {
         &self,
         input: &Self::Input,
     ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
+        self.compile_with_jobs(input, 1)
+    }
+
+    fn compile_with_jobs(
+        &self,
+        input: &Self::Input,
+        jobs: usize,
+    ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
         let mut solc = match self {
             Self::Specific(solc) => solc.clone(),
 
@@ -73,7 +81,19 @@ impl Compiler for SolcCompiler {
         solc.include_paths.clone_from(&input.cli_settings.include_paths);
         solc.extra_args.extend_from_slice(&input.cli_settings.extra_args);
 
-        let solc_output = solc.compile(&input.input)?;
+        // Only solc is known to produce the same outputs for a split selection.
+        let parts = (jobs > 1 && input.compiler_name() == "Solc")
+            .then(|| input.input.split(jobs))
+            .flatten();
+        let solc_output = match parts {
+            Some(parts) => {
+                trace!(parts = parts.len(), "compiling output selection in parts");
+                let outputs =
+                    parts.par_iter().map(|part| solc.compile(part)).collect::<Result<Vec<_>>>()?;
+                merge_parts(outputs)
+            }
+            None => solc.compile(&input.input)?,
+        };
         compiler_output(&solc, input, solc_output)
     }
 
@@ -127,6 +147,27 @@ impl Compiler for SolcCompiler {
             }
         }
     }
+}
+
+/// Merges the outputs of the parts of one split input, see [`SolcInput::split`].
+///
+/// Every part reports the same sources and the same analysis diagnostics again, so each source
+/// is kept once and repeated errors are dropped.
+fn merge_parts(
+    outputs: Vec<foundry_compilers_artifacts::CompilerOutput>,
+) -> foundry_compilers_artifacts::CompilerOutput {
+    let mut merged = foundry_compilers_artifacts::CompilerOutput::default();
+    let mut seen = HashSet::new();
+    for output in outputs {
+        merged.errors.extend(output.errors.into_iter().filter(|error| seen.insert(error.clone())));
+        for (path, source) in output.sources {
+            merged.sources.entry(path).or_insert(source);
+        }
+        for (path, contracts) in output.contracts {
+            merged.contracts.entry(path).or_default().extend(contracts);
+        }
+    }
+    merged
 }
 
 fn compiler_output(

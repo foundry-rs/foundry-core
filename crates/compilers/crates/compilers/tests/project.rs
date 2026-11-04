@@ -8049,3 +8049,66 @@ fn preprocessor_context_growth_invalidates_out_of_scope_consumers() {
         removed.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap()
     );
 }
+
+#[test]
+fn can_compile_split_output_selection() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    // Every part analyzes this library again, so its warning tests the diagnostic merge.
+    project
+        .add_source(
+            "Shared",
+            r"
+    // SPDX-License-Identifier: MIT
+    pragma solidity ^0.8.10;
+    library Shared {
+        function id(uint256 x) internal pure returns (uint256) {
+            uint256 unused;
+            return x;
+        }
+    }
+   ",
+        )
+        .unwrap();
+    for i in 0..2 * OutputSelection::MIN_FILES_PER_PART {
+        project
+            .add_source(
+                &format!("C{i}"),
+                format!(
+                    r#"
+    // SPDX-License-Identifier: MIT
+    pragma solidity ^0.8.10;
+    import "./Shared.sol";
+    contract C{i} {{
+        function f() public pure returns (uint256) {{
+            return Shared.id({i});
+        }}
+    }}
+   "#
+                ),
+            )
+            .unwrap();
+    }
+
+    project.project_mut().set_solc_jobs(1);
+    let whole = project.compile().unwrap();
+    whole.assert_success();
+    let artifacts = |output: &ProjectCompileOutput| {
+        output
+            .artifacts()
+            .map(|(name, artifact)| (name, serde_json::to_string(artifact).unwrap()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let whole_artifacts = artifacts(&whole);
+    assert_eq!(whole_artifacts.len(), 2 * OutputSelection::MIN_FILES_PER_PART + 1);
+    let whole_errors = whole.output().errors.clone();
+    assert_eq!(whole_errors.len(), 1, "{whole_errors:?}");
+
+    fs::remove_dir_all(&project.paths().artifacts).unwrap();
+    fs::remove_file(project.cache_path()).unwrap();
+    project.project_mut().set_solc_jobs(4);
+    let parts = project.compile().unwrap();
+    parts.assert_success();
+    assert!(!parts.is_unchanged());
+    assert_eq!(artifacts(&parts), whole_artifacts);
+    assert_eq!(parts.output().errors, whole_errors);
+}
