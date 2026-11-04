@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(feature = "tempo")]
-use {alloy_primitives::B256, tempo_alloy::primitives::transaction::KeyAuthorization};
+use alloy_primitives::B256;
 
 /// Response format for API endpoints.
 /// - `Ok(T)` serializes as: {"status":"ok","data": ...}
@@ -141,9 +141,11 @@ pub(crate) struct BrowserChainSwitchResponse {
 /// [`Self::key_authorization`] (key id, expiry, limits, and allowed calls),
 /// drive the WebAuthn / P256 / Secp256k1 ceremony for the precomputed
 /// [`Self::digest`], and POST back the resulting RLP-encoded
-/// `SignedKeyAuthorization` as a `0x`-prefixed hex string. T5
-/// `KeyAuthorization` fields are rejected server-side until the bundled
-/// browser wallet can display and forward them.
+/// `SignedKeyAuthorization` as a `0x`-prefixed hex string.
+///
+/// This crate treats the authorization as opaque JSON so it does not depend on
+/// a Tempo crate. The caller builds the payload and digest, and decodes and
+/// verifies the signed authorization the wallet returns.
 #[cfg(feature = "tempo")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -153,12 +155,11 @@ pub struct BrowserKeyAuthorizationRequest {
     /// Root account that must sign the authorization. The wallet UI must
     /// cross-check this against the connected wallet address before signing.
     pub root_account: Address,
-    /// The full unsigned `KeyAuthorization` payload. Sent so the UI can render a human-readable
-    /// approval card.
-    pub key_authorization: KeyAuthorization,
-    /// keccak256 of `RLP(key_authorization)` — equal to
-    /// `key_authorization.signature_hash()`. Foundry pre-computes it so the
-    /// frontend doesn't need to import RLP.
+    /// The full unsigned `KeyAuthorization` payload, serialized as JSON. Sent so the UI can
+    /// render a human-readable approval card.
+    pub key_authorization: serde_json::Value,
+    /// keccak256 of `RLP(key_authorization)`, the authorization's signature hash. The caller
+    /// pre-computes it so the frontend doesn't need to import RLP.
     pub digest: B256,
 }
 
@@ -171,8 +172,7 @@ pub struct BrowserKeyAuthorizationResponse {
     /// Must match the request id.
     pub id: Uuid,
     /// `0x`-prefixed RLP-encoded `SignedKeyAuthorization` produced by the
-    /// wallet. Decoded server-side via the existing
-    /// `tempo_alloy::primitives::transaction::SignedKeyAuthorization::decode` impl.
+    /// wallet. Returned to the caller as bytes for it to decode and verify.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_hex: Option<String>,
     /// Error message if signing was rejected or failed.
