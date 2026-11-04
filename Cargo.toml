@@ -190,7 +190,6 @@ alloy-primitives = { version = "1.6.0", features = [
     "map-fxhash",
     "map-foldhash",
 ] }
-alloy-rlp = "0.3.15"
 alloy-signer = "2.2.0"
 alloy-signer-aws = "2.2.0"
 alloy-signer-gcp = "2.2.0"
@@ -200,9 +199,6 @@ alloy-signer-trezor = "2.2.0"
 alloy-signer-turnkey = "2.2.0"
 alloy-sol-types = "1.6.0"
 alloy-chains = "0.2.34"
-
-# tempo
-tempo-alloy = { version = "1.11.0", default-features = false }
 
 # misc
 async-trait = "0.1.89"
