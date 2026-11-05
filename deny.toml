@@ -15,6 +15,10 @@ ignore = [
     # elliptic-curve 0.13 (k256/alloy-signer) and has no patched release.
     # TODO: Remove once the 0.13 elliptic-curve stack is no longer in the tree.
     "RUSTSEC-2026-0387",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0441 pin-utils is unmaintained
+    # No patched release; pulled in through AWS Smithy, coins-ledger/nix, and wasmtimer.
+    # TODO: Remove once upstream upgrades eliminate all pin-utils dependencies.
+    "RUSTSEC-2026-0441",
 ]
 
 # This section is considered when running `cargo deny check bans`.
