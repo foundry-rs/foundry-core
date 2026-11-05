@@ -8,9 +8,9 @@ use foundry_compilers::{
     buildinfo::{BuildInfo, SourceEdit},
     cache::{CompilerCache, SOLIDITY_FILES_CACHE_FILENAME},
     compilers::{
-        CompilerOutput,
+        Compiler, CompilerInput, CompilerOutput,
         multi::{MultiCompiler, MultiCompilerLanguage, MultiCompilerSettings},
-        solc::{Solc, SolcCompiler, SolcLanguage},
+        solc::{Solc, SolcCompiler, SolcLanguage, SolcVersionedInput},
         vyper::{Vyper, VyperLanguage, VyperSettings},
     },
     flatten::Flattener,
@@ -8052,21 +8052,36 @@ fn preprocessor_context_growth_invalidates_out_of_scope_consumers() {
 
 #[test]
 fn can_compile_split_output_selection() {
+    assert_split_output_selection("^0.8.10");
+}
+
+// Solc 0.4 reports empty contracts for the files that a part does not select.
+#[test]
+fn can_compile_split_output_selection_old_solc() {
+    assert_split_output_selection("=0.4.26");
+}
+
+fn assert_split_output_selection(pragma: &str) {
     let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    // The default settings select the AST, which keeps the input whole.
+    project.project_mut().settings.solc.output_selection =
+        OutputSelection::default_output_selection();
     // Every part analyzes this library again, so its warning tests the diagnostic merge.
     project
         .add_source(
             "Shared",
-            r"
+            format!(
+                r"
     // SPDX-License-Identifier: MIT
-    pragma solidity ^0.8.10;
-    library Shared {
-        function id(uint256 x) internal pure returns (uint256) {
+    pragma solidity {pragma};
+    library Shared {{
+        function id(uint256 x) internal pure returns (uint256) {{
             uint256 unused;
             return x;
-        }
-    }
-   ",
+        }}
+    }}
+   "
+            ),
         )
         .unwrap();
     for i in 0..2 * OutputSelection::MIN_FILES_PER_PART {
@@ -8076,7 +8091,7 @@ fn can_compile_split_output_selection() {
                 format!(
                     r#"
     // SPDX-License-Identifier: MIT
-    pragma solidity ^0.8.10;
+    pragma solidity {pragma};
     import "./Shared.sol";
     contract C{i} {{
         function f() public pure returns (uint256) {{
@@ -8100,6 +8115,7 @@ fn can_compile_split_output_selection() {
     };
     let whole_artifacts = artifacts(&whole);
     assert_eq!(whole_artifacts.len(), 2 * OutputSelection::MIN_FILES_PER_PART + 1);
+    assert!(whole.artifacts().all(|(_, artifact)| artifact.get_bytecode_bytes().is_some()));
     let whole_errors = whole.output().errors.clone();
     assert_eq!(whole_errors.len(), 1, "{whole_errors:?}");
 
@@ -8111,4 +8127,47 @@ fn can_compile_split_output_selection() {
     assert!(!parts.is_unchanged());
     assert_eq!(artifacts(&parts), whole_artifacts);
     assert_eq!(parts.output().errors, whole_errors);
+}
+
+// Solc loads imports that the input does not list from disk, and a `*` file key selects their
+// outputs too.
+#[test]
+fn can_compile_split_output_selection_with_unlisted_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = canonicalize(dir.path()).unwrap();
+    fs::write(
+        root.join("Dependency.sol"),
+        "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\ncontract Dependency {}\n",
+    )
+    .unwrap();
+    let sources = (0..2 * OutputSelection::MIN_FILES_PER_PART)
+        .map(|i| {
+            let source = format!(
+                "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\nimport \"Dependency.sol\";\ncontract C{i} is Dependency {{}}\n"
+            );
+            (PathBuf::from(format!("C{i}.sol")), Source::new(source))
+        })
+        .collect();
+    let settings = Settings {
+        output_selection: OutputSelection::common_output_selection(["abi".to_string()]),
+        ..Default::default()
+    };
+    let mut settings = SolcSettings { settings, ..Default::default() };
+    settings.cli_settings.base_path = Some(root.clone());
+    settings.cli_settings.allow_paths = BTreeSet::from([root]);
+    let solc = SolcCompiler::Specific(Solc::find_or_install(&Version::new(0, 8, 28)).unwrap());
+    let input = SolcVersionedInput::build(
+        sources,
+        settings,
+        SolcLanguage::Solidity,
+        Version::new(0, 8, 28),
+    );
+
+    let whole = solc.compile(&input).unwrap();
+    assert!(whole.errors.is_empty(), "{:?}", whole.errors);
+    assert_eq!(whole.contracts.len(), 2 * OutputSelection::MIN_FILES_PER_PART + 1);
+    let parts = solc.compile_with_jobs(&input, 2).unwrap();
+    assert_eq!(parts.errors, whole.errors);
+    assert_eq!(parts.sources, whole.sources);
+    assert_eq!(parts.contracts, whole.contracts);
 }

@@ -86,11 +86,16 @@ impl Compiler for SolcCompiler {
             .then(|| input.input.split(jobs))
             .flatten();
         let solc_output = match parts {
-            Some(parts) => {
+            Some(mut parts) => {
                 trace!(parts = parts.len(), "compiling output selection in parts");
-                let outputs =
+                let mut outputs =
                     parts.par_iter().map(|part| solc.compile(part)).collect::<Result<Vec<_>>>()?;
-                merge_parts(outputs)
+                if let Some(part) = unlisted_part(&input.input, &parts, &outputs[0]) {
+                    trace!("compiling output selection of sources loaded from disk");
+                    outputs.push(solc.compile(&part)?);
+                    parts.push(part);
+                }
+                merge_parts(&parts, outputs)
             }
             None => solc.compile(&input.input)?,
         };
@@ -149,23 +154,62 @@ impl Compiler for SolcCompiler {
     }
 }
 
+/// Returns a part that selects the `*` file outputs for the sources that solc loaded from disk
+/// and that no part of a split input selects, see [`SolcInput::split`].
+///
+/// The split expands `*` over the sources of the input only, but solc also loads missing imports
+/// through its file reader, and the whole input requests their outputs too.
+fn unlisted_part(
+    input: &SolcInput,
+    parts: &[SolcInput],
+    output: &foundry_compilers_artifacts::CompilerOutput,
+) -> Option<SolcInput> {
+    let all = input
+        .settings
+        .output_selection
+        .0
+        .get("*")
+        .filter(|all| all.values().any(|outputs| !outputs.is_empty()))?;
+    let selection = output
+        .sources
+        .keys()
+        .map(|path| path.display().to_string())
+        .filter(|file| {
+            !parts.iter().any(|part| part.settings.output_selection.0.contains_key(file))
+        })
+        .map(|file| (file, all.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if selection.is_empty() {
+        return None;
+    }
+    let mut part = input.clone();
+    part.settings.output_selection = OutputSelection(selection);
+    Some(part)
+}
+
 /// Merges the outputs of the parts of one split input, see [`SolcInput::split`].
 ///
 /// Every part reports the same sources and the same analysis diagnostics again, so each source
-/// is kept once and repeated errors are dropped.
+/// is kept once and repeated errors are dropped. Contracts come only from the part that selects
+/// their file, because old solc versions also report empty contracts for the other files.
 fn merge_parts(
+    parts: &[SolcInput],
     outputs: Vec<foundry_compilers_artifacts::CompilerOutput>,
 ) -> foundry_compilers_artifacts::CompilerOutput {
     let mut merged = foundry_compilers_artifacts::CompilerOutput::default();
     let mut seen = HashSet::new();
-    for output in outputs {
+    for (part, output) in parts.iter().zip(outputs) {
         merged.errors.extend(output.errors.into_iter().filter(|error| seen.insert(error.clone())));
         for (path, source) in output.sources {
             merged.sources.entry(path).or_insert(source);
         }
-        for (path, contracts) in output.contracts {
-            merged.contracts.entry(path).or_default().extend(contracts);
-        }
+        let selection = &part.settings.output_selection.0;
+        merged.contracts.extend(
+            output
+                .contracts
+                .into_iter()
+                .filter(|(path, _)| selection.contains_key(&path.display().to_string())),
+        );
     }
     merged
 }
