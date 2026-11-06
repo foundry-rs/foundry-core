@@ -56,6 +56,12 @@ pub type FileOutputSelection = BTreeMap<String, Vec<String>>;
 pub struct OutputSelection(pub BTreeMap<String, FileOutputSelection>);
 
 impl OutputSelection {
+    /// The smallest number of files with outputs that each part of a split selection keeps.
+    ///
+    /// Every part parses and analyzes all sources again, so smaller parts cost more than they
+    /// save.
+    pub const MIN_FILES_PER_PART: usize = 16;
+
     /// select all outputs the compiler can possibly generate, use
     /// `{ "*": { "*": [ "*" ], "": [ "*" ] } }`
     /// but note that this might slow down the compilation process needlessly.
@@ -175,6 +181,71 @@ impl OutputSelection {
                 contract_name.is_empty() && outputs.iter().any(|o| o == "ast" || o == "*")
             })
         })
+    }
+
+    /// Splits the selection into at most `max_parts` selections that together request the same
+    /// outputs, so that separate compiler processes can produce them in parallel.
+    ///
+    /// `sources` lists every source file with an estimate of its compile cost, which keeps the
+    /// parts balanced. A `*` file key is expanded over `sources`.
+    ///
+    /// Returns `None` when the selection requests file-level outputs such as the AST, whose node
+    /// ids depend on the compilation unit, or when fewer than `2 * MIN_FILES_PER_PART` files
+    /// request outputs.
+    pub fn split(
+        &self,
+        sources: impl IntoIterator<Item = (String, usize)>,
+        max_parts: usize,
+    ) -> Option<Vec<Self>> {
+        if self.contains_ast() {
+            return None;
+        }
+        let mut files = BTreeMap::new();
+        for (file, selection) in &self.0 {
+            if file != "*" && selection.values().any(|outputs| !outputs.is_empty()) {
+                files.insert(file.clone(), (selection.clone(), 1));
+            }
+        }
+        let all = self.0.get("*");
+        for (file, weight) in sources {
+            match (files.get_mut(&file), all) {
+                (Some((_, file_weight)), _) => *file_weight = weight,
+                (None, Some(all)) => {
+                    files.insert(file, (all.clone(), weight));
+                }
+                (None, None) => {}
+            }
+        }
+        if let Some(all) = all {
+            for (selection, _) in files.values_mut() {
+                for (contract, outputs) in all {
+                    let existing = selection.entry(contract.clone()).or_default();
+                    for output in outputs {
+                        if !existing.contains(output) {
+                            existing.push(output.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let parts = max_parts.min(files.len() / Self::MIN_FILES_PER_PART);
+        if parts < 2 {
+            return None;
+        }
+        // Give each file to the lightest part, heaviest files first.
+        let mut files = files.into_iter().collect::<Vec<_>>();
+        files.sort_by(|(a_file, (_, a_weight)), (b_file, (_, b_weight))| {
+            b_weight.cmp(a_weight).then_with(|| a_file.cmp(b_file))
+        });
+        let mut weights = vec![0; parts];
+        let mut selections = vec![Self::empty(); parts];
+        for (file, (selection, weight)) in files {
+            let lightest = (0..parts).min_by_key(|&part| weights[part]).unwrap();
+            weights[lightest] += weight;
+            selections[lightest].0.insert(file, selection);
+        }
+        Some(selections)
     }
 }
 
@@ -602,6 +673,77 @@ impl FromStr for EwasmOutputSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn file_outputs(file: &str, outputs: &[&str]) -> (String, FileOutputSelection) {
+        (
+            file.to_string(),
+            BTreeMap::from([("*".to_string(), outputs.iter().map(ToString::to_string).collect())]),
+        )
+    }
+
+    #[test]
+    fn split_keeps_small_selections_whole() {
+        let min = OutputSelection::MIN_FILES_PER_PART;
+        let files = (0..2 * min - 1).map(|i| format!("{i}.sol")).collect::<Vec<_>>();
+        let selection =
+            OutputSelection(files.iter().map(|file| file_outputs(file, &["abi"])).collect());
+        let sources = || files.iter().map(|file| (file.clone(), 1));
+        assert!(selection.split(sources(), 8).is_none());
+        assert!(OutputSelection::default_output_selection().split(sources(), 8).is_none());
+
+        let files = (0..2 * min).map(|i| format!("{i}.sol")).collect::<Vec<_>>();
+        let selection =
+            OutputSelection(files.iter().map(|file| file_outputs(file, &["abi"])).collect());
+        let sources = || files.iter().map(|file| (file.clone(), 1));
+        assert!(selection.split(sources(), 1).is_none());
+        assert_eq!(selection.split(sources(), 8).unwrap().len(), 2);
+        assert!(OutputSelection::ast_output_selection().split(sources(), 8).is_none());
+    }
+
+    #[test]
+    fn split_balances_disjoint_parts() {
+        let min = OutputSelection::MIN_FILES_PER_PART;
+        let files = (0..4 * min).map(|i| format!("{i}.sol")).collect::<Vec<_>>();
+        let mut selection =
+            OutputSelection(files.iter().map(|file| file_outputs(file, &["abi"])).collect());
+        // Clean files request nothing and are left out.
+        selection.0.insert("clean.sol".to_string(), OutputSelection::empty_file_output_select());
+        // One file is much heavier than the rest.
+        let sources =
+            files.iter().enumerate().map(|(i, file)| (file.clone(), if i == 0 { 1000 } else { 1 }));
+
+        let parts = selection.split(sources, 3).unwrap();
+        assert_eq!(parts.len(), 3);
+        let heavy = parts.iter().find(|part| part.0.contains_key("0.sol")).unwrap();
+        assert_eq!(heavy.0.len(), 1);
+        let mut seen = BTreeMap::new();
+        for part in &parts {
+            assert!(!part.0.contains_key("clean.sol"));
+            for (file, outputs) in &part.0 {
+                assert!(seen.insert(file.clone(), outputs.clone()).is_none(), "{file} twice");
+            }
+        }
+        selection.0.remove("clean.sol");
+        assert_eq!(seen, selection.0);
+    }
+
+    #[test]
+    fn split_expands_wildcard_files() {
+        let min = OutputSelection::MIN_FILES_PER_PART;
+        let files = (0..2 * min).map(|i| format!("{i}.sol")).collect::<Vec<_>>();
+        let selection = OutputSelection(BTreeMap::from([
+            file_outputs("*", &["abi"]),
+            file_outputs("0.sol", &["abi", "evm.bytecode"]),
+        ]));
+        let parts = selection.split(files.iter().map(|file| (file.clone(), 1)), 2).unwrap();
+        let mut seen = BTreeMap::new();
+        for part in parts {
+            seen.extend(part.0);
+        }
+        assert_eq!(seen.len(), files.len());
+        assert_eq!(seen["0.sol"]["*"], ["abi", "evm.bytecode"]);
+        assert_eq!(seen["1.sol"]["*"], ["abi"]);
+    }
 
     #[test]
     fn outputselection_serde_works() {

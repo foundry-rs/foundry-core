@@ -444,6 +444,18 @@ pub trait Compiler: Send + Sync + Clone {
         input: &Self::Input,
     ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>>;
 
+    /// Compiles the input with up to `jobs` compiler processes at once, when the input can be
+    /// split into parts that produce disjoint outputs. By default the whole input is compiled by
+    /// one process, as with [`Self::compile`].
+    fn compile_with_jobs(
+        &self,
+        input: &Self::Input,
+        jobs: usize,
+    ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
+        let _ = jobs;
+        self.compile(input)
+    }
+
     /// Returns all versions available locally and remotely. Should return versions with stripped
     /// metadata.
     fn available_versions(&self, language: &Self::Language) -> Vec<CompilerVersion>;
