@@ -9,7 +9,7 @@ use std::{
 /// Result alias with `DatabaseError` as error
 pub type DatabaseResult<T> = Result<T, DatabaseError>;
 
-/// Errors that can happen when working with [`revm::Database`]
+/// Errors encountered while loading fork state.
 #[derive(Debug, thiserror::Error)]
 #[allow(missing_docs)]
 pub enum DatabaseError {
@@ -71,5 +71,3 @@ impl From<Infallible> for DatabaseError {
         match value {}
     }
 }
-
-impl revm::database::DBErrorMarker for DatabaseError {}
