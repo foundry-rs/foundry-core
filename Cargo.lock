@@ -526,6 +526,7 @@ checksum = "9fe9aa4c081552fae845e4748cb7bc59466634680f1701044c1c963cc5c389fe"
 dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
+ "alloy-eip7702",
  "alloy-network",
  "alloy-primitives",
  "alloy-signer",
@@ -3173,6 +3174,7 @@ version = "0.2.0"
 dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
+ "alloy-eips",
  "alloy-network",
  "alloy-primitives",
  "alloy-signer",
