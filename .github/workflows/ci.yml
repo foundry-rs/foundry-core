@@ -87,7 +87,7 @@ jobs:
       matrix:
         target: ["x86_64-apple-darwin", "aarch64-apple-darwin"]
         toolchain:
-          - { xcode: "15.0.1", os: "macos-14" }
+          - { xcode: "16.0", os: "macos-15" }
           - { xcode: "latest", os: "macos-latest" }
     steps:
       - name: Secure runner
