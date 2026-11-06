@@ -204,6 +204,33 @@ impl SolcInput {
         self
     }
 
+    /// Splits the input into at most `max_parts` inputs that select outputs for disjoint sets of
+    /// files, so that separate compiler processes can produce them in parallel.
+    ///
+    /// Each part keeps every source, so imports resolve and the compiler assigns the same source
+    /// ids in every part. Merged, the parts produce the same contracts, errors and metadata as
+    /// the whole input. See [`OutputSelection::split`] for when the input stays whole.
+    pub fn split(&self, max_parts: usize) -> Option<Vec<Self>> {
+        if self.settings.stop_after.is_some() {
+            return None;
+        }
+        let sources = self
+            .sources
+            .iter()
+            .map(|(path, source)| (path.display().to_string(), source.content.len()));
+        let selections = self.settings.output_selection.split(sources, max_parts)?;
+        Some(
+            selections
+                .into_iter()
+                .map(|output_selection| {
+                    let mut part = self.clone();
+                    part.settings.output_selection = output_selection;
+                    part
+                })
+                .collect(),
+        )
+    }
+
     /// Sets the EVM version for compilation
     #[must_use]
     pub const fn evm_version(mut self, version: EvmVersion) -> Self {
