@@ -410,13 +410,10 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let ResolvedSources { sources, primary_profiles, edges } =
             graph.into_sources_by_version(project)?;
 
-        // If there are multiple different versions, and we can use multiple jobs we can compile
-        // them in parallel.
-        let jobs_cnt = || sources.values().map(|v| v.len()).sum::<usize>();
-        let sources = CompilerSources {
-            jobs: (project.solc_jobs > 1 && jobs_cnt() > 1).then_some(project.solc_jobs),
-            sources,
-        };
+        // With multiple jobs, different versions and profiles compile in parallel, and the
+        // compiler can split one large input across processes.
+        let sources =
+            CompilerSources { jobs: (project.solc_jobs > 1).then_some(project.solc_jobs), sources };
 
         Ok(Self { edges, primary_profiles, project, sources, preprocessor: None })
     }
@@ -1260,7 +1257,7 @@ fn compile_parallel<'a, C: Compiler>(
                     input.settings_summary().as_deref(),
                     actually_dirty.as_slice(),
                 );
-                compiler.compile(&input).map(move |output| {
+                compiler.compile_with_jobs(&input, num_jobs).map(move |output| {
                     report::compiler_success(
                         &input.compiler_name(),
                         input.version(),
