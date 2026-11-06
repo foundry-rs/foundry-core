@@ -31,7 +31,10 @@ jobs:
         uses: tempoxyz/gh-actions/actions/secure-runner@763efe11a9d8333bcbf0bb2f5ab80f21961c48fd
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Check the tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@763efe11a9d8333bcbf0bb2f5ab80f21961c48fd
         with:
           toolchain: 1.99.1
