@@ -1717,7 +1717,7 @@ mod tests {
             // Re-pin and wipe the cache the way a fork reset does, while the old read is in flight.
             backend.set_pinned_block(2).unwrap();
             db.db().clear();
-            let fresh = read(backend.clone());
+            let fresh = read(backend);
             std::thread::sleep(Duration::from_millis(200));
             release.send(()).unwrap();
 
