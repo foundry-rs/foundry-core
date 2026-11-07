@@ -14,8 +14,6 @@
 
 // <https://github.com/tokio-rs/tracing/blob/master/tracing-core/src/dispatch.rs>
 
-#![allow(static_mut_refs)] // TODO
-
 use foundry_compilers_artifacts::remappings::Remapping;
 use semver::Version;
 use std::{
@@ -26,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -44,14 +42,9 @@ thread_local! {
 static EXISTS: AtomicBool = AtomicBool::new(false);
 static SCOPED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-// tracks the state of `GLOBAL_REPORTER`
-static GLOBAL_REPORTER_STATE: AtomicUsize = AtomicUsize::new(UN_SET);
-
-const UN_SET: usize = 0;
-const SETTING: usize = 1;
-const SET: usize = 2;
-
-static mut GLOBAL_REPORTER: Option<Report> = None;
+/// The global reporter: unset until [`set_global_reporter`] succeeds, then set for the rest of the
+/// program.
+static GLOBAL_REPORTER: OnceLock<Report> = OnceLock::new();
 
 /// Install this `Reporter` as the global default if one is
 /// not already set.
@@ -244,16 +237,7 @@ pub(crate) fn unresolved_imports(imports: &[(&Path, &Path)], remappings: &[Remap
 }
 
 fn get_global() -> Option<&'static Report> {
-    if GLOBAL_REPORTER_STATE.load(Ordering::SeqCst) != SET {
-        return None;
-    }
-    unsafe {
-        // This is safe given the invariant that setting the global reporter
-        // also sets `GLOBAL_REPORTER_STATE` to `SET`.
-        Some(GLOBAL_REPORTER.as_ref().expect(
-            "Reporter invariant violated: GLOBAL_REPORTER must be initialized before GLOBAL_REPORTER_STATE is set",
-        ))
-    }
+    GLOBAL_REPORTER.get()
 }
 
 /// Executes a closure with a reference to this thread's current reporter.
@@ -553,21 +537,7 @@ impl fmt::Debug for Report {
 /// The global reporter can only be set once; additional attempts to set the global reporter will
 /// fail. Returns `Err` if the global reporter has already been set.
 fn set_global_reporter(report: Report) -> Result<(), SetGlobalReporterError> {
-    // `compare_exchange` tries to store `SETTING` if the current value is `UN_SET`
-    // this returns `Ok(_)` if the current value of `GLOBAL_REPORTER_STATE` was `UN_SET` and
-    // `SETTING` was written, this guarantees the value is `SETTING`.
-    if GLOBAL_REPORTER_STATE
-        .compare_exchange(UN_SET, SETTING, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        unsafe {
-            GLOBAL_REPORTER = Some(report);
-        }
-        GLOBAL_REPORTER_STATE.store(SET, Ordering::SeqCst);
-        Ok(())
-    } else {
-        Err(SetGlobalReporterError { _priv: () })
-    }
+    GLOBAL_REPORTER.set(report).map_err(|_| SetGlobalReporterError { _priv: () })
 }
 
 #[cfg(test)]
