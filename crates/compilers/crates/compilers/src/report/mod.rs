@@ -14,8 +14,6 @@
 
 // <https://github.com/tokio-rs/tracing/blob/master/tracing-core/src/dispatch.rs>
 
-#![allow(static_mut_refs)] // TODO
-
 use foundry_compilers_artifacts::remappings::Remapping;
 use semver::Version;
 use std::{
@@ -26,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -36,22 +34,19 @@ mod compiler;
 pub use compiler::SolcCompilerIoReporter;
 
 thread_local! {
-    static CURRENT_STATE: State = State {
-        scoped: RefCell::new(Report::none()),
+    static CURRENT_STATE: State = const {
+        State {
+            scoped: RefCell::new(None),
+        }
     };
 }
 
 static EXISTS: AtomicBool = AtomicBool::new(false);
 static SCOPED_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-// tracks the state of `GLOBAL_REPORTER`
-static GLOBAL_REPORTER_STATE: AtomicUsize = AtomicUsize::new(UN_SET);
-
-const UN_SET: usize = 0;
-const SETTING: usize = 1;
-const SET: usize = 2;
-
-static mut GLOBAL_REPORTER: Option<Report> = None;
+/// The global reporter: unset until [`set_global_reporter`] succeeds, then set for the rest of the
+/// program.
+static GLOBAL_REPORTER: OnceLock<Report> = OnceLock::new();
 
 /// Install this `Reporter` as the global default if one is
 /// not already set.
@@ -244,16 +239,7 @@ pub(crate) fn unresolved_imports(imports: &[(&Path, &Path)], remappings: &[Remap
 }
 
 fn get_global() -> Option<&'static Report> {
-    if GLOBAL_REPORTER_STATE.load(Ordering::SeqCst) != SET {
-        return None;
-    }
-    unsafe {
-        // This is safe given the invariant that setting the global reporter
-        // also sets `GLOBAL_REPORTER_STATE` to `SET`.
-        Some(GLOBAL_REPORTER.as_ref().expect(
-            "Reporter invariant violated: GLOBAL_REPORTER must be initialized before GLOBAL_REPORTER_STATE is set",
-        ))
-    }
+    GLOBAL_REPORTER.get()
 }
 
 /// Executes a closure with a reference to this thread's current reporter.
@@ -276,12 +262,16 @@ fn get_default_scoped<T, F>(mut f: F) -> T
 where
     F: FnMut(&Report) -> T,
 {
-    CURRENT_STATE
-        .try_with(|state| {
-            let scoped = state.scoped.borrow_mut();
-            f(&scoped)
-        })
-        .unwrap_or_else(|_| f(&Report::none()))
+    // Clone the scoped reporter out of the thread-local so `f` may report or scope reporters
+    // itself.
+    match CURRENT_STATE.try_with(|state| state.scoped.borrow().clone()).ok().flatten() {
+        Some(scoped) => f(&scoped),
+        // No scoped reporter on this thread, only on others: use the global default.
+        None => match get_global() {
+            Some(global) => f(global),
+            None => f(&Report::none()),
+        },
+    }
 }
 
 /// Executes a closure with a reference to the `Reporter`.
@@ -302,8 +292,8 @@ pub fn with_scoped<T>(report: &Report, f: impl FnOnce() -> T) -> T {
 
 /// The report state of a thread.
 struct State {
-    /// This thread's current scoped reporter.
-    scoped: RefCell<Report>,
+    /// This thread's current scoped reporter, if one is set.
+    scoped: RefCell<Option<Report>>,
 }
 
 impl State {
@@ -314,7 +304,7 @@ impl State {
     /// the previous value.
     #[inline]
     fn set_scoped(new_report: Report) -> ScopeGuard {
-        let prior = CURRENT_STATE.try_with(|state| state.scoped.replace(new_report)).ok();
+        let prior = CURRENT_STATE.try_with(|state| state.scoped.replace(Some(new_report))).ok();
         EXISTS.store(true, Ordering::Release);
         SCOPED_COUNT.fetch_add(1, Ordering::Release);
         ScopeGuard(prior)
@@ -324,7 +314,7 @@ impl State {
 /// A guard that resets the current scoped reporter to the prior
 /// scoped reporter when dropped.
 #[derive(Debug)]
-pub struct ScopeGuard(Option<Report>);
+pub struct ScopeGuard(Option<Option<Report>>);
 
 impl Drop for ScopeGuard {
     #[inline]
@@ -553,21 +543,7 @@ impl fmt::Debug for Report {
 /// The global reporter can only be set once; additional attempts to set the global reporter will
 /// fail. Returns `Err` if the global reporter has already been set.
 fn set_global_reporter(report: Report) -> Result<(), SetGlobalReporterError> {
-    // `compare_exchange` tries to store `SETTING` if the current value is `UN_SET`
-    // this returns `Ok(_)` if the current value of `GLOBAL_REPORTER_STATE` was `UN_SET` and
-    // `SETTING` was written, this guarantees the value is `SETTING`.
-    if GLOBAL_REPORTER_STATE
-        .compare_exchange(UN_SET, SETTING, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        unsafe {
-            GLOBAL_REPORTER = Some(report);
-        }
-        GLOBAL_REPORTER_STATE.store(SET, Ordering::SeqCst);
-        Ok(())
-    } else {
-        Err(SetGlobalReporterError { _priv: () })
-    }
+    GLOBAL_REPORTER.set(report).map_err(|_| SetGlobalReporterError { _priv: () })
 }
 
 #[cfg(test)]
@@ -587,6 +563,22 @@ mod tests {
     }
 
     #[test]
+    fn scoped_reporter_allows_nested_reads() {
+        #[derive(Debug)]
+        struct TestReporter;
+        impl Reporter for TestReporter {}
+
+        with_scoped(&Report::new(TestReporter), || {
+            get_default(|_| get_default(|reporter| assert!(reporter.is::<TestReporter>())));
+            get_default(|_| {
+                with_scoped(&Report::new(NoReporter::default()), || {
+                    get_default(|reporter| assert!(reporter.is::<NoReporter>()))
+                })
+            });
+        });
+    }
+
+    #[test]
     fn global_and_scoped_reporter_works() {
         get_default(|reporter| {
             assert!(reporter.is::<NoReporter>());
@@ -601,7 +593,23 @@ mod tests {
             get_default(|reporter| assert!(reporter.is::<TestReporter>()))
         });
 
-        get_default(|reporter| assert!(reporter.is::<BasicStdoutReporter>()))
+        get_default(|reporter| assert!(reporter.is::<BasicStdoutReporter>()));
+
+        // A scoped reporter on another thread must not hide the global one on this thread.
+        let scoped = std::sync::Barrier::new(2);
+        let checked = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                with_scoped(&Report::new(TestReporter), || {
+                    scoped.wait();
+                    checked.wait();
+                })
+            });
+            scoped.wait();
+            let is_global = get_default(|reporter| reporter.is::<BasicStdoutReporter>());
+            checked.wait();
+            assert!(is_global);
+        });
     }
 
     #[test]
