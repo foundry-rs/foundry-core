@@ -498,7 +498,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
         let mut output = if !project.cached
             || state.sources.sources.values().flatten().all(|(_, sources, _)| sources.is_empty())
         {
-            state.compile()?.write_artifacts_if(false)?.write_cache_if(false)?
+            state.compile()?.write_artifacts_if(false)?.write_cache()?
         } else {
             let PreprocessedState { mut sources, cache, primary_profiles, preprocessor } = state;
             let normal_mocks = cache.mocks();
@@ -571,7 +571,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                             PreprocessedState { sources, cache, primary_profiles, preprocessor }
                                 .compile()?
                                 .write_artifacts_if(false)?
-                                .write_cache_if(false)?;
+                                .write_cache()?;
                         if slash_paths {
                             output.slash_paths();
                         }
@@ -662,7 +662,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 );
                 state.cache.update_native_dependency_contexts(native_dependencies);
             }
-            let mut output = state.write_artifacts_if(write)?.write_cache_if(write)?;
+            let mut output = state.write_artifacts_if(write)?.write_cache()?;
             if let Some(generation) = generation
                 && let Err(err) = store.publish(generation, project)
             {
@@ -761,31 +761,10 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
         let project = cache.project();
         let ctx = cache.output_ctx();
-        // write all artifacts via the handler but only if the build succeeded and project wasn't
-        // configured with `no_artifacts == true`
-        let compiled_artifacts = if !write {
-            project.artifacts_handler().output_to_artifacts(
-                &output.contracts,
-                &output.sources,
-                ctx,
-                cache.storage_paths(),
-                &primary_profiles,
-            )
-        } else if output.has_error(
-            &project.ignored_error_codes,
-            &project.ignored_error_codes_from,
-            &project.ignored_file_paths,
-            &project.compiler_severity_filter,
-        ) {
-            trace!("skip writing cache file due to solc errors: {:?}", output.errors);
-            project.artifacts_handler().output_to_artifacts(
-                &output.contracts,
-                &output.sources,
-                ctx,
-                cache.storage_paths(),
-                &primary_profiles,
-            )
-        } else {
+        let disk_output = DiskOutput::new(write, project, &output);
+        // write all artifacts via the handler but only if the build succeeded and writing wasn't
+        // disabled
+        let compiled_artifacts = if disk_output.is_write() {
             trace!(
                 "handling artifact output for {} contracts and {} sources",
                 output.contracts.len(),
@@ -813,7 +792,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                         output,
                         cache,
                         compiled_artifacts,
-                        persist: false,
+                        disk_output: DiskOutput::StorageUnavailable,
                     });
                 }
                 Err(err) => return Err(err),
@@ -827,16 +806,70 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                         output,
                         cache,
                         compiled_artifacts: artifacts,
-                        persist: false,
+                        disk_output: DiskOutput::StorageUnavailable,
                     });
                 }
                 return Err(err);
             }
 
             artifacts
+        } else {
+            if disk_output == DiskOutput::SkipOnErrors {
+                trace!("skip writing cache file due to solc errors: {:?}", output.errors);
+            }
+            project.artifacts_handler().output_to_artifacts(
+                &output.contracts,
+                &output.sources,
+                ctx,
+                cache.storage_paths(),
+                &primary_profiles,
+            )
         };
 
-        Ok(ArtifactsState { output, cache, compiled_artifacts, persist: true })
+        Ok(ArtifactsState { output, cache, compiled_artifacts, disk_output })
+    }
+}
+
+/// Whether a compile run writes its artifacts, build infos and cache file to disk.
+///
+/// Decided once, after compiling, by [`CompiledState::write_artifacts_if`], and carried into
+/// [`ArtifactsState::write_cache`] so both stages act on the same decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiskOutput {
+    /// Writing is disabled, by `no_artifacts` or by a caller compiling without persistence:
+    /// nothing is written.
+    Disabled,
+    /// The compiler reported errors that are not ignored: nothing is written.
+    SkipOnErrors,
+    /// Optional storage failed while writing artifacts or build infos: the cache file is not
+    /// written.
+    StorageUnavailable,
+    /// Artifacts, build infos and the cache file are written.
+    Write,
+}
+
+impl DiskOutput {
+    fn new<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>(
+        write: bool,
+        project: &Project<C, T>,
+        output: &AggregatedCompilerOutput<C>,
+    ) -> Self {
+        if !write {
+            Self::Disabled
+        } else if output.has_error(
+            &project.ignored_error_codes,
+            &project.ignored_error_codes_from,
+            &project.ignored_file_paths,
+            &project.compiler_severity_filter,
+        ) {
+            Self::SkipOnErrors
+        } else {
+            Self::Write
+        }
+    }
+
+    const fn is_write(self) -> bool {
+        matches!(self, Self::Write)
     }
 }
 
@@ -846,7 +879,7 @@ struct ArtifactsState<'a, T: ArtifactOutput<CompilerContract = C::CompilerContra
     output: AggregatedCompilerOutput<C>,
     cache: ArtifactsCache<'a, T, C>,
     compiled_artifacts: Artifacts<T::Artifact>,
-    persist: bool,
+    disk_output: DiskOutput,
 }
 
 impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
@@ -857,28 +890,16 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     /// this concludes the [`Project::compile()`] statemachine
     #[instrument(skip_all)]
     fn write_cache(self) -> Result<ProjectCompileOutput<C, T>> {
-        let write = !self.cache.project().no_artifacts;
-        self.write_cache_if(write)
-    }
-
-    fn write_cache_if(self, write: bool) -> Result<ProjectCompileOutput<C, T>> {
-        let ArtifactsState { output, cache, compiled_artifacts, persist } = self;
+        let ArtifactsState { output, cache, compiled_artifacts, disk_output } = self;
         let project = cache.project();
         let ignored_error_codes = project.ignored_error_codes.clone();
         let ignored_error_codes_from = project.ignored_error_codes_from.clone();
         let ignored_file_paths = project.ignored_file_paths.clone();
         let compiler_severity_filter = project.compiler_severity_filter;
-        let has_error = output.has_error(
-            &ignored_error_codes,
-            &ignored_error_codes_from,
-            &ignored_file_paths,
-            &compiler_severity_filter,
-        );
-        let skip_write_to_disk = !write || !persist || has_error;
-        trace!(has_error, project.no_artifacts, skip_write_to_disk, cache_path=?project.cache_path(),"prepare writing cache file");
+        trace!(?disk_output, cache_path=?project.cache_path(), "prepare writing cache file");
 
         let (cached_artifacts, cached_builds, edges) =
-            cache.consume(&compiled_artifacts, &output.build_infos, !skip_write_to_disk)?;
+            cache.consume(&compiled_artifacts, &output.build_infos, disk_output.is_write())?;
 
         project.artifacts_handler().handle_cached_artifacts(&cached_artifacts)?;
 

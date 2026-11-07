@@ -1,5 +1,5 @@
 use crate::{
-    Client, EtherscanError, Response, Result,
+    CacheLookup, Client, EtherscanError, Response, Result,
     serde_helpers::{deserialize_stringified_bool_or_u64, deserialize_stringified_u64},
     source_tree::{SourceTree, SourceTreeEntry},
     utils::{deserialize_address_opt, deserialize_source_code},
@@ -367,13 +367,12 @@ impl Client {
     pub async fn contract_abi(&self, address: Address) -> Result<JsonAbi> {
         // apply caching
         if let Some(ref cache) = self.cache {
-            // If this is None, then we have a cache miss
-            if let Some(src) = cache.get_abi(address) {
-                // If this is None, then the contract is not verified
-                return match src {
-                    Some(src) => Ok(src),
-                    None => Err(EtherscanError::ContractCodeNotVerified(address)),
-                };
+            match cache.get_abi(address) {
+                CacheLookup::Verified(abi) => return Ok(abi),
+                CacheLookup::Unverified => {
+                    return Err(EtherscanError::ContractCodeNotVerified(address));
+                }
+                CacheLookup::Miss => {}
             }
         }
         trace!(target: "etherscan", ?address, "GET contract abi");
@@ -437,13 +436,12 @@ impl Client {
     pub async fn contract_source_code(&self, address: Address) -> Result<ContractMetadata> {
         // apply caching
         if let Some(ref cache) = self.cache {
-            // If this is None, then we have a cache miss
-            if let Some(src) = cache.get_source(address) {
-                // If this is None, then the contract is not verified
-                return match src {
-                    Some(src) => Ok(src),
-                    None => Err(EtherscanError::ContractCodeNotVerified(address)),
-                };
+            match cache.get_source(address) {
+                CacheLookup::Verified(metadata) => return Ok(metadata),
+                CacheLookup::Unverified => {
+                    return Err(EtherscanError::ContractCodeNotVerified(address));
+                }
+                CacheLookup::Miss => {}
             }
         }
 
