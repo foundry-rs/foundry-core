@@ -34,8 +34,10 @@ mod compiler;
 pub use compiler::SolcCompilerIoReporter;
 
 thread_local! {
-    static CURRENT_STATE: State = State {
-        scoped: RefCell::new(Report::none()),
+    static CURRENT_STATE: State = const {
+        State {
+            scoped: RefCell::new(None),
+        }
     };
 }
 
@@ -260,12 +262,16 @@ fn get_default_scoped<T, F>(mut f: F) -> T
 where
     F: FnMut(&Report) -> T,
 {
-    CURRENT_STATE
-        .try_with(|state| {
-            let scoped = state.scoped.borrow_mut();
-            f(&scoped)
-        })
-        .unwrap_or_else(|_| f(&Report::none()))
+    // Clone the scoped reporter out of the thread-local so `f` may report or scope reporters
+    // itself.
+    match CURRENT_STATE.try_with(|state| state.scoped.borrow().clone()).ok().flatten() {
+        Some(scoped) => f(&scoped),
+        // No scoped reporter on this thread, only on others: use the global default.
+        None => match get_global() {
+            Some(global) => f(global),
+            None => f(&Report::none()),
+        },
+    }
 }
 
 /// Executes a closure with a reference to the `Reporter`.
@@ -286,8 +292,8 @@ pub fn with_scoped<T>(report: &Report, f: impl FnOnce() -> T) -> T {
 
 /// The report state of a thread.
 struct State {
-    /// This thread's current scoped reporter.
-    scoped: RefCell<Report>,
+    /// This thread's current scoped reporter, if one is set.
+    scoped: RefCell<Option<Report>>,
 }
 
 impl State {
@@ -298,7 +304,7 @@ impl State {
     /// the previous value.
     #[inline]
     fn set_scoped(new_report: Report) -> ScopeGuard {
-        let prior = CURRENT_STATE.try_with(|state| state.scoped.replace(new_report)).ok();
+        let prior = CURRENT_STATE.try_with(|state| state.scoped.replace(Some(new_report))).ok();
         EXISTS.store(true, Ordering::Release);
         SCOPED_COUNT.fetch_add(1, Ordering::Release);
         ScopeGuard(prior)
@@ -308,7 +314,7 @@ impl State {
 /// A guard that resets the current scoped reporter to the prior
 /// scoped reporter when dropped.
 #[derive(Debug)]
-pub struct ScopeGuard(Option<Report>);
+pub struct ScopeGuard(Option<Option<Report>>);
 
 impl Drop for ScopeGuard {
     #[inline]
@@ -557,6 +563,22 @@ mod tests {
     }
 
     #[test]
+    fn scoped_reporter_allows_nested_reads() {
+        #[derive(Debug)]
+        struct TestReporter;
+        impl Reporter for TestReporter {}
+
+        with_scoped(&Report::new(TestReporter), || {
+            get_default(|_| get_default(|reporter| assert!(reporter.is::<TestReporter>())));
+            get_default(|_| {
+                with_scoped(&Report::new(NoReporter::default()), || {
+                    get_default(|reporter| assert!(reporter.is::<NoReporter>()))
+                })
+            });
+        });
+    }
+
+    #[test]
     fn global_and_scoped_reporter_works() {
         get_default(|reporter| {
             assert!(reporter.is::<NoReporter>());
@@ -571,7 +593,23 @@ mod tests {
             get_default(|reporter| assert!(reporter.is::<TestReporter>()))
         });
 
-        get_default(|reporter| assert!(reporter.is::<BasicStdoutReporter>()))
+        get_default(|reporter| assert!(reporter.is::<BasicStdoutReporter>()));
+
+        // A scoped reporter on another thread must not hide the global one on this thread.
+        let scoped = std::sync::Barrier::new(2);
+        let checked = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                with_scoped(&Report::new(TestReporter), || {
+                    scoped.wait();
+                    checked.wait();
+                })
+            });
+            scoped.wait();
+            let is_global = get_default(|reporter| reporter.is::<BasicStdoutReporter>());
+            checked.wait();
+            assert!(is_global);
+        });
     }
 
     #[test]
