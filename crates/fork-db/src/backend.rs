@@ -112,13 +112,53 @@ type AddressData = AddressHashMap<AccountInfo>;
 type StorageData = AddressHashMap<StorageInfo>;
 type BlockHashData = U256Map<B256>;
 
-/// States for tracking which account endpoints should be used when account info
-const ACCOUNT_FETCH_UNCHECKED: u8 = 0;
-/// Endpoints supports the non standard eth_getAccountInfo which is more efficient than sending 3
-/// separate requests
-const ACCOUNT_FETCH_SUPPORTS_ACC_INFO: u8 = 1;
-/// Use regular individual getCode, getNonce, getBalance calls
-const ACCOUNT_FETCH_SEPARATE_REQUESTS: u8 = 2;
+/// Which endpoints the backend uses to fetch account info under [`AccountFetchPolicy::Auto`].
+///
+/// Transitions, all driven by the outcome of account requests:
+///
+/// ```text
+/// Unchecked --eth_getAccountInfo ok--------------------> SupportsAccountInfo
+/// Unchecked --eth_getAccountInfo err / triple first----> SeparateRequests
+/// SupportsAccountInfo --eth_getAccountInfo err---------> SeparateRequests
+/// ```
+///
+/// Nothing moves back to `Unchecked`. Stores are unconditional, so concurrent `Unchecked`
+/// probes may overwrite each other's outcome; the last one to finish wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum AccountFetchMode {
+    /// Not probed yet: race the non standard `eth_getAccountInfo` against the separate requests
+    /// and settle on whichever answers.
+    Unchecked = 0,
+    /// The endpoint supports the non standard `eth_getAccountInfo`, which is more efficient than
+    /// sending 3 separate requests.
+    SupportsAccountInfo = 1,
+    /// Use regular individual `getCode`, `getNonce`, `getBalance` calls.
+    SeparateRequests = 2,
+}
+
+/// An [`AccountFetchMode`] shared between all in-flight account requests.
+#[derive(Debug)]
+struct SharedAccountFetchMode(AtomicU8);
+
+impl SharedAccountFetchMode {
+    const fn new(mode: AccountFetchMode) -> Self {
+        Self(AtomicU8::new(mode as u8))
+    }
+
+    fn load(&self) -> AccountFetchMode {
+        match self.0.load(Ordering::Relaxed) {
+            0 => AccountFetchMode::Unchecked,
+            1 => AccountFetchMode::SupportsAccountInfo,
+            2 => AccountFetchMode::SeparateRequests,
+            _ => unreachable!("Invalid account fetch mode"),
+        }
+    }
+
+    fn store(&self, mode: AccountFetchMode) {
+        self.0.store(mode as u8, Ordering::Relaxed);
+    }
+}
 
 struct AnyRequestFuture<T, Err> {
     sender: OneshotSender<Result<T, Err>>,
@@ -228,7 +268,7 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     /// Whether block hashes are resolved in the remote EVM.
     block_hash_via_evm: Option<bool>,
     /// The mode for fetching account data
-    account_fetch_mode: Arc<AtomicU8>,
+    account_fetch_mode: Arc<SharedAccountFetchMode>,
     /// Account-loading policy fixed when this backend is created.
     account_fetch_policy: AccountFetchPolicy,
     /// Prefetched accounts that no read has requested yet. They stay out of `db`, so the cache
@@ -271,7 +311,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             block_anchor,
             block_generation: 0,
             block_hash_via_evm,
-            account_fetch_mode: Arc::new(AtomicU8::new(ACCOUNT_FETCH_UNCHECKED)),
+            account_fetch_mode: Arc::new(SharedAccountFetchMode::new(AccountFetchMode::Unchecked)),
             prefetched_accounts: Default::default(),
             prefetched_storage: Default::default(),
         }
@@ -431,9 +471,8 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                     .wrap_err("fork account policy requires eth_getAccountInfo");
             }
             // depending on the tracked mode we can dispatch requests.
-            let initial_mode = mode.load(Ordering::Relaxed);
-            match initial_mode {
-                ACCOUNT_FETCH_UNCHECKED => {
+            match mode.load() {
+                AccountFetchMode::Unchecked => {
                     // single request for accountinfo object
                     let acc_info_fut = Self::fetch_account_info(&provider, address, block_id);
 
@@ -446,12 +485,12 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                             match acc_info {
                                 Ok(info) => {
                                  trace!(target: "backendhandler", "endpoint supports eth_getAccountInfo");
-                                    mode.store(ACCOUNT_FETCH_SUPPORTS_ACC_INFO, Ordering::Relaxed);
+                                    mode.store(AccountFetchMode::SupportsAccountInfo);
                                     Ok((info.balance, info.nonce, info.code))
                                 }
                                 Err(err) => {
                                     trace!(target: "backendhandler", ?err, "failed initial eth_getAccountInfo call");
-                                    mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
+                                    mode.store(AccountFetchMode::SeparateRequests);
                                     Ok(triple_fut.await?)
                                 }
                             }
@@ -459,7 +498,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                         triple = &mut triple_fut => {
                             match triple {
                                 Ok((balance, nonce, code)) => {
-                                    mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
+                                    mode.store(AccountFetchMode::SeparateRequests);
                                     Ok((balance, nonce, code))
                                 }
                                 Err(err) => Err(err)
@@ -468,7 +507,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                     }
                 }
 
-                ACCOUNT_FETCH_SUPPORTS_ACC_INFO => {
+                AccountFetchMode::SupportsAccountInfo => {
                     let mut res = Self::fetch_account_info(&provider, address, block_id)
                         .await
                         .map(|info| (info.balance, info.nonce, info.code));
@@ -476,7 +515,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                     // it's possible that the configured endpoint load balances requests to multiple
                     // instances and not all support that endpoint so we should reset here
                     if res.is_err() {
-                        mode.store(ACCOUNT_FETCH_SEPARATE_REQUESTS, Ordering::Relaxed);
+                        mode.store(AccountFetchMode::SeparateRequests);
 
                         res = Self::fetch_account_separately(&provider, address, block_id).await;
                     }
@@ -484,11 +523,9 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                     Ok(res?)
                 }
 
-                ACCOUNT_FETCH_SEPARATE_REQUESTS => {
+                AccountFetchMode::SeparateRequests => {
                     Self::fetch_account_separately(&provider, address, block_id).await
                 }
-
-                _ => unreachable!("Invalid account fetch mode"),
             }
         };
 
@@ -1450,12 +1487,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn exact_anchor_account_requests_use_hash_objects_without_canonical_flag() {
         for (policy, mode, reject_account_info) in [
-            (AccountFetchPolicy::RequireAccountInfo, ACCOUNT_FETCH_UNCHECKED, false),
-            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_UNCHECKED, false),
-            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_UNCHECKED, true),
-            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_SUPPORTS_ACC_INFO, false),
-            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_SUPPORTS_ACC_INFO, true),
-            (AccountFetchPolicy::Auto, ACCOUNT_FETCH_SEPARATE_REQUESTS, true),
+            (AccountFetchPolicy::RequireAccountInfo, AccountFetchMode::Unchecked, false),
+            (AccountFetchPolicy::Auto, AccountFetchMode::Unchecked, false),
+            (AccountFetchPolicy::Auto, AccountFetchMode::Unchecked, true),
+            (AccountFetchPolicy::Auto, AccountFetchMode::SupportsAccountInfo, false),
+            (AccountFetchPolicy::Auto, AccountFetchMode::SupportsAccountInfo, true),
+            (AccountFetchPolicy::Auto, AccountFetchMode::SeparateRequests, true),
         ] {
             let (endpoint, stop, server) = account_policy_server(reject_account_info);
             let hash = B256::with_last_byte(1);
@@ -1466,7 +1503,7 @@ mod tests {
             );
             let (backend, handler) =
                 SharedBackend::new_with_anchor(provider, db, ForkBlock::new(123, hash)).unwrap();
-            handler.account_fetch_mode.store(mode, Ordering::Relaxed);
+            handler.account_fetch_mode.store(mode);
             tokio::spawn(handler);
             for address in [Address::with_last_byte(1), Address::with_last_byte(2)] {
                 let account = backend.basic_ref(address).unwrap().unwrap();
