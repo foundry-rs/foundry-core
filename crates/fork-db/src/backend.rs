@@ -8,12 +8,13 @@ use crate::{
 };
 use alloy_chains::Chain;
 use alloy_consensus::BlockHeader;
+use alloy_json_rpc::{Id, RequestPacket, ResponsePacket, ResponsePayload};
 use alloy_primitives::{Address, B256, Bytes, U64, U256, keccak256, map::U256Map};
 use alloy_provider::{
     DynProvider, Network, Provider,
     network::{AnyNetwork, BlockResponse, primitives::HeaderResponse},
 };
-use alloy_rpc_types::BlockId;
+use alloy_rpc_types::{AccessListResult, BlockId, TransactionRequest, state::StateOverride};
 use eyre::WrapErr;
 use futures::{
     FutureExt,
@@ -27,7 +28,7 @@ use revm::{
     database::DatabaseRef,
     primitives::{
         KECCAK_EMPTY,
-        map::{AddressHashMap, HashMap, hash_map::Entry},
+        map::{AddressHashMap, HashMap, HashSet, hash_map::Entry},
     },
     state::{AccountInfo, Bytecode},
 };
@@ -42,14 +43,59 @@ use std::{
         atomic::{AtomicU8, Ordering},
         mpsc::{Sender as OneshotSender, channel as oneshot_channel},
     },
+    time::Duration,
 };
 use tokio::select;
+use tower::Service;
 
 /// Keep state reads hash-addressed without relying on the bare-hash extension to EIP-1898.
 /// Moonbeam parses bare hashes as block numbers, while Rootstock rejects a boolean
 /// `requireCanonical`. An explicit hash object with the optional flag omitted supports both.
 #[derive(Clone, Copy, Debug)]
 struct StateBlockId(BlockId);
+
+/// Largest access list, in accounts plus slots, that is not worth a simulation: reading its keys
+/// directly takes no more round trips than the simulation and the prefetch together.
+const CHEAP_ACCESS_LIST: usize = 2;
+
+/// Reads that all hit the cache since the last simulation before the cache counts as warm.
+const WARM_CACHE_READS: u64 = 32;
+
+/// Slots per batch request of prefetched reads. Endpoints commonly cap batches at 100 calls.
+const PREFETCH_BATCH_SIZE: usize = 64;
+
+/// Batch requests of prefetched reads in flight at once. The fork backend sends the EVM's own
+/// reads without a limit; this bound keeps a large access list from flooding the endpoint.
+const MAX_PREFETCH_BATCHES: usize = 2;
+
+/// Longest wait for a batch of prefetched reads. A rate-limited endpoint answers with errors
+/// that the transport retries with growing pauses, and reads that joined the batch would wait
+/// through them, so a slow batch counts as failed and those reads get their own requests.
+const PREFETCH_BATCH_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Failed batch requests, such as rate limits or an endpoint without batch support, after which
+/// prefetching stops for the rest of the run. Once an endpoint limits the rate, every further
+/// burst makes the EVM's own reads wait too.
+const MAX_PREFETCH_BATCH_ERRORS: u32 = 1;
+
+/// Whether an RPC error says the endpoint rejected the parameters.
+fn is_invalid_params(err: &eyre::Report) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("32602")
+        || msg.contains("invalid params")
+        || msg.contains("invalid argument")
+        || msg.contains("too many arguments")
+}
+
+/// Whether an RPC error says the endpoint does not serve the method.
+fn is_unsupported_method(err: &eyre::Report) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("32601")
+        || msg.contains("method not found")
+        || msg.contains("not supported")
+        || msg.contains("unsupported method")
+        || msg.contains("does not exist")
+}
 
 impl Serialize for StateBlockId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -97,6 +143,36 @@ type TransactionFuture<Err, N = AnyNetwork> = Pin<
                     TransactionSender<N>,
                     Result<<N as Network>::TransactionResponse, Err>,
                     B256,
+                ),
+            > + Send,
+    >,
+>;
+
+/// A simulated call, keyed by its target and selector.
+type AccessListKey = (Address, [u8; 4]);
+
+/// A call to simulate with `eth_createAccessList`, see [`SharedBackend::prefetch_access_list`].
+#[derive(Clone, Debug)]
+pub struct AccessListPrefetch {
+    /// The call to simulate.
+    pub tx: TransactionRequest,
+    /// State that only exists locally, applied to the remote state for the simulation.
+    pub overrides: Option<StateOverride>,
+    /// Whether to simulate the target and selector once per pinned block.
+    pub once: bool,
+}
+type AccessListFuture<Err> =
+    Pin<Box<dyn Future<Output = (Result<AccessListResult, Err>, AccessListKey, u64, bool)> + Send>>;
+
+/// One batch of prefetched slot reads: the value of each slot, or the error of the whole batch,
+/// with the slots and the pin generation.
+type StorageBatchFuture<Err> = Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    Result<Vec<(Address, U256, Result<U256, Err>)>, Err>,
+                    Vec<(Address, U256)>,
+                    u64,
                 ),
             > + Send,
     >,
@@ -207,6 +283,8 @@ enum ProviderRequest<Err, N: Network = AnyNetwork> {
     BlockHash(BlockHashFuture<Err>),
     FullBlock(FullBlockFuture<Err, N>),
     Transaction(TransactionFuture<Err, N>),
+    AccessList(AccessListFuture<Err>),
+    StorageBatch(StorageBatchFuture<Err>),
     AnyRequest(Box<dyn WrappedAnyRequest>),
 }
 
@@ -223,6 +301,8 @@ enum BackendRequest<N: Network = AnyNetwork> {
     FullBlock(BlockId, FullBlockSender<N>),
     /// Fetch a transaction
     Transaction(B256, TransactionSender<N>),
+    /// Simulate a call and prefetch the accounts and slots it touches
+    PrefetchAccessList(Box<AccessListPrefetch>),
     /// Sets the pinned block to fetch data from
     SetPinnedBlock(BlockId),
 
@@ -279,6 +359,22 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     prefetched_accounts: AddressHashMap<AccountInfo>,
     /// Prefetched storage slots that no read has requested yet, see `prefetched_accounts`.
     prefetched_storage: HashMap<(Address, U256), U256>,
+    /// Access list simulations in flight, keyed by pin generation, target and selector.
+    access_list_requests: HashSet<(u64, AccessListKey)>,
+    /// Number of keys the last access list of a target and selector held.
+    access_list_sizes: HashMap<AccessListKey, usize>,
+    /// Whether the endpoint answers `eth_createAccessList`.
+    access_lists_supported: bool,
+    /// Whether the endpoint takes state overrides in `eth_createAccessList`.
+    access_list_overrides_supported: bool,
+    /// Cache hits and misses when the last simulation was requested.
+    access_list_cache_counts: Option<(u64, u64)>,
+    /// Slots of access lists waiting for a request, keyed by pin generation.
+    prefetch_queue: VecDeque<(u64, Address, U256)>,
+    /// Batch requests from the queue in flight.
+    prefetch_batches: usize,
+    /// Batch requests that failed as a whole.
+    prefetch_batch_errors: u32,
 }
 
 impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
@@ -317,6 +413,14 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             account_fetch_mode: Arc::new(SharedAccountFetchMode::new(AccountFetchMode::Unchecked)),
             prefetched_accounts: Default::default(),
             prefetched_storage: Default::default(),
+            access_list_requests: Default::default(),
+            access_list_sizes: Default::default(),
+            access_lists_supported: true,
+            access_list_overrides_supported: true,
+            access_list_cache_counts: None,
+            prefetch_queue: Default::default(),
+            prefetch_batches: 0,
+            prefetch_batch_errors: 0,
         }
     }
 
@@ -396,6 +500,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             BackendRequest::SetPinnedBlock(block_id) => {
                 self.prefetched_accounts.clear();
                 self.prefetched_storage.clear();
+                self.prefetch_queue.clear();
                 self.block_id = Some(block_id);
                 self.block_anchor = None;
                 self.block_generation = self.block_generation.wrapping_add(1);
@@ -415,9 +520,217 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                     self.db.block_hashes().write().insert(block, hash);
                 }
             }
+            BackendRequest::PrefetchAccessList(prefetch) => self.request_access_list(*prefetch),
             BackendRequest::AnyRequest(fut) => {
                 self.pending_requests.push(ProviderRequest::AnyRequest(fut));
             }
+        }
+    }
+
+    /// Simulates a call with `eth_createAccessList` at the pinned block and prefetches the
+    /// accounts and slots in the result.
+    ///
+    /// The simulation is skipped while reads hit the cache, since a warm cache has nothing to
+    /// prefetch. A target and selector whose last list held at most [`CHEAP_ACCESS_LIST`] keys is
+    /// skipped, since the direct reads cost no more round trips than the simulation, and so is one
+    /// already simulated when `once` is set. One simulation per target and selector is in flight
+    /// at a time.
+    fn request_access_list(&mut self, prefetch: AccessListPrefetch) {
+        let AccessListPrefetch { tx, overrides, once } = prefetch;
+        if !self.access_lists_supported
+            || (overrides.is_some() && !self.access_list_overrides_supported)
+        {
+            return;
+        }
+        let Some(to) = tx.to.and_then(|kind| kind.to().copied()) else { return };
+        let mut selector = [0u8; 4];
+        if let Some(input) = tx.input.input()
+            && let Some(prefix) = input.get(..4)
+        {
+            selector.copy_from_slice(prefix);
+        }
+        let key = (to, selector);
+        if self.access_list_sizes.get(&key).is_some_and(|&keys| once || keys <= CHEAP_ACCESS_LIST) {
+            return;
+        }
+        let counts = (self.db.cache().cache_hits(), self.db.cache().cache_misses());
+        if let Some((hits, misses)) = self.access_list_cache_counts
+            && counts.1 == misses
+            && counts.0 >= hits + WARM_CACHE_READS
+        {
+            trace!(target: "backendhandler", %to, "cache is warm, skipping access list request");
+            return;
+        }
+        let generation = self.block_generation;
+        if !self.access_list_requests.insert((generation, key)) {
+            return;
+        }
+        self.access_list_cache_counts = Some(counts);
+        let with_overrides = overrides.is_some();
+        trace!(
+            target: "backendhandler",
+            %to,
+            selector = %alloy_primitives::FixedBytes::<4>::from(selector),
+            with_overrides,
+            "preparing access list request"
+        );
+        let provider = self.provider.clone();
+        let block_id = self.block_id.unwrap_or_default();
+        let fut = Box::pin(async move {
+            let mut params = vec![serde_json::json!(tx), serde_json::json!(StateBlockId(block_id))];
+            if let Some(overrides) = overrides {
+                params.push(serde_json::json!(overrides));
+            }
+            let result = provider
+                .raw_request::<_, AccessListResult>("eth_createAccessList".into(), params)
+                .await
+                .map_err(Into::into);
+            (result, key, generation, with_overrides)
+        });
+        self.pending_requests.push(ProviderRequest::AccessList(fut));
+    }
+
+    /// Prefetches every account of an access list through the normal request path, so values
+    /// already cached or in flight cost nothing, and queues its slots for
+    /// [`Self::drain_prefetch_queue`].
+    fn prefetch_access_list(&mut self, result: &AccessListResult) {
+        let generation = self.block_generation;
+        for item in &result.access_list.0 {
+            let (sender, _) = oneshot_channel();
+            self.on_request(BackendRequest::Basic(item.address, sender, true));
+            for slot in &item.storage_keys {
+                self.prefetch_queue.push_back((
+                    generation,
+                    item.address,
+                    U256::from_be_bytes(slot.0),
+                ));
+            }
+        }
+        self.drain_prefetch_queue();
+    }
+
+    /// Sends queued slots in batches of [`PREFETCH_BATCH_SIZE`] until [`MAX_PREFETCH_BATCHES`]
+    /// are in flight. A slot that a read fetched or requested in the meantime is dropped.
+    fn drain_prefetch_queue(&mut self) {
+        while self.prefetch_batches < MAX_PREFETCH_BATCHES {
+            let generation = self.block_generation;
+            let mut slots = Vec::new();
+            while slots.len() < PREFETCH_BATCH_SIZE {
+                let Some((slot_generation, address, idx)) = self.prefetch_queue.pop_front() else {
+                    break;
+                };
+                if slot_generation != generation
+                    || self.storage_requests.contains_key(&(generation, address, idx))
+                    || self.prefetched_storage.contains_key(&(address, idx))
+                    || self
+                        .db
+                        .storage()
+                        .read()
+                        .get(&address)
+                        .is_some_and(|slots| slots.contains_key(&idx))
+                {
+                    continue;
+                }
+                self.db.cache().record_cache_miss();
+                self.storage_requests.insert((generation, address, idx), (Vec::new(), true));
+                slots.push((address, idx));
+            }
+            if slots.is_empty() {
+                return;
+            }
+            self.prefetch_batches += 1;
+            self.request_storage_batch(slots, generation);
+        }
+    }
+
+    /// Reads `slots` with one `eth_getStorageAt` batch request.
+    fn request_storage_batch(&mut self, slots: Vec<(Address, U256)>, generation: u64) {
+        trace!(target: "backendhandler", slots = slots.len(), "preparing storage batch request");
+        let client = self.provider.client();
+        let block_id = StateBlockId(self.block_id.unwrap_or_default());
+        let requests = slots
+            .iter()
+            .map(|&(address, idx)| {
+                client.make_request("eth_getStorageAt", (address, idx, block_id)).serialize()
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let mut transport = client.transport().clone();
+        let fut = Box::pin(async move {
+            let result = async {
+                let requests = requests?;
+                let ids = requests.iter().map(|request| request.id().clone()).collect::<Vec<_>>();
+                let response = tokio::time::timeout(
+                    PREFETCH_BATCH_TIMEOUT,
+                    transport.call(RequestPacket::Batch(requests)),
+                )
+                .await
+                .map_err(|_| eyre::eyre!("timed out after {PREFETCH_BATCH_TIMEOUT:?}"))??;
+                let ResponsePacket::Batch(responses) = response else {
+                    eyre::bail!("expected a batch response");
+                };
+                let mut responses = responses
+                    .into_iter()
+                    .map(|response| (response.id, response.payload))
+                    .collect::<HashMap<Id, _>>();
+                let values = slots
+                    .iter()
+                    .zip(ids)
+                    .map(|(&(address, idx), id)| {
+                        let value = match responses.remove(&id) {
+                            Some(ResponsePayload::Success(raw)) => {
+                                serde_json::from_str::<U256>(raw.get()).map_err(Into::into)
+                            }
+                            Some(ResponsePayload::Failure(err)) => Err(eyre::eyre!("{err}")),
+                            None => Err(eyre::eyre!("missing response")),
+                        };
+                        (address, idx, value)
+                    })
+                    .collect::<Vec<_>>();
+                eyre::Ok(values)
+            }
+            .await;
+            (result, slots, generation)
+        });
+        self.pending_requests.push(ProviderRequest::StorageBatch(fut));
+    }
+
+    /// Caches a storage response and answers its listeners.
+    fn on_storage_response(
+        &mut self,
+        resp: Result<U256, eyre::Report>,
+        addr: Address,
+        idx: U256,
+        generation: u64,
+    ) {
+        let request_key = (generation, addr, idx);
+        let value = match resp {
+            Ok(value) => value,
+            Err(err) => {
+                // notify all listeners
+                let err = Arc::new(err);
+                if let Some((listeners, _)) = self.storage_requests.remove(&request_key) {
+                    for l in listeners {
+                        let _ = l.send(Err(DatabaseError::GetStorage(addr, idx, Arc::clone(&err))));
+                    }
+                }
+                return;
+            }
+        };
+
+        // update the cache
+        let (listeners, prefetch_only) =
+            self.storage_requests.remove(&request_key).unwrap_or_default();
+        // A value read at a superseded pin only answers its own listeners.
+        let current = generation == self.block_generation;
+        if current && prefetch_only {
+            self.prefetched_storage.insert((addr, idx), value);
+        } else if current {
+            self.db.storage().write().entry(addr).or_default().insert(idx, value);
+        }
+
+        // notify all listeners
+        for l in listeners {
+            let _ = l.send(Ok(value));
         }
     }
 
@@ -901,47 +1214,45 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                     }
                     ProviderRequest::Storage(fut) => {
                         if let Poll::Ready((resp, addr, idx, generation)) = fut.poll_unpin(cx) {
-                            let request_key = (generation, addr, idx);
-                            let value = match resp {
-                                Ok(value) => value,
+                            pin.on_storage_response(resp, addr, idx, generation);
+                            continue;
+                        }
+                    }
+                    ProviderRequest::StorageBatch(fut) => {
+                        if let Poll::Ready((result, slots, generation)) = fut.poll_unpin(cx) {
+                            pin.prefetch_batches -= 1;
+                            match result {
+                                Ok(values) => {
+                                    for (addr, idx, value) in values {
+                                        pin.on_storage_response(value, addr, idx, generation);
+                                    }
+                                }
                                 Err(err) => {
-                                    // notify all listeners
-                                    let err = Arc::new(err);
-                                    if let Some((listeners, _)) =
-                                        pin.storage_requests.remove(&request_key)
-                                    {
-                                        for l in listeners {
-                                            let _ = l.send(Err(DatabaseError::GetStorage(
-                                                addr,
-                                                idx,
-                                                Arc::clone(&err),
-                                            )));
+                                    // Reads that joined the batch get their own request; slots no
+                                    // read asked for are dropped.
+                                    debug!(target: "backendhandler", %err, slots = slots.len(), "storage batch request failed");
+                                    for (addr, idx) in slots {
+                                        let key = (generation, addr, idx);
+                                        if let Some((listeners, _)) =
+                                            pin.storage_requests.remove(&key)
+                                            && generation == pin.block_generation
+                                        {
+                                            for listener in listeners {
+                                                pin.request_account_storage(
+                                                    addr, idx, listener, false,
+                                                );
+                                            }
                                         }
                                     }
-                                    continue;
+                                    pin.prefetch_queue.clear();
+                                    pin.prefetch_batch_errors += 1;
+                                    if pin.prefetch_batch_errors >= MAX_PREFETCH_BATCH_ERRORS {
+                                        debug!(target: "backendhandler", "too many failed batch requests, prefetching stopped");
+                                        pin.access_lists_supported = false;
+                                    }
                                 }
-                            };
-
-                            // update the cache
-                            let (listeners, prefetch_only) =
-                                pin.storage_requests.remove(&request_key).unwrap_or_default();
-                            // A value read at a superseded pin only answers its own listeners.
-                            let current = generation == pin.block_generation;
-                            if current && prefetch_only {
-                                pin.prefetched_storage.insert((addr, idx), value);
-                            } else if current {
-                                pin.db
-                                    .storage()
-                                    .write()
-                                    .entry(addr)
-                                    .or_default()
-                                    .insert(idx, value);
                             }
-
-                            // notify all listeners
-                            for l in listeners {
-                                let _ = l.send(Ok(value));
-                            }
+                            pin.drain_prefetch_queue();
                             continue;
                         }
                     }
@@ -1010,6 +1321,40 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 }
                             };
                             let _ = sender.send(msg);
+                            continue;
+                        }
+                    }
+                    ProviderRequest::AccessList(fut) => {
+                        if let Poll::Ready((resp, key, generation, with_overrides)) =
+                            fut.poll_unpin(cx)
+                        {
+                            pin.access_list_requests.remove(&(generation, key));
+                            match resp {
+                                Ok(result) => {
+                                    let keys = result
+                                        .access_list
+                                        .0
+                                        .iter()
+                                        .map(|item| 1 + item.storage_keys.len())
+                                        .sum();
+                                    trace!(target: "backendhandler", to = %key.0, keys, "received access list");
+                                    pin.access_list_sizes.insert(key, keys);
+                                    if generation == pin.block_generation {
+                                        pin.prefetch_access_list(&result);
+                                    }
+                                }
+                                Err(err) => {
+                                    if is_unsupported_method(&err) {
+                                        debug!(target: "backendhandler", %err, "endpoint does not support eth_createAccessList, prefetching stopped");
+                                        pin.access_lists_supported = false;
+                                    } else if with_overrides && is_invalid_params(&err) {
+                                        debug!(target: "backendhandler", %err, "endpoint does not take state overrides in eth_createAccessList, prefetching local calls stopped");
+                                        pin.access_list_overrides_supported = false;
+                                    } else {
+                                        trace!(target: "backendhandler", %err, "access list request failed");
+                                    }
+                                }
+                            }
                             continue;
                         }
                     }
@@ -1280,6 +1625,21 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
         self.do_get_storage(address, index, true).map(drop)
     }
 
+    /// Simulates a call on the endpoint with `eth_createAccessList` and prefetches the accounts
+    /// and slots it touches, in parallel and without waiting. Reads that reach those keys while
+    /// the requests are in flight wait for them instead of sending their own.
+    ///
+    /// The simulation runs on the remote state plus the overrides, so a call into state that only
+    /// exists locally needs that state in `overrides`; a wrong prediction costs the requests and
+    /// stays out of the cache file like [`Self::prefetch_storage`]. Nothing is simulated while
+    /// reads hit the cache, a target and selector whose last list was small is not simulated
+    /// again, and neither is one simulated before when `once` is set. An endpoint without the
+    /// method turns the feature off, and one that rejects the overrides stops the calls that need
+    /// them.
+    pub fn prefetch_access_list(&self, prefetch: AccessListPrefetch) {
+        let _ = self.backend.unbounded_send(BackendRequest::PrefetchAccessList(Box::new(prefetch)));
+    }
+
     fn do_get_basic(
         &self,
         address: Address,
@@ -1470,7 +1830,7 @@ mod tests {
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_client::ClientBuilder;
     use serde::Deserialize;
-    use std::{fs, path::PathBuf, sync::atomic::AtomicBool, time::Duration};
+    use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
     use tiny_http::{Response, Server};
 
     pub fn get_http_provider(endpoint: &str) -> impl Provider<AnyNetwork> + Clone + use<> {
@@ -2904,5 +3264,161 @@ mod tests {
         assert_eq!(actual_response_bytes, expected_response_bytes);
 
         server_handle.join().unwrap();
+    }
+
+    /// Serves `eth_createAccessList` with one slot for the target and one for `other`, and answers
+    /// account and storage reads with fixed values.
+    fn access_list_server(
+        target: Address,
+        other: Address,
+        fail: bool,
+    ) -> (String, Arc<AtomicBool>, std::thread::JoinHandle<Vec<serde_json::Value>>) {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", server.server_addr());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            let answer = |rpc: &serde_json::Value| {
+                let mut response = serde_json::json!({"jsonrpc": "2.0", "id": rpc["id"]});
+                match rpc["method"].as_str().unwrap() {
+                    "eth_createAccessList" if fail => {
+                        response["error"] = serde_json::json!({
+                            "code": -32601, "message": "the method eth_createAccessList does not exist/is not available",
+                        });
+                    }
+                    "eth_createAccessList" => {
+                        response["result"] = serde_json::json!({
+                            "accessList": [
+                                {"address": target, "storageKeys": [B256::with_last_byte(1)]},
+                                {"address": other, "storageKeys": [B256::with_last_byte(2)]},
+                            ],
+                            "gasUsed": "0x5208",
+                        });
+                    }
+                    "eth_getAccountInfo" => {
+                        response["result"] =
+                            serde_json::json!({"balance": "0x2a", "nonce": "0x0", "code": "0x"});
+                    }
+                    "eth_getStorageAt" => response["result"] = serde_json::json!("0x2a"),
+                    method => panic!("unexpected method {method}"),
+                }
+                response
+            };
+            while !stopped.load(Ordering::Relaxed) {
+                if let Some(mut request) = server.recv_timeout(Duration::from_millis(20)).unwrap() {
+                    let rpc: serde_json::Value =
+                        serde_json::from_reader(request.as_reader()).unwrap();
+                    // Prefetched slots arrive as one batch request.
+                    let response = match rpc.as_array() {
+                        Some(batch) => {
+                            let responses = batch.iter().map(answer).collect::<Vec<_>>();
+                            requests.extend(batch.iter().cloned());
+                            serde_json::Value::Array(responses)
+                        }
+                        None => {
+                            let response = answer(&rpc);
+                            requests.push(rpc);
+                            response
+                        }
+                    };
+                    request.respond(Response::from_string(response.to_string())).unwrap();
+                }
+            }
+            requests
+        });
+        (endpoint, stop, handle)
+    }
+
+    fn access_list_call(target: Address, selector: u8) -> TransactionRequest {
+        TransactionRequest::default()
+            .from(Address::with_last_byte(9))
+            .to(target)
+            .input(Bytes::from(vec![selector, 0, 0, 0, 1]).into())
+    }
+
+    fn access_list_prefetch(target: Address, selector: u8, once: bool) -> AccessListPrefetch {
+        AccessListPrefetch { tx: access_list_call(target, selector), overrides: None, once }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn access_list_prefetch_serves_reads_and_skips_cheap_calls() {
+        let target = Address::with_last_byte(1);
+        let other = Address::with_last_byte(2);
+        let (endpoint, stop, server) = access_list_server(target, other, false);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone())
+            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let db = BlockchainDb::new(meta, None);
+        let provider = Arc::new(get_http_provider(&endpoint));
+        let mut backend = SharedBackend::spawn_backend(provider, db.clone(), Some(123.into()))
+            .await
+            .with_blocking_mode(BlockingMode::Block);
+
+        backend.prefetch_access_list(access_list_prefetch(target, 0xaa, false));
+        // The simulation lists two accounts and two slots; wait for their requests to go out.
+        let started = std::time::Instant::now();
+        while backend.cache_misses() < 4 {
+            assert!(started.elapsed() < Duration::from_secs(10), "prefetch did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Reads of the listed keys are served from the prefetch; the slot of `other` stays out
+        // of the cache until it is read.
+        assert_eq!(backend.storage_ref(target, U256::from(1)).unwrap(), U256::from(42));
+        assert_eq!(backend.basic_ref(other).unwrap().unwrap().balance, U256::from(42));
+        assert!(!db.storage().read().contains_key(&other));
+        assert_eq!(backend.storage_ref(other, U256::from(2)).unwrap(), U256::from(42));
+
+        // The same target and selector is simulated again, since its list held four keys and the
+        // cache missed since, but a simulation in flight is not repeated.
+        backend.prefetch_access_list(access_list_prefetch(target, 0xaa, false));
+        backend.prefetch_access_list(access_list_prefetch(target, 0xaa, false));
+        backend.do_any_request(async { Ok(()) }).unwrap();
+        assert_eq!(backend.storage_ref(target, U256::from(1)).unwrap(), U256::from(42));
+        // A target and selector simulated before is skipped with `once`, and so is any call
+        // once the reads since the last simulation all hit the cache.
+        backend.prefetch_access_list(access_list_prefetch(target, 0xaa, true));
+        for _ in 0..WARM_CACHE_READS {
+            assert_eq!(backend.storage_ref(target, U256::from(1)).unwrap(), U256::from(42));
+        }
+        backend.prefetch_access_list(access_list_prefetch(target, 0xcc, false));
+        backend.do_any_request(async { Ok(()) }).unwrap();
+
+        stop.store(true, Ordering::Relaxed);
+        let requests = server.join().unwrap();
+        let methods: Vec<_> = requests.iter().map(|r| r["method"].as_str().unwrap()).collect();
+        assert_eq!(methods.iter().filter(|m| **m == "eth_createAccessList").count(), 2);
+        assert_eq!(methods.iter().filter(|m| **m == "eth_getStorageAt").count(), 2);
+        assert_eq!(methods.iter().filter(|m| **m == "eth_getAccountInfo").count(), 2);
+        let simulation = requests.iter().find(|r| r["method"] == "eth_createAccessList").unwrap();
+        assert_eq!(
+            simulation["params"],
+            serde_json::json!([access_list_call(target, 0xaa), "0x7b"])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn access_list_prefetch_stops_on_unsupported_method() {
+        let target = Address::with_last_byte(1);
+        let (endpoint, stop, server) = access_list_server(target, Address::with_last_byte(2), true);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone())
+            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let db = BlockchainDb::new(meta, None);
+        let provider = Arc::new(get_http_provider(&endpoint));
+        let mut backend = SharedBackend::spawn_backend(provider, db, None)
+            .await
+            .with_blocking_mode(BlockingMode::Block);
+
+        backend.prefetch_access_list(access_list_prefetch(target, 0xaa, false));
+        backend.do_any_request(async { Ok(()) }).unwrap();
+        assert_eq!(backend.storage_ref(target, U256::from(1)).unwrap(), U256::from(42));
+        backend.prefetch_access_list(access_list_prefetch(target, 0xbb, false));
+        backend.do_any_request(async { Ok(()) }).unwrap();
+        assert_eq!(backend.storage_ref(target, U256::from(2)).unwrap(), U256::from(42));
+
+        stop.store(true, Ordering::Relaxed);
+        let requests = server.join().unwrap();
+        let methods: Vec<_> = requests.iter().map(|r| r["method"].as_str().unwrap()).collect();
+        assert_eq!(methods.iter().filter(|m| **m == "eth_createAccessList").count(), 1);
+        assert_eq!(methods.iter().filter(|m| **m == "eth_getStorageAt").count(), 2);
     }
 }

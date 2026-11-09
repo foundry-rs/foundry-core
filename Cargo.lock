@@ -3148,6 +3148,7 @@ version = "0.27.0"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
+ "alloy-json-rpc",
  "alloy-primitives",
  "alloy-provider",
  "alloy-rpc-client",
@@ -3162,6 +3163,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tiny_http",
  "tokio",
+ "tower",
  "tracing",
  "url",
  "zstd",
