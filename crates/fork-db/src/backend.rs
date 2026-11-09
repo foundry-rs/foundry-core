@@ -1693,12 +1693,12 @@ mod tests {
                 SharedBackend::spawn_backend(Arc::new(provider), db.clone(), Some(1.into()))
                     .await
                     .with_blocking_mode(BlockingMode::Block);
-            let read = move |backend: SharedBackend| {
+            let read = move |backend: SharedBackend<AnyNetwork, BlockEnv>| {
                 std::thread::spawn(move || {
                     if storage {
-                        backend.storage_ref(Address::ZERO, U256::ZERO).unwrap()
+                        backend.storage_at(Address::ZERO, U256::ZERO).unwrap()
                     } else {
-                        backend.basic_ref(Address::ZERO).unwrap().unwrap().balance
+                        backend.account(Address::ZERO).unwrap().unwrap().balance
                     }
                 })
             };
@@ -1774,7 +1774,7 @@ mod tests {
         let (backend, handler) = SharedBackend::new(provider, db, None);
         let mode = Arc::clone(&handler.account_fetch_mode);
         tokio::spawn(handler);
-        let account = backend.basic_ref(Address::with_last_byte(1)).unwrap().unwrap();
+        let account = backend.account(Address::with_last_byte(1)).unwrap().unwrap();
         assert_eq!(account.balance, U256::from(42));
         assert_eq!(account.nonce, 7);
         assert_eq!(mode.load(), AccountFetchMode::SupportsAccountInfo);
