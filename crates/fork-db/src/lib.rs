@@ -9,7 +9,7 @@ pub mod backend;
 pub mod cache;
 pub mod error;
 
-pub use backend::{AccessListPrefetch, BackendHandler, ForkBlock, SharedBackend};
+pub use backend::{BackendHandler, ForkBlock, SharedBackend};
 pub use cache::{AccountFetchPolicy, AccountInfo, BlockchainDb, ForkBlockEnv};
 pub use error::{DatabaseError, DatabaseResult};
 
