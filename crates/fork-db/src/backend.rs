@@ -64,6 +64,9 @@ const WARM_CACHE_READS: u64 = 32;
 /// Slots per batch request of prefetched reads. Endpoints commonly cap batches at 100 calls.
 const PREFETCH_BATCH_SIZE: usize = 64;
 
+/// Account requests of prefetched reads in flight at once; see [`MAX_PREFETCH_BATCHES`].
+const MAX_PREFETCH_ACCOUNTS: usize = 8;
+
 /// Batch requests of prefetched reads in flight at once. The fork backend sends the EVM's own
 /// reads without a limit; this bound keeps a large access list from flooding the endpoint.
 const MAX_PREFETCH_BATCHES: usize = 2;
@@ -355,6 +358,10 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = BlockEnv> {
     access_list_overrides_supported: bool,
     /// Cache hits and misses when the last simulation was requested.
     access_list_cache_counts: Option<(u64, u64)>,
+    /// Accounts of access lists waiting for a request, keyed by pin generation.
+    account_queue: VecDeque<(u64, Address)>,
+    /// Account requests started from the queue, keyed by pin generation.
+    prefetch_account_requests: HashSet<(u64, Address)>,
     /// Slots of access lists waiting for a request, keyed by pin generation.
     prefetch_queue: VecDeque<(u64, Address, U256)>,
     /// Batch requests from the queue in flight.
@@ -402,6 +409,8 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             access_lists_supported: true,
             access_list_overrides_supported: true,
             access_list_cache_counts: None,
+            account_queue: Default::default(),
+            prefetch_account_requests: Default::default(),
             prefetch_queue: Default::default(),
             prefetch_batches: 0,
         }
@@ -483,6 +492,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             BackendRequest::SetPinnedBlock(block_id) => {
                 self.prefetched_accounts.clear();
                 self.prefetched_storage.clear();
+                self.account_queue.clear();
                 self.prefetch_queue.clear();
                 self.block_id = Some(block_id);
                 self.block_anchor = None;
@@ -574,14 +584,12 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         self.pending_requests.push(ProviderRequest::AccessList(fut));
     }
 
-    /// Prefetches every account of an access list through the normal request path, so values
-    /// already cached or in flight cost nothing, and queues its slots for
+    /// Queues the accounts and slots of an access list for [`Self::drain_account_queue`] and
     /// [`Self::drain_prefetch_queue`].
     fn prefetch_access_list(&mut self, result: &AccessListResult) {
         let generation = self.block_generation;
         for item in &result.access_list.0 {
-            let (sender, _) = oneshot_channel();
-            self.on_request(BackendRequest::Basic(item.address, sender, true));
+            self.account_queue.push_back((generation, item.address));
             for slot in &item.storage_keys {
                 self.prefetch_queue.push_back((
                     generation,
@@ -590,7 +598,36 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 ));
             }
         }
+        self.drain_account_queue();
         self.drain_prefetch_queue();
+    }
+
+    /// Requests queued accounts until [`MAX_PREFETCH_ACCOUNTS`] are in flight. An account that a
+    /// read fetched or requested in the meantime is dropped, so a read never waits on the queue.
+    fn drain_account_queue(&mut self) {
+        let generation = self.block_generation;
+        while self.prefetch_account_requests.len() < MAX_PREFETCH_ACCOUNTS {
+            let Some((account_generation, address)) = self.account_queue.pop_front() else {
+                return;
+            };
+            if account_generation != generation
+                || self.account_requests.contains_key(&(generation, address))
+                || self.prefetched_accounts.contains_key(&address)
+                || self.db.accounts().read().contains_key(&address)
+            {
+                continue;
+            }
+            self.prefetch_account_requests.insert((generation, address));
+            let (sender, _) = oneshot_channel();
+            self.request_account(address, sender, true);
+        }
+    }
+
+    /// Frees the slot of a finished account request that the queue started.
+    fn account_request_done(&mut self, key: (u64, Address)) {
+        if self.prefetch_account_requests.remove(&key) {
+            self.drain_account_queue();
+        }
     }
 
     /// Sends queued slots in batches of [`PREFETCH_BATCH_SIZE`] until [`MAX_PREFETCH_BATCHES`]
@@ -1191,6 +1228,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                             )));
                                         }
                                     }
+                                    pin.account_request_done(request_key);
                                     continue;
                                 }
                             };
@@ -1224,6 +1262,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                             for l in listeners {
                                 let _ = l.send(Ok(acc.clone()));
                             }
+                            pin.account_request_done(request_key);
                             continue;
                         }
                     }
@@ -1264,6 +1303,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                 // A rate-limited endpoint would slow every later burst, so the
                                 // first failed batch stops prefetching for the run.
                                 debug!(target: "backendhandler", "storage batch request failed, prefetching stopped");
+                                pin.account_queue.clear();
                                 pin.prefetch_queue.clear();
                                 pin.access_lists_supported = false;
                             }
@@ -1352,8 +1392,12 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                         .iter()
                                         .map(|item| 1 + item.storage_keys.len())
                                         .sum();
-                                    trace!(target: "backendhandler", to = %key.0, keys, "received access list");
-                                    pin.access_list_sizes.insert(key, keys);
+                                    trace!(target: "backendhandler", to = %key.0, keys, error = ?result.error, "received access list");
+                                    // A failed simulation may have stopped early; its short list
+                                    // says nothing about the call.
+                                    if result.error.is_none() {
+                                        pin.access_list_sizes.insert(key, keys);
+                                    }
                                     if generation == pin.block_generation {
                                         pin.prefetch_access_list(&result);
                                     }
@@ -3290,13 +3334,15 @@ mod tests {
 
     /// Serves `eth_createAccessList` with one slot for the target and one for `other`, and answers
     /// account and storage reads with fixed values.
-    /// `fail` rejects `eth_createAccessList` as unsupported. `failing_slot` answers that slot
+    /// `fail` rejects `eth_createAccessList` as unsupported, and `revert` answers it with an
+    /// empty list and an execution error. `failing_slot` answers that slot
     /// with an error inside batch requests only, and holds every batch until the returned
     /// release flag is set, so a read can join the batch first.
     fn access_list_server(
         target: Address,
         other: Address,
         fail: bool,
+        revert: bool,
         failing_slot: Option<U256>,
     ) -> (String, Arc<AtomicBool>, Arc<AtomicBool>, std::thread::JoinHandle<Vec<serde_json::Value>>)
     {
@@ -3323,6 +3369,11 @@ mod tests {
                     "eth_createAccessList" if fail => {
                         response["error"] = serde_json::json!({
                             "code": -32601, "message": "the method eth_createAccessList does not exist/is not available",
+                        });
+                    }
+                    "eth_createAccessList" if revert => {
+                        response["result"] = serde_json::json!({
+                            "accessList": [], "gasUsed": "0x5208", "error": "out of gas",
                         });
                     }
                     "eth_createAccessList" => {
@@ -3383,7 +3434,7 @@ mod tests {
     async fn access_list_prefetch_serves_reads_and_skips_cheap_calls() {
         let target = Address::with_last_byte(1);
         let other = Address::with_last_byte(2);
-        let (endpoint, stop, _, server) = access_list_server(target, other, false, None);
+        let (endpoint, stop, _, server) = access_list_server(target, other, false, false, None);
         let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone())
             .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
         let db = BlockchainDb::new(meta, None);
@@ -3437,7 +3488,7 @@ mod tests {
         let target = Address::with_last_byte(1);
         let other = Address::with_last_byte(2);
         let (endpoint, stop, release, server) =
-            access_list_server(target, other, false, Some(U256::from(1)));
+            access_list_server(target, other, false, false, Some(U256::from(1)));
         let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone())
             .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
         let db = BlockchainDb::new(meta, None);
@@ -3473,10 +3524,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn access_list_prefetch_repeats_failed_simulations() {
+        let target = Address::with_last_byte(1);
+        let (endpoint, stop, _, server) =
+            access_list_server(target, Address::with_last_byte(2), false, true, None);
+        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone())
+            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let db = BlockchainDb::new(meta, None);
+        let provider = Arc::new(get_http_provider(&endpoint));
+        let mut backend = SharedBackend::spawn_backend(provider, db, None)
+            .await
+            .with_blocking_mode(BlockingMode::Block);
+
+        // An empty list of a reverted simulation does not mark the call as cheap, so a later
+        // call with other gas or arguments is simulated again.
+        for slot in 1..=2 {
+            backend.prefetch_access_list(access_list_call(target, 0xaa), None);
+            backend.do_any_request(async { Ok(()) }).unwrap();
+            assert_eq!(backend.storage_ref(target, U256::from(slot)).unwrap(), U256::from(42));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        let requests = server.join().unwrap();
+        let methods: Vec<_> = requests.iter().map(|r| r["method"].as_str().unwrap()).collect();
+        assert_eq!(methods.iter().filter(|m| **m == "eth_createAccessList").count(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn access_list_prefetch_stops_on_unsupported_method() {
         let target = Address::with_last_byte(1);
         let (endpoint, stop, _, server) =
-            access_list_server(target, Address::with_last_byte(2), true, None);
+            access_list_server(target, Address::with_last_byte(2), true, false, None);
         let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone())
             .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
         let db = BlockchainDb::new(meta, None);
