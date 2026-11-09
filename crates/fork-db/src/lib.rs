@@ -10,5 +10,13 @@ pub mod cache;
 pub mod error;
 
 pub use backend::{BackendHandler, ForkBlock, SharedBackend};
-pub use cache::{AccountFetchPolicy, BlockchainDb, ForkBlockEnv};
+pub use cache::{AccountFetchPolicy, AccountInfo, BlockchainDb, ForkBlockEnv};
 pub use error::{DatabaseError, DatabaseResult};
+
+#[cfg(test)]
+mod test_utils {
+    #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BlockEnv {
+        pub number: alloy_primitives::U256,
+    }
+}

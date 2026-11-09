@@ -33,8 +33,6 @@ futures = "0.3.32"
 
 parking_lot = "0.13.0"
 
-revm = { version = "43.0.0", features = ["std", "serde"] }
-
 serde.workspace = true
 serde_json.workspace = true
 
