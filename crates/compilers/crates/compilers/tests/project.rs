@@ -8171,3 +8171,58 @@ fn can_compile_split_output_selection_with_unlisted_import() {
     assert_eq!(parts.sources, whole.sources);
     assert_eq!(parts.contracts, whole.contracts);
 }
+
+#[test]
+fn can_compile_split_output_selection_with_cyclic_reexports() {
+    let version = Version::new(0, 8, 26);
+    let solc = SolcCompiler::Specific(Solc::find_or_install(&version).unwrap());
+    for valid in [true, false] {
+        let mut sources = BTreeMap::from([
+            (
+                "Casting.sol".to_string(),
+                "import './Math.sol'; function wrap(uint x) pure returns (uint) { return x; }"
+                    .to_string(),
+            ),
+            ("Helpers.sol".to_string(), "import {wrap} from './Casting.sol';".to_string()),
+            (
+                "Math.sol".to_string(),
+                format!(
+                    "import {{wrap}} from './Helpers.sol'; contract Consumer {{ function value() external pure returns (uint) {{ return {}(7); }} }}",
+                    if valid { "wrap" } else { "missing" }
+                ),
+            ),
+        ]);
+        for i in 0..2 * OutputSelection::MIN_FILES_PER_PART - sources.len() {
+            sources.insert(format!("Padding{i:02}.sol"), format!("contract Padding{i} {{}}"));
+        }
+        // Equal weights put Casting and Helpers in different parts. Selecting Helpers without
+        // Casting makes solc reject the cyclic re-export even though the whole input is valid.
+        let sources = sources
+            .into_iter()
+            .map(|(name, body)| {
+                let source =
+                    format!("// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n{body}");
+                (PathBuf::from(name), Source::new(format!("{source: <512}")))
+            })
+            .collect();
+        let settings = SolcSettings {
+            settings: Settings {
+                output_selection: OutputSelection::default_output_selection(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let input =
+            SolcVersionedInput::build(sources, settings, SolcLanguage::Solidity, version.clone());
+
+        let whole = solc.compile(&input).unwrap();
+        assert_eq!(whole.errors.is_empty(), valid, "{:?}", whole.errors);
+        if valid {
+            assert_eq!(whole.contracts.len(), 2 * OutputSelection::MIN_FILES_PER_PART - 2);
+        }
+        let parts = solc.compile_with_jobs(&input, 2).unwrap();
+        assert_eq!(parts.errors, whole.errors);
+        assert_eq!(parts.sources, whole.sources);
+        assert_eq!(parts.contracts, whole.contracts);
+    }
+}

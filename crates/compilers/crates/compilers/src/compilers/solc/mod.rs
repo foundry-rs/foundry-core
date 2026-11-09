@@ -81,7 +81,7 @@ impl Compiler for SolcCompiler {
         solc.include_paths.clone_from(&input.cli_settings.include_paths);
         solc.extra_args.extend_from_slice(&input.cli_settings.extra_args);
 
-        // Only solc is known to produce the same outputs for a split selection.
+        // Only split solc inputs; other compilers may not support selective output generation.
         let parts = (jobs > 1 && input.compiler_name() == "Solc")
             .then(|| input.input.split(jobs))
             .flatten();
@@ -95,7 +95,15 @@ impl Compiler for SolcCompiler {
                     outputs.push(solc.compile(&part)?);
                     parts.push(part);
                 }
-                merge_parts(&parts, outputs)
+                let output = merge_parts(&parts, outputs);
+                // Solc can reject cyclic re-exports for a partial output selection. Use the
+                // original input to distinguish these split-only errors from genuine errors.
+                if output.has_error() {
+                    trace!("split compilation reported errors; retrying the original input");
+                    solc.compile(&input.input)?
+                } else {
+                    output
+                }
             }
             None => solc.compile(&input.input)?,
         };
