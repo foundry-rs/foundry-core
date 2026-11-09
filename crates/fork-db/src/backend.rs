@@ -581,6 +581,9 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
     /// flight. An account that a read fetched or requested in the meantime is dropped, so a read
     /// never waits on the queue.
     fn drain_account_queue(&mut self) {
+        if self.account_queue.is_empty() {
+            return;
+        }
         let generation = self.block_generation;
         let mut in_flight =
             self.account_requests.values().filter(|(_, prefetch_only)| *prefetch_only).count();
@@ -1354,7 +1357,10 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                     if result.error.is_none() {
                                         pin.access_list_sizes.insert(key, keys);
                                     }
-                                    if generation == pin.block_generation {
+                                    // A failed batch in the meantime stopped prefetching.
+                                    if generation == pin.block_generation
+                                        && pin.access_lists_supported
+                                    {
                                         pin.prefetch_access_list(&result);
                                     }
                                 }
