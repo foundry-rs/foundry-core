@@ -401,6 +401,29 @@ struct CacheEnvelope<T> {
     data: T,
 }
 
+/// What the [`Cache`] knows about a contract's ABI or source code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CacheLookup<T> {
+    /// Nothing usable is cached (no entry, an unreadable one, or an expired one): ask the
+    /// explorer.
+    Miss,
+    /// The explorer reported the contract as not verified.
+    Unverified,
+    /// The contract is verified and this is its cached data.
+    Verified(T),
+}
+
+impl<T> From<Option<Option<T>>> for CacheLookup<T> {
+    /// Maps the on-disk representation, where `null` data marks an unverified contract.
+    fn from(entry: Option<Option<T>>) -> Self {
+        match entry {
+            None => Self::Miss,
+            Some(None) => Self::Unverified,
+            Some(Some(data)) => Self::Verified(data),
+        }
+    }
+}
+
 /// Simple cache for Etherscan requests.
 ///
 /// The cache is stored at the defined `root` with the following structure:
@@ -424,16 +447,16 @@ impl Cache {
         Self { root, ttl }
     }
 
-    fn get_abi(&self, address: Address) -> Option<Option<JsonAbi>> {
-        self.get("abi", address)
+    fn get_abi(&self, address: Address) -> CacheLookup<JsonAbi> {
+        self.get::<Option<JsonAbi>>("abi", address).into()
     }
 
     fn set_abi(&self, address: Address, abi: Option<&JsonAbi>) {
         self.set("abi", address, abi)
     }
 
-    fn get_source(&self, address: Address) -> Option<Option<ContractMetadata>> {
-        self.get("sources", address)
+    fn get_source(&self, address: Address) -> CacheLookup<ContractMetadata> {
+        self.get::<Option<ContractMetadata>>("sources", address).into()
     }
 
     fn set_source(&self, address: Address, source: Option<&ContractMetadata>) {
@@ -573,7 +596,27 @@ mod tests {
 
         cache.set_abi(address, Some(&abi));
 
-        assert_eq!(cache.get_abi(address), Some(Some(abi)));
+        assert_eq!(cache.get_abi(address), CacheLookup::Verified(abi));
+    }
+
+    #[test]
+    fn cache_lookup_distinguishes_miss_unverified_and_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), Duration::from_secs(60));
+        let unverified = Address::with_last_byte(1);
+        let verified = Address::with_last_byte(2);
+        let abi = JsonAbi::default();
+
+        assert_eq!(cache.get_abi(unverified), CacheLookup::Miss);
+
+        cache.set_abi(unverified, None);
+        cache.set_abi(verified, Some(&abi));
+        assert_eq!(cache.get_abi(unverified), CacheLookup::Unverified);
+        assert_eq!(cache.get_abi(verified), CacheLookup::Verified(abi));
+
+        let expired = Cache::new(dir.path().to_path_buf(), Duration::ZERO);
+        expired.set_abi(verified, None);
+        assert_eq!(expired.get_abi(verified), CacheLookup::Miss);
     }
 
     // <https://github.com/foundry-rs/foundry/issues/4406>
