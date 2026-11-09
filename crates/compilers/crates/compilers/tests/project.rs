@@ -23,8 +23,8 @@ use foundry_compilers::{
 };
 use foundry_compilers_artifacts::{
     BytecodeHash, Contract, DevDoc, Error, ErrorDoc, EventDoc, EvmVersion, Libraries, MethodDoc,
-    ModelCheckerEngine::CHC, ModelCheckerSettings, Settings, Severity, SolcInput, Source, UserDoc,
-    UserDocNotice, output_selection::OutputSelection, remappings::Remapping,
+    ModelCheckerEngine::CHC, ModelCheckerSettings, Settings, Severity, SolcInput, Source, Sources,
+    UserDoc, UserDocNotice, output_selection::OutputSelection, remappings::Remapping,
 };
 use foundry_compilers_core::{
     error::{Result, SolcError},
@@ -8166,6 +8166,55 @@ fn can_compile_split_output_selection_with_unlisted_import() {
     let whole = solc.compile(&input).unwrap();
     assert!(whole.errors.is_empty(), "{:?}", whole.errors);
     assert_eq!(whole.contracts.len(), 2 * OutputSelection::MIN_FILES_PER_PART + 1);
+    let parts = solc.compile_with_jobs(&input, 2).unwrap();
+    assert_eq!(parts.errors, whole.errors);
+    assert_eq!(parts.sources, whole.sources);
+    assert_eq!(parts.contracts, whole.contracts);
+}
+
+// solc reports error 2449 ("Definition of base has to precede definition of derived contract")
+// for an import cycle when the output selection covers the derived contract's file but not the
+// base contract's file. The split must not turn a clean whole input into a failed compile.
+#[test]
+fn can_compile_split_output_selection_with_import_cycle() {
+    // Padding makes these two the heaviest files, so the partition puts them in different parts.
+    let padding = "/".repeat(4096);
+    let mut sources = Sources::from([
+        (
+            PathBuf::from("A.sol"),
+            Source::new(format!(
+                "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\nimport {{B}} from \"./B.sol\";\ninterface A is B {{ function a() external; }}\n// {padding}\n"
+            )),
+        ),
+        (
+            PathBuf::from("B.sol"),
+            Source::new(format!(
+                "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\nimport {{A}} from \"./A.sol\";\ninterface B {{ function b() external view returns (A); }}\n// {padding}/\n"
+            )),
+        ),
+    ]);
+    for i in 0..2 * OutputSelection::MIN_FILES_PER_PART {
+        let source = format!(
+            "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\nimport {{A}} from \"./A.sol\";\ncontract C{i} {{ A public a; }}\n"
+        );
+        sources.insert(PathBuf::from(format!("C{i}.sol")), Source::new(source));
+    }
+    let settings = Settings {
+        output_selection: OutputSelection::common_output_selection(["abi".to_string()]),
+        ..Default::default()
+    };
+    let settings = SolcSettings { settings, ..Default::default() };
+    let solc = SolcCompiler::Specific(Solc::find_or_install(&Version::new(0, 8, 28)).unwrap());
+    let input = SolcVersionedInput::build(
+        sources,
+        settings,
+        SolcLanguage::Solidity,
+        Version::new(0, 8, 28),
+    );
+
+    let whole = solc.compile(&input).unwrap();
+    assert!(whole.errors.is_empty(), "{:?}", whole.errors);
+    assert_eq!(whole.contracts.len(), 2 * OutputSelection::MIN_FILES_PER_PART + 2);
     let parts = solc.compile_with_jobs(&input, 2).unwrap();
     assert_eq!(parts.errors, whole.errors);
     assert_eq!(parts.sources, whole.sources);

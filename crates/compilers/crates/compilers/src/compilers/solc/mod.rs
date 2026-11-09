@@ -95,7 +95,16 @@ impl Compiler for SolcCompiler {
                     outputs.push(solc.compile(&part)?);
                     parts.push(part);
                 }
-                merge_parts(&parts, outputs)
+                // solc reports some errors only for some output selections: in an import cycle
+                // it rejects a derived contract whose base is defined in a file that the part
+                // does not select (error 2449). The whole input is the source of truth for
+                // errors, so compile it once when any part fails.
+                if outputs.iter().any(|output| output.errors.iter().any(|error| error.is_error())) {
+                    trace!("a part reported errors, compiling the whole input");
+                    solc.compile(&input.input)?
+                } else {
+                    merge_parts(&parts, outputs)
+                }
             }
             None => solc.compile(&input.input)?,
         };
