@@ -41,11 +41,23 @@ pub struct AccountInfo {
     /// Raw account code, or `None` when only `code_hash` is known.
     #[serde(default, deserialize_with = "deserialize_code")]
     pub code: Option<Bytes>,
+    /// Raw chain-specific account payload, such as a Tempo account's configuration commitment.
+    ///
+    /// Only [`AccountFetchPolicy::RequireAccountInfoWithExtension`] fetches it; it is empty
+    /// otherwise, and in caches written before it was recorded.
+    #[serde(default, skip_serializing_if = "<[u8]>::is_empty")]
+    pub extension: Bytes,
 }
 
 impl Default for AccountInfo {
     fn default() -> Self {
-        Self { balance: U256::ZERO, nonce: 0, code_hash: KECCAK256_EMPTY, code: Some(Bytes::new()) }
+        Self {
+            balance: U256::ZERO,
+            nonce: 0,
+            code_hash: KECCAK256_EMPTY,
+            code: Some(Bytes::new()),
+            extension: Bytes::new(),
+        }
     }
 }
 
@@ -96,6 +108,12 @@ pub enum AccountFetchPolicy {
     /// Use this when `eth_getBalance` does not expose the balance used by execution,
     /// such as Tempo RPCs that return a placeholder native balance.
     RequireAccountInfo,
+    /// Require `eth_getAccountInfo` as [`Self::RequireAccountInfo`] does, and keep the
+    /// chain-specific `extension` it returns in [`AccountInfo::extension`].
+    ///
+    /// Use this for chains whose execution reads the account extension, such as Tempo from T14,
+    /// which stores the configuration commitment of a configurable account there.
+    RequireAccountInfoWithExtension,
 }
 
 /// A shareable Block database
@@ -838,6 +856,12 @@ mod tests {
             for (stored, requested) in [
                 (AccountFetchPolicy::Auto, AccountFetchPolicy::RequireAccountInfo),
                 (AccountFetchPolicy::RequireAccountInfo, AccountFetchPolicy::Auto),
+                // Caches written without extensions are refetched rather than read as accounts
+                // without one.
+                (
+                    AccountFetchPolicy::RequireAccountInfo,
+                    AccountFetchPolicy::RequireAccountInfoWithExtension,
+                ),
             ] {
                 let temp = tempfile::tempdir().unwrap();
                 let path = temp.path().join("cache.json");
@@ -955,6 +979,13 @@ mod tests {
             Address::ZERO,
             AccountInfo { balance: U256::from(42u64), nonce: 1, ..Default::default() },
         );
+        let extension = Bytes::from_static(&[0x01, 0xaa]);
+        db.accounts().write().insert(
+            Address::with_last_byte(1),
+            AccountInfo { extension: extension.clone(), ..Default::default() },
+        );
+        // Accounts without an extension serialize as before.
+        assert!(serde_json::to_value(AccountInfo::default()).unwrap().get("extension").is_none());
         db.block_hashes().write().insert(U256::from(1), B256::with_last_byte(1));
 
         db.cache().flush();
@@ -971,8 +1002,10 @@ mod tests {
 
         // Reload
         let loaded = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
-        assert_eq!(loaded.db().accounts.read().len(), 1);
+        assert_eq!(loaded.db().accounts.read().len(), 2);
         assert_eq!(loaded.db().accounts.read()[&Address::ZERO].balance, U256::from(42u64));
+        assert!(loaded.db().accounts.read()[&Address::ZERO].extension.is_empty());
+        assert_eq!(loaded.db().accounts.read()[&Address::with_last_byte(1)].extension, extension);
         assert_eq!(loaded.db().block_hashes.read().len(), 1);
     }
 
@@ -1116,6 +1149,7 @@ mod tests {
                     assert_eq!(account.nonce, 7);
                     assert_eq!(account.code_hash, hash);
                     assert_eq!(account.code, original);
+                    assert!(account.extension.is_empty());
                     drop(accounts);
                     assert_eq!(db.storage().read()[&address][&U256::from(5)], U256::from(99));
                     assert_eq!(db.block_hashes().read()[&U256::from(9)], B256::with_last_byte(4));

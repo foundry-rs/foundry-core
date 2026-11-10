@@ -27,7 +27,7 @@ use futures::{
     stream::Stream,
     task::{Context, Poll},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     fmt,
@@ -105,6 +105,17 @@ impl Serialize for StateBlockId {
     }
 }
 
+/// An account as an `eth_getAccountInfo` response holds it, including the chain-specific
+/// `extension` that some nodes, such as Tempo's, add when it is nonempty.
+#[derive(Debug, Deserialize)]
+struct RemoteAccount {
+    balance: U256,
+    nonce: U64,
+    code: Bytes,
+    #[serde(default)]
+    extension: Bytes,
+}
+
 /// Logged when an error is indicative that the user is trying to fork from a non-archive node.
 pub const NON_ARCHIVE_NODE_WARNING: &str = "\
 It looks like you're trying to fork from an older block with a non-archive node which is not \
@@ -113,7 +124,7 @@ supported. Please try to change your RPC url to an archive node if the issue per
 // Various future/request type aliases
 
 type AccountFuture<Err> =
-    Pin<Box<dyn Future<Output = (Result<(U256, u64, Bytes), Err>, Address, u64)> + Send>>;
+    Pin<Box<dyn Future<Output = (Result<RemoteAccount, Err>, Address, u64)> + Send>>;
 type StorageFuture<Err> =
     Pin<Box<dyn Future<Output = (Result<U256, Err>, Address, U256, u64)> + Send>>;
 type BlockHashFuture<Err> =
@@ -808,10 +819,9 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         let policy = self.account_fetch_policy;
         let generation = self.block_generation;
         let fut = async move {
-            if policy == AccountFetchPolicy::RequireAccountInfo {
+            if policy != AccountFetchPolicy::Auto {
                 return Self::fetch_account_info(&provider, address, block_id)
                     .await
-                    .map(|info| (info.balance, info.nonce, info.code))
                     .wrap_err("fork account policy requires eth_getAccountInfo");
             }
             // depending on the tracked mode we can dispatch requests.
@@ -830,7 +840,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                                 Ok(info) => {
                                  trace!(target: "backendhandler", "endpoint supports eth_getAccountInfo");
                                     mode.store(AccountFetchMode::SupportsAccountInfo);
-                                    Ok((info.balance, info.nonce, info.code))
+                                    Ok(info)
                                 }
                                 Err(err) => {
                                     trace!(target: "backendhandler", ?err, "failed initial eth_getAccountInfo call");
@@ -841,9 +851,9 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                         }
                         triple = &mut triple_fut => {
                             match triple {
-                                Ok((balance, nonce, code)) => {
+                                Ok(info) => {
                                     mode.store(AccountFetchMode::SeparateRequests);
-                                    Ok((balance, nonce, code))
+                                    Ok(info)
                                 }
                                 Err(err) => {
                                     // One of the separate requests can fail on its own (e.g. rate
@@ -853,7 +863,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                                     match acc_info_fut.await {
                                         Ok(info) => {
                                             mode.store(AccountFetchMode::SupportsAccountInfo);
-                                            Ok((info.balance, info.nonce, info.code))
+                                            Ok(info)
                                         }
                                         Err(_) => Err(err),
                                     }
@@ -864,9 +874,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 }
 
                 AccountFetchMode::SupportsAccountInfo => {
-                    let mut res = Self::fetch_account_info(&provider, address, block_id)
-                        .await
-                        .map(|info| (info.balance, info.nonce, info.code));
+                    let mut res = Self::fetch_account_info(&provider, address, block_id).await;
 
                     // it's possible that the configured endpoint load balances requests to multiple
                     // instances and not all support that endpoint so we should reset here
@@ -886,7 +894,14 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         };
 
         ProviderRequest::Account(Box::pin(async move {
-            let result = fut.await;
+            let result = fut.await.map(|mut account| {
+                // Only the extension policy keeps the extension, so the separate requests, which
+                // cannot fetch it, return the same accounts.
+                if policy != AccountFetchPolicy::RequireAccountInfoWithExtension {
+                    account.extension = Bytes::new();
+                }
+                account
+            });
             (result, address, generation)
         }))
     }
@@ -895,7 +910,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         provider: &DynProvider<N>,
         address: Address,
         block_id: BlockId,
-    ) -> eyre::Result<alloy_rpc_types::AccountInfo> {
+    ) -> eyre::Result<RemoteAccount> {
         Ok(provider
             .raw_request("eth_getAccountInfo".into(), (address, StateBlockId(block_id)))
             .await?)
@@ -905,15 +920,15 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         provider: &DynProvider<N>,
         address: Address,
         block_id: BlockId,
-    ) -> eyre::Result<(U256, u64, Bytes)> {
+    ) -> eyre::Result<RemoteAccount> {
         let params = (address, StateBlockId(block_id));
-        let (balance, nonce, code): (U256, U64, Bytes) = futures::future::try_join3(
+        let (balance, nonce, code) = futures::future::try_join3(
             provider.raw_request("eth_getBalance".into(), params),
             provider.raw_request("eth_getTransactionCount".into(), params),
             provider.raw_request("eth_getCode".into(), params),
         )
         .await?;
-        Ok((balance, nonce.to(), code))
+        Ok(RemoteAccount { balance, nonce, code, extension: Bytes::new() })
     }
 
     /// process a request for an account
@@ -1189,7 +1204,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                         if let Poll::Ready((resp, addr, generation)) = fut.poll_unpin(cx) {
                             let request_key = (generation, addr);
                             // get the response
-                            let (balance, nonce, code) = match resp {
+                            let RemoteAccount { balance, nonce, code, extension } = match resp {
                                 Ok(res) => res,
                                 Err(err) => {
                                     let err = Arc::new(err);
@@ -1216,7 +1231,13 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                             };
 
                             // update the cache
-                            let acc = AccountInfo { nonce, balance, code: Some(code), code_hash };
+                            let acc = AccountInfo {
+                                nonce: nonce.to(),
+                                balance,
+                                code: Some(code),
+                                code_hash,
+                                extension,
+                            };
                             let (listeners, prefetch_only) =
                                 pin.account_requests.remove(&request_key).unwrap_or_default();
                             // A value read at a superseded pin only answers its own listeners.
@@ -1902,6 +1923,11 @@ mod tests {
     async fn exact_anchor_account_requests_use_hash_objects_without_canonical_flag() {
         for (policy, mode, reject_account_info) in [
             (AccountFetchPolicy::RequireAccountInfo, AccountFetchMode::Unchecked, false),
+            (
+                AccountFetchPolicy::RequireAccountInfoWithExtension,
+                AccountFetchMode::Unchecked,
+                false,
+            ),
             (AccountFetchPolicy::Auto, AccountFetchMode::Unchecked, false),
             (AccountFetchPolicy::Auto, AccountFetchMode::Unchecked, true),
             (AccountFetchPolicy::Auto, AccountFetchMode::SupportsAccountInfo, false),
@@ -1925,9 +1951,16 @@ mod tests {
                 assert_eq!(account.code.unwrap(), Bytes::from_static(&[0x60, 0]));
                 if reject_account_info {
                     assert_eq!(account.balance, U256::from(65535));
-                } else if policy == AccountFetchPolicy::RequireAccountInfo {
+                } else if policy != AccountFetchPolicy::Auto {
                     assert_eq!(account.balance, U256::from(42));
                 }
+                // Only the extension policy keeps the extension, whichever request answered.
+                let extension = if policy == AccountFetchPolicy::RequireAccountInfoWithExtension {
+                    Bytes::from_static(&[0x01, 0xaa])
+                } else {
+                    Bytes::new()
+                };
+                assert_eq!(account.extension, extension);
             }
             stop.store(true, Ordering::Relaxed);
             let requests = server.join().unwrap();
@@ -1962,6 +1995,7 @@ mod tests {
                         response["result"] = match rpc["method"].as_str().unwrap() {
                             "eth_getAccountInfo" => serde_json::json!({
                                 "balance": "0x2a", "nonce": "0x7", "code": "0x6000",
+                                "extension": "0x01aa",
                             }),
                             "eth_getBalance" => serde_json::json!("0xffff"),
                             "eth_getTransactionCount" => serde_json::json!("0x7"),
@@ -2260,6 +2294,7 @@ mod tests {
             balance: U256::from(2),
             code_hash: keccak256(&code),
             code: Some(code.clone()),
+            extension: Bytes::new(),
         };
         let mut account_data = AddressData::default();
         account_data.insert(address, account.clone());
@@ -2967,6 +3002,7 @@ mod tests {
             balance: U256::from(2000),
             code: None,
             code_hash: KECCAK_EMPTY,
+            extension: Bytes::new(),
         };
         let expected_nonce = new_acc.nonce;
         let expected_balance = new_acc.balance;
