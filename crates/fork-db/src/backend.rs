@@ -290,6 +290,8 @@ enum BackendRequest<N: Network = AnyNetwork> {
     PrefetchAccessList(Box<(TransactionRequest, Option<StateOverride>)>),
     /// Sets the pinned block to fetch data from
     SetPinnedBlock(BlockId),
+    /// Drops prefetched values and in-flight prefetches
+    DropPrefetched,
 
     /// Update Address data
     UpdateAddress(AddressData),
@@ -483,14 +485,11 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 }
             }
             BackendRequest::SetPinnedBlock(block_id) => {
-                self.prefetched_accounts.clear();
-                self.prefetched_storage.clear();
-                self.account_queue.clear();
-                self.prefetch_queue.clear();
+                self.drop_prefetched();
                 self.block_id = Some(block_id);
                 self.block_anchor = None;
-                self.block_generation = self.block_generation.wrapping_add(1);
             }
+            BackendRequest::DropPrefetched => self.drop_prefetched(),
             BackendRequest::UpdateAddress(address_data) => {
                 for (address, data) in address_data {
                     self.db.accounts().write().insert(address, data);
@@ -586,6 +585,16 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         }
         self.drain_account_queue();
         self.drain_prefetch_queue();
+    }
+
+    /// Drops prefetched values and queued prefetches, and starts a new generation so that
+    /// in-flight requests answer only their own listeners and are not cached or joined.
+    fn drop_prefetched(&mut self) {
+        self.prefetched_accounts.clear();
+        self.prefetched_storage.clear();
+        self.account_queue.clear();
+        self.prefetch_queue.clear();
+        self.block_generation = self.block_generation.wrapping_add(1);
     }
 
     /// Requests queued accounts until [`MAX_PREFETCH_ACCOUNTS`] prefetch-only requests are in
@@ -1631,6 +1640,13 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
             blocking_mode: mode,
             exact: self.exact,
         }
+    }
+
+    /// Drops prefetched values and makes in-flight requests answer only their own listeners, so
+    /// the next read of every key goes to the endpoint. Call it after the endpoint's state changes
+    /// out of band, for example through `anvil_setStorageAt`.
+    pub fn drop_prefetched(&self) {
+        let _ = self.backend.unbounded_send(BackendRequest::DropPrefetched);
     }
 
     /// Updates the pinned block to fetch data from
