@@ -158,7 +158,7 @@ type AccessListKey = (Address, Selector);
 type AccessListFuture<Err> =
     Pin<Box<dyn Future<Output = (Result<AccessListResult, Err>, AccessListKey, u64, bool)> + Send>>;
 
-/// One batch of prefetched slot reads: the value or error of each slot, with the pin generation
+/// One batch of prefetched slot reads: the value or error of each slot, with the state generation
 /// and the block the batch read at.
 type StorageBatchFuture<Err> =
     Pin<Box<dyn Future<Output = (Vec<(Address, U256, Result<U256, Err>)>, u64, BlockId)> + Send>>;
@@ -290,6 +290,8 @@ enum BackendRequest<N: Network = AnyNetwork> {
     PrefetchAccessList(Box<(TransactionRequest, Option<StateOverride>)>),
     /// Sets the pinned block to fetch data from
     SetPinnedBlock(BlockId),
+    /// Drops prefetched values and in-flight prefetches
+    DropPrefetched,
 
     /// Update Address data
     UpdateAddress(AddressData),
@@ -312,11 +314,11 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = serde_json::Value> {
     db: BlockchainDb<B>,
     /// Requests currently in progress
     pending_requests: Vec<ProviderRequest<eyre::Report, N>>,
-    /// Listeners that wait for a `get_account` related response, keyed by pin generation and
+    /// Listeners that wait for a `get_account` related response, keyed by state generation and
     /// address, and whether all are prefetches.
     account_requests: HashMap<(u64, Address), (Vec<AccountInfoSender>, bool)>,
-    /// Listeners that wait for a `get_storage_at` response, keyed by pin generation and slot, and
-    /// whether all are prefetches.
+    /// Listeners that wait for a `get_storage_at` response, keyed by state generation and slot,
+    /// and whether all are prefetches.
     storage_requests: HashMap<(u64, Address, U256), (Vec<StorageSender>, bool)>,
     /// Listeners that wait for a `get_block` response, keyed by pin generation and block number.
     block_requests: HashMap<(u64, u64), Vec<BlockHashSender>>,
@@ -331,8 +333,11 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = serde_json::Value> {
     block_id: Option<BlockId>,
     /// Exact block anchoring state reads and block ancestry.
     block_anchor: Option<ForkBlock>,
-    /// Incremented whenever the pinned block changes.
+    /// Incremented whenever the pinned block changes. Keys block hashes.
     block_generation: u64,
+    /// Incremented whenever the pinned block changes or prefetched state is dropped. Keys account,
+    /// storage and access list requests.
+    state_generation: u64,
     /// Whether block hashes are resolved in the remote EVM.
     block_hash_via_evm: Option<bool>,
     /// The mode for fetching account data
@@ -344,7 +349,7 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = serde_json::Value> {
     prefetched_accounts: AddressHashMap<AccountInfo>,
     /// Prefetched storage slots that no read has requested yet, see `prefetched_accounts`.
     prefetched_storage: HashMap<(Address, U256), U256>,
-    /// Access list simulations in flight, keyed by pin generation, target and selector.
+    /// Access list simulations in flight, keyed by state generation, target and selector.
     access_list_requests: HashSet<(u64, AccessListKey)>,
     /// Number of keys the last access list of a target and selector held.
     access_list_sizes: HashMap<AccessListKey, usize>,
@@ -354,9 +359,9 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = serde_json::Value> {
     access_list_overrides_supported: bool,
     /// Cache hits and misses when the last simulation was requested.
     access_list_cache_counts: Option<(u64, u64)>,
-    /// Accounts of access lists waiting for a request, keyed by pin generation.
+    /// Accounts of access lists waiting for a request, keyed by state generation.
     account_queue: VecDeque<(u64, Address)>,
-    /// Slots of access lists waiting for a request, keyed by pin generation.
+    /// Slots of access lists waiting for a request, keyed by state generation.
     prefetch_queue: VecDeque<(u64, Address, U256)>,
     /// Batch requests from the queue in flight.
     prefetch_batches: usize,
@@ -394,6 +399,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             block_id,
             block_anchor,
             block_generation: 0,
+            state_generation: 0,
             block_hash_via_evm,
             account_fetch_mode: Arc::new(SharedAccountFetchMode::new(AccountFetchMode::Unchecked)),
             prefetched_accounts: Default::default(),
@@ -483,14 +489,12 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 }
             }
             BackendRequest::SetPinnedBlock(block_id) => {
-                self.prefetched_accounts.clear();
-                self.prefetched_storage.clear();
-                self.account_queue.clear();
-                self.prefetch_queue.clear();
+                self.drop_prefetched();
                 self.block_id = Some(block_id);
                 self.block_anchor = None;
                 self.block_generation = self.block_generation.wrapping_add(1);
             }
+            BackendRequest::DropPrefetched => self.drop_prefetched(),
             BackendRequest::UpdateAddress(address_data) => {
                 for (address, data) in address_data {
                     self.db.accounts().write().insert(address, data);
@@ -547,7 +551,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             trace!(target: "backendhandler", %to, "cache is warm, skipping access list request");
             return;
         }
-        let generation = self.block_generation;
+        let generation = self.state_generation;
         if !self.access_list_requests.insert((generation, key)) {
             return;
         }
@@ -573,7 +577,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
     /// Queues the accounts and slots of an access list for [`Self::drain_account_queue`] and
     /// [`Self::drain_prefetch_queue`].
     fn prefetch_access_list(&mut self, result: &AccessListResult) {
-        let generation = self.block_generation;
+        let generation = self.state_generation;
         for item in &result.access_list.0 {
             self.account_queue.push_back((generation, item.address));
             for slot in &item.storage_keys {
@@ -588,6 +592,17 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         self.drain_prefetch_queue();
     }
 
+    /// Drops prefetched values and queued prefetches, and starts a new state generation so that
+    /// in-flight account and storage requests answer only their own listeners and are not cached
+    /// or joined. Block hashes stay cached.
+    fn drop_prefetched(&mut self) {
+        self.prefetched_accounts.clear();
+        self.prefetched_storage.clear();
+        self.account_queue.clear();
+        self.prefetch_queue.clear();
+        self.state_generation = self.state_generation.wrapping_add(1);
+    }
+
     /// Requests queued accounts until [`MAX_PREFETCH_ACCOUNTS`] prefetch-only requests are in
     /// flight. An account that a read fetched or requested in the meantime is dropped, so a read
     /// never waits on the queue.
@@ -595,7 +610,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         if self.account_queue.is_empty() {
             return;
         }
-        let generation = self.block_generation;
+        let generation = self.state_generation;
         let mut in_flight =
             self.account_requests.values().filter(|(_, prefetch_only)| *prefetch_only).count();
         while in_flight < MAX_PREFETCH_ACCOUNTS {
@@ -619,7 +634,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
     /// are in flight. A slot that a read fetched or requested in the meantime is dropped.
     fn drain_prefetch_queue(&mut self) {
         while self.prefetch_batches < MAX_PREFETCH_BATCHES {
-            let generation = self.block_generation;
+            let generation = self.state_generation;
             let mut slots = Vec::new();
             while slots.len() < PREFETCH_BATCH_SIZE {
                 let Some((slot_generation, address, idx)) = self.prefetch_queue.pop_front() else {
@@ -767,7 +782,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         let (listeners, prefetch_only) =
             self.storage_requests.remove(&request_key).unwrap_or_default();
         // A value read at a superseded pin only answers its own listeners.
-        let current = generation == self.block_generation;
+        let current = generation == self.state_generation;
         if current && prefetch_only {
             self.prefetched_storage.insert((addr, idx), value);
         } else if current {
@@ -790,7 +805,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         listener: StorageSender,
         prefetch: bool,
     ) {
-        let generation = self.block_generation;
+        let generation = self.state_generation;
         match self.storage_requests.entry((generation, address, idx)) {
             Entry::Occupied(mut entry) => {
                 let (listeners, prefetch_only) = entry.get_mut();
@@ -817,7 +832,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         let block_id = self.block_id.unwrap_or_default();
         let mode = Arc::clone(&self.account_fetch_mode);
         let policy = self.account_fetch_policy;
-        let generation = self.block_generation;
+        let generation = self.state_generation;
         let fut = async move {
             if policy != AccountFetchPolicy::Auto {
                 return Self::fetch_account_info(&provider, address, block_id)
@@ -935,7 +950,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
     ///
     /// The value goes to the prefetch cache only if every listener is a prefetch.
     fn request_account(&mut self, address: Address, listener: AccountInfoSender, prefetch: bool) {
-        match self.account_requests.entry((self.block_generation, address)) {
+        match self.account_requests.entry((self.state_generation, address)) {
             Entry::Occupied(mut entry) => {
                 let (listeners, prefetch_only) = entry.get_mut();
                 listeners.push(listener);
@@ -1241,7 +1256,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                             let (listeners, prefetch_only) =
                                 pin.account_requests.remove(&request_key).unwrap_or_default();
                             // A value read at a superseded pin only answers its own listeners.
-                            let current = generation == pin.block_generation;
+                            let current = generation == pin.state_generation;
                             if current && prefetch_only {
                                 pin.prefetched_accounts.insert(addr, acc.clone());
                             } else if current {
@@ -1379,7 +1394,7 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                         pin.access_list_sizes.insert(key, keys);
                                     }
                                     // A failed batch in the meantime stopped prefetching.
-                                    if generation == pin.block_generation
+                                    if generation == pin.state_generation
                                         && pin.access_lists_supported
                                     {
                                         pin.prefetch_access_list(&result);
@@ -1631,6 +1646,13 @@ impl<N: Network, B: ForkBlockEnv> SharedBackend<N, B> {
             blocking_mode: mode,
             exact: self.exact,
         }
+    }
+
+    /// Drops prefetched values and makes in-flight requests answer only their own listeners, so
+    /// the next read of every key goes to the endpoint. Call it after the endpoint's state changes
+    /// out of band, for example through `anvil_setStorageAt`.
+    pub fn drop_prefetched(&self) {
+        let _ = self.backend.unbounded_send(BackendRequest::DropPrefetched);
     }
 
     /// Updates the pinned block to fetch data from
@@ -2882,6 +2904,7 @@ mod tests {
         let backend =
             SharedBackend::spawn_backend(Arc::new(provider), db, Some(BlockId::from(100))).await;
         assert_eq!(backend.block_hash(99).unwrap(), first_hash);
+        backend.drop_prefetched();
         assert_eq!(backend.block_hash(99).unwrap(), first_hash);
         backend.set_pinned_block(200).unwrap();
         assert_eq!(backend.block_hash(99).unwrap(), second_hash);

@@ -7511,24 +7511,15 @@ contract Target {{
             .unwrap();
         let original = project.project().compile_file(&target).unwrap();
         original.assert_success();
-        let original_code = original
-            .find_first("Target")
-            .unwrap()
-            .get_deployed_bytecode_bytes()
-            .unwrap()
-            .into_owned();
+        let original_code =
+            original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
         let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
         let path = project.add_source("Flattened", flattened).unwrap();
         let compiled = project.project().compile_file(path).unwrap();
         compiled.assert_success();
         assert_eq!(
             original_code,
-            compiled
-                .find_first("Target")
-                .unwrap()
-                .get_deployed_bytecode_bytes()
-                .unwrap()
-                .into_owned(),
+            compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap(),
             "{declaration}"
         );
     }
@@ -7623,24 +7614,15 @@ contract Target {{
             .unwrap();
         let original = project.project().compile_file(&target).unwrap();
         original.assert_success();
-        let original_code = original
-            .find_first("Target")
-            .unwrap()
-            .get_deployed_bytecode_bytes()
-            .unwrap()
-            .into_owned();
+        let original_code =
+            original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
         let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
         let path = project.add_source("Flattened", flattened).unwrap();
         let compiled = project.project().compile_file(path).unwrap();
         compiled.assert_success();
         assert_eq!(
             original_code,
-            compiled
-                .find_first("Target")
-                .unwrap()
-                .get_deployed_bytecode_bytes()
-                .unwrap()
-                .into_owned()
+            compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap()
         );
     }
 }
@@ -7671,14 +7653,14 @@ contract Target {
     let original = project.project().compile_file(&target).unwrap();
     original.assert_success();
     let original_code =
-        original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap().into_owned();
+        original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
     let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
     let path = project.add_source("Flattened", flattened).unwrap();
     let compiled = project.project().compile_file(path).unwrap();
     compiled.assert_success();
     assert_eq!(
         original_code,
-        compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap().into_owned()
+        compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap()
     );
 }
 
@@ -7727,24 +7709,15 @@ contract Target {{
             .unwrap();
         let original = project.project().compile_file(&target).unwrap();
         original.assert_success();
-        let original_code = original
-            .find_first("Target")
-            .unwrap()
-            .get_deployed_bytecode_bytes()
-            .unwrap()
-            .into_owned();
+        let original_code =
+            original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
         let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
         let path = project.add_source("Flattened", flattened).unwrap();
         let compiled = project.project().compile_file(path).unwrap();
         compiled.assert_success();
         assert_eq!(
             original_code,
-            compiled
-                .find_first("Target")
-                .unwrap()
-                .get_deployed_bytecode_bytes()
-                .unwrap()
-                .into_owned()
+            compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap()
         );
     }
 }
@@ -7783,24 +7756,15 @@ contract Target {{
             .unwrap();
         let original = project.project().compile_file(&target).unwrap();
         original.assert_success();
-        let original_code = original
-            .find_first("Target")
-            .unwrap()
-            .get_deployed_bytecode_bytes()
-            .unwrap()
-            .into_owned();
+        let original_code =
+            original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
         let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
         let path = project.add_source("Flattened", flattened).unwrap();
         let compiled = project.project().compile_file(path).unwrap();
         compiled.assert_success();
         assert_eq!(
             original_code,
-            compiled
-                .find_first("Target")
-                .unwrap()
-                .get_deployed_bytecode_bytes()
-                .unwrap()
-                .into_owned(),
+            compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap(),
             "{name}"
         );
     }
