@@ -321,7 +321,7 @@ impl Solc {
         match RuntimeOrHandle::new().block_on(svm::install(&version)) {
             Ok(path) => {
                 crate::report::solc_installation_success(&version);
-                Ok(Self::new_with_version(path, version.clone()))
+                Ok(Self::new_with_version(path, version))
             }
             Err(err) => {
                 crate::report::solc_installation_error(&version, &err.to_string());
