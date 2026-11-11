@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0](https://github.com/foundry-rs/foundry-core/releases/tag/block-explorers-v0.25.0) - 2026-11-11
+
+### Bug Fixes
+
+- [explorers] Return an error for an unparseable solc list entry instead of panicking ([#290](https://github.com/foundry-rs/foundry-core/issues/290))
+- [block-explorers] Reject overflowing U64 numeric values ([#269](https://github.com/foundry-rs/foundry-core/issues/269))
+- [explorers] Keep the API key out of request error messages ([#293](https://github.com/foundry-rs/foundry-core/issues/293))
+- [explorers] Normalize Windows source paths ([#287](https://github.com/foundry-rs/foundry-core/issues/287))
+- [explorers] Return ParseOverflow instead of wrapping or panicking in parse_units ([#283](https://github.com/foundry-rs/foundry-core/issues/283))
+- [explorers] Reject negative and oversized integers when converting to Units ([#282](https://github.com/foundry-rs/foundry-core/issues/282))
+- [explorers] Return an error for a malformed getblocknobytime result instead of panicking ([#284](https://github.com/foundry-rs/foundry-core/issues/284))
+- [explorers] Don't panic on a cache TTL that overflows ([#285](https://github.com/foundry-rs/foundry-core/issues/285))
+- [explorers] Match exact solc version in lookup ([#249](https://github.com/foundry-rs/foundry-core/issues/249))
+- [explorers] Honor environment API keys ([#238](https://github.com/foundry-rs/foundry-core/issues/238))
+- [block-explorers] Sort contract sources deterministically ([#109](https://github.com/foundry-rs/foundry-core/issues/109))
+- [block-explorers] Preserve base path in generated explorer URLs ([#91](https://github.com/foundry-rs/foundry-core/issues/91))
+- [changelog] Proper grouping, URLs, and per-crate PR routing ([#68](https://github.com/foundry-rs/foundry-core/issues/68))
+
+### Dependencies
+
+- [deps] Bump the cargo-weekly group with 2 updates ([#144](https://github.com/foundry-rs/foundry-core/issues/144))
+
+### Features
+
+- [verify] Add license type field ([#77](https://github.com/foundry-rs/foundry-core/issues/77))
+
+### Miscellaneous Tasks
+
+- Use target_family for wasm cfgs ([#106](https://github.com/foundry-rs/foundry-core/issues/106))
+
+### Refactor
+
+- Make implicit state machines explicit ([#320](https://github.com/foundry-rs/foundry-core/issues/320))
+
+### Testing
+
+- [explorers] Accept already verified in mainnet verify test ([#326](https://github.com/foundry-rs/foundry-core/issues/326))
+- [explorers] Use a still-unverified address in the mainnet verify test ([#276](https://github.com/foundry-rs/foundry-core/issues/276))
+
 ## [0.24.0](https://github.com/foundry-rs/foundry-core/releases/tag/block-explorers-v0.24.0) - 2026-05-13
 
 ### Bug Fixes
