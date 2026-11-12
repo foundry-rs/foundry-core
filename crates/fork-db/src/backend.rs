@@ -62,8 +62,8 @@ const WARM_CACHE_READS: u64 = 32;
 /// new keys are read directly instead of starting a simulation.
 const WARM_HITS_PER_MISS: u64 = 32;
 
-/// Reads without a simulation after which the counts restart, so the hits of a long warm run do
-/// not hide new cold state.
+/// Warm reads without a simulation after which the counts restart, so the hits of a long warm run
+/// do not hide new cold state.
 const WARM_WINDOW: u64 = 1024;
 
 /// Slots per batch request of prefetched reads. Endpoints commonly cap batches at 100 calls.
@@ -255,6 +255,8 @@ struct AccessListGate {
     hits: AtomicU64,
     /// Cache misses when the last simulation was requested.
     misses: AtomicU64,
+    /// Whether the cache was warm at the last check.
+    was_warm: AtomicBool,
     /// Calls whose last access list held at most [`CHEAP_ACCESS_LIST`] new keys.
     cheap: parking_lot::Mutex<HashSet<AccessListKey>>,
 }
@@ -266,6 +268,7 @@ impl Default for AccessListGate {
             overrides_supported: AtomicBool::new(true),
             hits: AtomicU64::new(u64::MAX),
             misses: AtomicU64::new(0),
+            was_warm: AtomicBool::new(false),
             cheap: Default::default(),
         }
     }
@@ -273,32 +276,39 @@ impl Default for AccessListGate {
 
 impl AccessListGate {
     /// Returns whether a call, with or without `overrides`, is simulated now: the endpoint
-    /// supports it, the call is not cheap and the cache is not warm. The cache is warm after
-    /// [`WARM_CACHE_READS`] reads since the last simulation with at most one miss per
-    /// [`WARM_HITS_PER_MISS`] hits.
+    /// supports it, the call is not cheap, and the cache is not warm or the target is not loaded
+    /// yet. Suites on one fork share the counts, so a cold target is simulated whatever the other
+    /// reads hit.
     fn wanted<B>(&self, key: &AccessListKey, overrides: bool, cache: &JsonBlockCacheDB<B>) -> bool {
         self.supported.load(Ordering::Relaxed)
             && (!overrides || self.overrides_supported.load(Ordering::Relaxed))
-            && self.reads_since_simulation(cache).is_none_or(|(hits, misses)| {
-                hits < WARM_CACHE_READS || misses.saturating_mul(WARM_HITS_PER_MISS) > hits
-            })
+            && (!cache.db().accounts.read().contains_key(&key.0) || !self.warm(cache))
             && !self.cheap.lock().contains(key)
+    }
+
+    /// Returns whether the cache is warm: [`WARM_CACHE_READS`] reads since the last simulation,
+    /// with at most one miss per [`WARM_HITS_PER_MISS`] hits.
+    ///
+    /// After [`WARM_WINDOW`] warm reads the counts restart from the last [`WARM_CACHE_READS`]
+    /// hits, so the hits of a long warm run do not hide new cold state. When the cache turns
+    /// cold, the cheap calls are cleared, since their arguments can now reach cold state.
+    fn warm<B>(&self, cache: &JsonBlockCacheDB<B>) -> bool {
+        let Some((hits, misses)) = self.reads_since_simulation(cache) else { return false };
+        let warm = hits >= WARM_CACHE_READS && misses.saturating_mul(WARM_HITS_PER_MISS) <= hits;
+        if warm && hits + misses >= WARM_WINDOW {
+            self.misses.store(cache.cache_misses(), Ordering::Relaxed);
+            self.hits.store(cache.cache_hits() - WARM_CACHE_READS, Ordering::Relaxed);
+        }
+        if self.was_warm.swap(warm, Ordering::Relaxed) && !warm {
+            self.cheap.lock().clear();
+        }
+        warm
     }
 
     /// Records the cache counts of a simulation request.
     fn record<B>(&self, cache: &JsonBlockCacheDB<B>) {
         self.misses.store(cache.cache_misses(), Ordering::Relaxed);
         self.hits.store(cache.cache_hits(), Ordering::Relaxed);
-    }
-
-    /// Restarts the counts after [`WARM_WINDOW`] reads without a simulation.
-    fn roll_window<B>(&self, cache: &JsonBlockCacheDB<B>) {
-        if self
-            .reads_since_simulation(cache)
-            .is_some_and(|(hits, misses)| hits + misses >= WARM_WINDOW)
-        {
-            self.record(cache);
-        }
     }
 
     /// Returns the cache hits and misses since the last simulation request.
@@ -574,6 +584,8 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             }
             BackendRequest::SetPinnedBlock(block_id) => {
                 self.drop_prefetched();
+                // Cheap calls of the old block can reach cold state at the new one.
+                self.access_list_gate.cheap.lock().clear();
                 self.block_id = Some(block_id);
                 self.block_anchor = None;
                 self.block_generation = self.block_generation.wrapping_add(1);
@@ -631,7 +643,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         let cache = self.db.cache();
         if !self.access_list_gate.wanted(&key, overrides.is_some(), cache) {
             trace!(target: "backendhandler", %to, %selector, "skipping access list request");
-            self.access_list_gate.roll_window(cache);
             return;
         }
         let generation = self.state_generation;
@@ -3666,8 +3677,9 @@ mod tests {
         );
         backend.do_any_request(async { Ok(()) }).unwrap();
         assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
-        // Any call is skipped once the reads since the last simulation mostly hit the cache, so
-        // one new slot is read directly.
+        // Any call into a loaded target is skipped once the reads since the last simulation mostly
+        // hit the cache, so one new slot is read directly.
+        assert!(backend.account(target).unwrap().is_some());
         for _ in 0..WARM_CACHE_READS {
             assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
         }
@@ -3675,10 +3687,22 @@ mod tests {
         assert!(!backend.wants_access_list(&access_list_call(target, 0xcc), B256::ZERO, false));
         backend.prefetch_access_list(access_list_call(target, 0xcc), None, B256::ZERO);
         backend.do_any_request(async { Ok(()) }).unwrap();
+        // A target the fork has not loaded is simulated whatever the other reads hit.
+        let unloaded = access_list_call(Address::with_last_byte(5), 0xcc);
+        assert!(backend.wants_access_list(&unloaded, B256::ZERO, false));
+        // After a long warm run, a few new slots turn simulations back on, cheap calls included.
+        for _ in 0..WARM_WINDOW {
+            assert!(!backend.wants_access_list(&access_list_call(target, 0xcc), B256::ZERO, false));
+            assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
+        }
+        for slot in 8..12 {
+            assert_eq!(backend.storage_at(target, U256::from(slot)).unwrap(), U256::from(42));
+        }
+        assert!(backend.wants_access_list(&access_list_call(target, 0xaa), B256::ZERO, false));
 
         stop.store(true, Ordering::Relaxed);
         let requests = server.join().unwrap();
-        assert_eq!(method_counts(&requests), (3, 3, 2));
+        assert_eq!(method_counts(&requests), (3, 7, 2));
         let simulation = requests.iter().find(|r| r["method"] == "eth_createAccessList").unwrap();
         assert_eq!(
             simulation["params"],
