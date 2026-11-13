@@ -1256,6 +1256,7 @@ mod tests {
                     }))
                     .unwrap()
                 }),
+                coverage: None,
             },
             version: Version::new(0, 8, 30),
             build_id: build_id.to_string(),

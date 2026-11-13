@@ -26,6 +26,8 @@ pub mod bytecode;
 pub use bytecode::*;
 pub mod contract;
 pub use contract::*;
+pub mod coverage;
+pub use coverage::*;
 pub mod configurable;
 pub mod hh;
 pub use configurable::*;
@@ -1967,6 +1969,9 @@ pub struct SourceFile {
     pub id: u32,
     #[serde(default, with = "serde_helpers::empty_json_object_opt")]
     pub ast: Option<Ast>,
+    /// The coverage map of an instrumented source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<SourceCoverage>,
 }
 
 impl SourceFile {

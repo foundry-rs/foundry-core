@@ -95,7 +95,7 @@ pub struct VyperSourceFile {
 
 impl From<VyperSourceFile> for solc_artifacts::SourceFile {
     fn from(source: VyperSourceFile) -> Self {
-        Self { id: source.id, ast: None }
+        Self { id: source.id, ast: None, coverage: None }
     }
 }
 

@@ -92,7 +92,7 @@ impl ConfigurableContractArtifact {
 
     /// Returns the source file of this artifact's contract
     pub fn source_file(&self) -> Option<SourceFile> {
-        self.id.map(|id| SourceFile { id, ast: self.ast.clone() })
+        self.id.map(|id| SourceFile { id, ast: self.ast.clone(), coverage: None })
     }
 }
 

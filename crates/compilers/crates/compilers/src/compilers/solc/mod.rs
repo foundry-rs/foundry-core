@@ -807,7 +807,7 @@ mod tests {
         let output = CompilerOutput {
             sources: BTreeMap::from([(
                 "src/file.sol".to_string().into(),
-                SourceFile { id: 1, ast: None },
+                SourceFile { id: 1, ast: None, coverage: None },
             )]),
             contracts: BTreeMap::new(),
             errors: Vec::new(),
@@ -826,9 +826,18 @@ mod tests {
         );
         let output = CompilerOutput {
             sources: BTreeMap::from([
-                ("src//file.sol".to_string().into(), SourceFile { id: 1, ast: None }),
-                ("src/file.sol".to_string().into(), SourceFile { id: 2, ast: None }),
-                ("generated.sol".to_string().into(), SourceFile { id: 3, ast: None }),
+                (
+                    "src//file.sol".to_string().into(),
+                    SourceFile { id: 1, ast: None, coverage: None },
+                ),
+                (
+                    "src/file.sol".to_string().into(),
+                    SourceFile { id: 2, ast: None, coverage: None },
+                ),
+                (
+                    "generated.sol".to_string().into(),
+                    SourceFile { id: 3, ast: None, coverage: None },
+                ),
             ]),
             contracts: BTreeMap::from([
                 (
