@@ -365,6 +365,9 @@ pub struct Settings {
     pub experimental: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<DebuggingSettings>,
+    /// Solar-specific settings. Only Solar accepts this key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solar: Option<SolarSettings>,
     /// Addresses of the libraries. If not all libraries are given here,
     /// it can result in unlinked objects whose output data is different.
     ///
@@ -678,6 +681,15 @@ impl Settings {
     }
 }
 
+/// Solar-specific settings, in `settings.solar`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolarSettings {
+    /// Unstable `-Z` flags that change the output, such as `instrument-coverage`. Standard JSON
+    /// takes them only from here, not from the command line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unstable: Vec<String>,
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -690,6 +702,7 @@ impl Default for Settings {
             via_ssa_cfg: None,
             experimental: None,
             debug: None,
+            solar: None,
             libraries: Default::default(),
             remappings: Default::default(),
             model_checker: None,

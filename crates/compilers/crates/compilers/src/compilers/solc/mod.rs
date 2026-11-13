@@ -519,6 +519,7 @@ impl CompilerSettings for SolcSettings {
                     via_ssa_cfg,
                     experimental,
                     debug,
+                    solar,
                     libraries,
                 },
             ..
@@ -534,6 +535,7 @@ impl CompilerSettings for SolcSettings {
             && *via_ssa_cfg == other.settings.via_ssa_cfg
             && *experimental == other.settings.experimental
             && *debug == other.settings.debug
+            && *solar == other.settings.solar
             && *libraries == other.settings.libraries
             && output_selection.is_subset_of(&other.settings.output_selection)
     }
