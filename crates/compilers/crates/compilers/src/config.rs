@@ -606,11 +606,8 @@ impl<L> ProjectPathsConfig<L> {
     /// The remapped path if a matching remapping exists and the target file exists,
     /// otherwise returns the original path.
     pub fn apply_remapping_to_path(&self, cwd: &Path, resolved_path: &Path) -> PathBuf {
-        // Get the path relative to root
-        let relative_path = match resolved_path.strip_prefix(&self.root) {
-            Ok(p) => p,
-            Err(_) => return resolved_path.to_path_buf(),
-        };
+        // Remappings can name project-relative source units or absolute external paths.
+        let relative_path = resolved_path.strip_prefix(&self.root).unwrap_or(resolved_path);
 
         let cwd_relative = cwd.strip_prefix(&self.root).unwrap_or(cwd);
 
@@ -623,8 +620,10 @@ impl<L> ProjectPathsConfig<L> {
                 continue;
             }
 
-            // Check if the relative path starts with the remapping name
-            if let Ok(stripped) = relative_path.strip_prefix(&r.name) {
+            // Check both project-relative and absolute source names.
+            if let Ok(stripped) =
+                relative_path.strip_prefix(&r.name).or_else(|_| resolved_path.strip_prefix(&r.name))
+            {
                 let remapped_relative = Path::new(&r.path).join(stripped);
                 let remapped_absolute = self.root.join(&remapped_relative);
 
@@ -1670,5 +1669,53 @@ mod tests {
             config.resolve_library_import(&dependency.join("src"), Path::new("lib/Vm.sol")),
             Some(root.join("../node_modules/dep/node_modules/lib/Vm.sol"))
         );
+    }
+
+    #[test]
+    fn relative_external_import_preserves_remapping_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let mut config = ProjectPathsConfig::builder().build_with_root::<()>(&project);
+        config.create_all().unwrap();
+
+        let owner = config.root.join("lib/a");
+        let external = config.root.parent().unwrap().join("external");
+        fs::create_dir_all(&owner).unwrap();
+        fs::create_dir(&external).unwrap();
+
+        for (source, target) in
+            [(external, "lib/a/../../../external/"), (config.root.clone(), "lib/a/../../")]
+        {
+            fs::write(source.join("A.sol"), "import {B} from './B.sol'; contract A is B {}")
+                .unwrap();
+            fs::write(source.join("B.sol"), "contract B {}").unwrap();
+
+            config.remappings = vec![
+                Remapping { context: None, name: "a/".into(), path: target.into() },
+                Remapping {
+                    context: Some("lib/a/".into()),
+                    name: format!("{}/", source.display()),
+                    path: target.into(),
+                },
+            ];
+
+            let importing = config.resolve_import(&config.sources, Path::new("a/A.sol")).unwrap();
+            let cwd = importing.parent().unwrap();
+            assert_eq!(
+                config.resolve_import(cwd, Path::new("./B.sol")).unwrap(),
+                config.root.join(target).join("B.sol")
+            );
+            assert_eq!(
+                config.resolve_import(&source, Path::new("./B.sol")).unwrap(),
+                source.join("B.sol")
+            );
+
+            config.remappings[1].path = "lib/a/../../../missing/".into();
+            assert_eq!(
+                config.resolve_import(cwd, Path::new("./B.sol")).unwrap(),
+                source.join("B.sol")
+            );
+        }
     }
 }
