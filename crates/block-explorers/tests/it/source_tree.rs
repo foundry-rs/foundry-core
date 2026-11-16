@@ -1,3 +1,4 @@
+use super::*;
 use foundry_block_explorers::{
     contract::{ContractMetadata, Metadata},
     source_tree::{SourceTree, SourceTreeEntry},
@@ -8,27 +9,20 @@ use std::path::Path;
 use std::os::unix::fs::symlink;
 
 #[cfg(windows)]
-use foundry_block_explorers::errors::EtherscanError;
-
-#[cfg(windows)]
 use std::process::Command;
 
 #[test]
-fn metadata_rejects_hidden_contract_roots_before_writing() {
-    let temp = tempfile::tempdir().unwrap();
-    let output = temp.path().join("sources");
+fn metadata_rejects_hidden_contract_roots() {
     for name in ["", ".", "..", ".git", "a/b", "/abs"] {
         let metadata = metadata(name, &[("config", "replacement"), ("config.sol", "companion")]);
         let error = metadata.source_tree().unwrap_err();
+        assert!(matches!(&error, EtherscanError::InvalidContractName(_)));
         assert_eq!(error.to_string(), format!("invalid contract name from explorer: {name:?}"));
-        assert!(!output.exists());
     }
 }
 
 #[test]
-fn metadata_rejects_empty_sanitized_sources_before_writing() {
-    let temp = tempfile::tempdir().unwrap();
-    let output = temp.path().join("sources");
+fn metadata_rejects_empty_sanitized_sources() {
     for path in ["", ".", "..", "/", "../../"] {
         let metadata = ContractMetadata {
             items: vec![
@@ -41,7 +35,6 @@ fn metadata_rejects_empty_sanitized_sources_before_writing() {
             error.to_string(),
             format!("invalid source path from explorer: {:?}", Path::new("foundry.toml").join(""))
         );
-        assert!(!output.exists());
     }
 }
 
