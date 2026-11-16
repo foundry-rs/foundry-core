@@ -21,8 +21,8 @@ impl SourceTree {
     ///
     /// Single-file entries are supported; directory roots must be non-hidden. All final
     /// destinations are checked before creating directories or writing files. Existing symlink
-    /// components are rejected. Validation errors leave the destination untouched, while filesystem
-    /// errors during writing can leave partial output.
+    /// components below `dir` are rejected. Validation errors leave the destination untouched,
+    /// while filesystem errors during writing can leave partial output.
     pub fn write_to(&self, dir: &Path) -> Result<()> {
         let paths = self
             .entries
@@ -68,7 +68,8 @@ pub(crate) fn sanitize_path(path: impl AsRef<Path>) -> PathBuf {
 /// Ensures explorer sources are rooted in a single, non-hidden contract directory.
 pub(crate) fn validate_contract_name(name: &str) -> Result<()> {
     let mut components = Path::new(name).components();
-    // HFS+ ignores these codepoints during comparison, matching Git's core.protectHFS list.
+    // macOS can still write to HFS+ volumes, which ignore these codepoints during comparison.
+    // Match Git's core.protectHFS list to reject aliases of hidden roots on those volumes.
     if !matches!(components.next(), Some(Component::Normal(name)) if is_safe_component(name))
         || components.next().is_some()
         || name.starts_with('.')
@@ -95,6 +96,7 @@ fn validate_destination(dir: &Path, path: &Path) -> Result<()> {
     {
         validate_contract_name(&root.to_string_lossy())?;
         // NTFS may expose hidden directory names through non-hidden 8.3 aliases.
+        // Existing entries can change the short name, so a literal git~1 check is insufficient.
         #[cfg(windows)]
         match std::fs::canonicalize(dir.join(root)) {
             Ok(resolved) => {
@@ -108,6 +110,7 @@ fn validate_destination(dir: &Path, path: &Path) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
+    // Existing destinations can contain symlinks even though explorer replies cannot create them.
     let mut current = dir.to_path_buf();
     for component in path.components() {
         let Component::Normal(name) = component else {

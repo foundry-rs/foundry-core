@@ -192,6 +192,8 @@ jobs:
       - name: test
         run: cargo nextest run --workspace --locked ${{ matrix.flags }}
 
+  # The regular PR test matrix is Linux-only. Exercise Windows path handling
+  # and real NTFS aliases before merge, including aliases other than git~1.
   source-tree-windows:
     runs-on: windows-latest
     timeout-minutes: 30

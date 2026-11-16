@@ -252,6 +252,7 @@ fn source_tree_rejects_hidden_short_name_aliases() {
     let short_path = String::from_utf8(output.stdout).unwrap();
     let name = Path::new(short_path.trim()).file_name().unwrap().to_str().unwrap();
     assert!(!name.starts_with('.'), "enable NTFS 8.3 name creation to run this regression");
+    assert!(!name.eq_ignore_ascii_case("git~1"), "expected a short-name alias beyond git~1");
     let tree = metadata(name, &[("config", "replacement"), ("config.sol", "companion")])
         .source_tree()
         .unwrap();
