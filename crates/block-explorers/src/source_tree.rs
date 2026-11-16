@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::{EtherscanError, Result};
 use std::{
     fs::create_dir_all,
     path::{Component, Path, PathBuf},
@@ -16,19 +16,35 @@ pub struct SourceTree {
 }
 
 impl SourceTree {
-    /// Expand the source tree into the provided directory.  This method sanitizes paths to ensure
-    /// that no directory traversal happens.
+    /// Expands the source tree into the provided directory, sanitizing paths and adding `.sol`
+    /// to extensionless files unless a companion entry already has that name.
+    ///
+    /// Single-file entries are supported; directory roots must be non-hidden. All final
+    /// destinations are checked before creating directories or writing files. Existing symlink
+    /// components are rejected. Validation errors leave the destination untouched, while filesystem
+    /// errors during writing can leave partial output.
     pub fn write_to(&self, dir: &Path) -> Result<()> {
-        create_dir_all(dir)?;
-        for entry in &self.entries {
-            let mut sanitized_path = sanitize_path(&entry.path);
-            if sanitized_path.extension().is_none() {
-                let with_extension = sanitized_path.with_extension("sol");
-                if !self.entries.iter().any(|e| e.path == with_extension) {
-                    sanitized_path = with_extension;
+        let paths = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let mut path = sanitize_path(&entry.path);
+                if path.extension().is_none() {
+                    let with_extension = path.with_extension("sol");
+                    if !self.entries.iter().any(|entry| entry.path == with_extension) {
+                        path = with_extension;
+                    }
                 }
-            }
-            let joined = dir.join(sanitized_path);
+                path
+            })
+            .collect::<Vec<_>>();
+        for path in &paths {
+            validate_destination(dir, path)?;
+        }
+
+        create_dir_all(dir)?;
+        for (entry, path) in self.entries.iter().zip(paths) {
+            let joined = dir.join(path);
             if let Some(parent) = joined.parent() {
                 create_dir_all(parent)?;
                 std::fs::write(joined, &entry.contents)?;
@@ -47,6 +63,90 @@ pub(crate) fn sanitize_path(path: impl AsRef<Path>) -> PathBuf {
             _ => None,
         })
         .collect()
+}
+
+/// Ensures explorer sources are rooted in a single, non-hidden contract directory.
+pub(crate) fn validate_contract_name(name: &str) -> Result<()> {
+    let mut components = Path::new(name).components();
+    // HFS+ ignores these codepoints during comparison, matching Git's core.protectHFS list.
+    if !matches!(components.next(), Some(Component::Normal(name)) if is_safe_component(name))
+        || components.next().is_some()
+        || name.starts_with('.')
+        || cfg!(target_os = "macos")
+            && name.chars().find(|character| {
+                !matches!(
+                    *character as u32,
+                    0x200c..=0x200f | 0x202a..=0x202e | 0x206a..=0x206f | 0xfeff
+                )
+            }) == Some('.')
+    {
+        return Err(EtherscanError::InvalidContractName(name.to_owned()));
+    }
+    Ok(())
+}
+
+fn validate_destination(dir: &Path, path: &Path) -> Result<()> {
+    if !is_safe_source_path(path) {
+        return Err(EtherscanError::InvalidSourcePath(path.to_path_buf()));
+    }
+    let mut components = path.components();
+    if let Some(Component::Normal(root)) = components.next()
+        && components.next().is_some()
+    {
+        validate_contract_name(&root.to_string_lossy())?;
+        // NTFS may expose hidden directory names through non-hidden 8.3 aliases.
+        #[cfg(windows)]
+        match std::fs::canonicalize(dir.join(root)) {
+            Ok(resolved) => {
+                let name = resolved
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| EtherscanError::InvalidSourcePath(path.to_path_buf()))?;
+                validate_contract_name(name)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut current = dir.to_path_buf();
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            return Err(EtherscanError::InvalidSourcePath(path.to_path_buf()));
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(EtherscanError::SourcePathSymlink(current));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Checks that sanitization left a nonempty relative path with ordinary filesystem components.
+pub(crate) fn is_safe_source_path(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(components.next(), Some(Component::Normal(name)) if is_safe_component(name))
+        && components.all(
+            |component| matches!(component, Component::Normal(name) if is_safe_component(name)),
+        )
+}
+
+fn is_safe_component(name: &std::ffi::OsStr) -> bool {
+    !cfg!(windows)
+        || name.to_str().is_some_and(|name| {
+            // Reserved devices are left to Windows filesystem semantics.
+            !name.ends_with('.')
+                && !name.ends_with(' ')
+                && !name.chars().any(|character| {
+                    character < ' '
+                        || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+                })
+                && !name.eq_ignore_ascii_case("git~1")
+        })
 }
 
 #[cfg(test)]

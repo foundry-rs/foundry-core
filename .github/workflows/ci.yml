@@ -192,6 +192,32 @@ jobs:
       - name: test
         run: cargo nextest run --workspace --locked ${{ matrix.flags }}
 
+  source-tree-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@2ab28a31ae569be9f780c7675b684471060afa40
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@2ab28a31ae569be9f780c7675b684471060afa40
+        with:
+          toolchain: stable
+      - uses: tempoxyz/gh-actions/vendor/mozilla-actions/sccache-action@2ab28a31ae569be9f780c7675b684471060afa40
+      - uses: tempoxyz/gh-actions/vendor/Swatinem/rust-cache@2ab28a31ae569be9f780c7675b684471060afa40
+      - name: Test source destinations on Windows
+        run: cargo test -p foundry-block-explorers --test source_tree --locked
+      - name: Test NTFS short-name aliases
+        shell: pwsh
+        run: |
+          fsutil 8dot3name set 0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p foundry-block-explorers --test source_tree --locked -- --ignored --exact source_tree_rejects_hidden_short_name_aliases
+
   doctest:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -306,6 +332,7 @@ jobs:
       - touch-id-link
       - feature-checks
       - test
+      - source-tree-windows
       - doctest
       - docs
       - typos
