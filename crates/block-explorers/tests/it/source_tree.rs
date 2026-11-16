@@ -40,7 +40,17 @@ fn metadata_rejects_empty_sanitized_sources() {
 
 #[test]
 fn metadata_preserves_normal_names_sanitization_and_overwrites() {
-    for name in ["Example", "Contract_1", "Ünïcode", "foundry.toml", "CON"] {
+    for name in [
+        "Example",
+        "Contract_1",
+        "Ünïcode",
+        "foundry.toml",
+        "CON",
+        "git~1",
+        "Example.",
+        "Example ",
+        "\u{200c}.git",
+    ] {
         let entries = metadata(name, &[("Contract.sol", "source")]).source_entries().unwrap();
         assert_eq!(entries[0].path, Path::new(name).join("Contract.sol"));
     }
@@ -82,11 +92,11 @@ fn metadata_preserves_normal_names_sanitization_and_overwrites() {
 #[cfg(unix)]
 #[test]
 fn source_tree_checks_final_symlink_destinations_before_any_writes() {
-    for (link, source, companion, directory) in [
-        ("C", "config", true, true),
-        ("C/.git", ".git/config", true, true),
-        ("C/config", "config", true, false),
-        ("C/config.sol", "config", false, false),
+    for (link, source, companion, target) in [
+        ("C", "config", true, ".git"),
+        ("C/.git", ".git/config", true, "../.git"),
+        ("C/config", "config", true, "../.git/config"),
+        ("C/config.sol", "config", false, "../.git/config"),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let output = temp.path().join("sources");
@@ -96,7 +106,7 @@ fn source_tree_checks_final_symlink_destinations_before_any_writes() {
         std::fs::write(&config, "original").unwrap();
         let link = output.join(link);
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
-        symlink(if directory { &git } else { &config }, &link).unwrap();
+        symlink(target, &link).unwrap();
         let mut sources = vec![(source, "replacement")];
         let companion_path = format!("{source}.sol");
         if companion {
@@ -129,14 +139,6 @@ fn source_tree_rejects_hidden_roots_before_any_writes() {
     let error = tree.write_to(&output).unwrap_err();
     assert_eq!(error.to_string(), "invalid contract name from explorer: \".git\"");
     assert!(!output.exists());
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn metadata_rejects_hfs_hidden_root_aliases() {
-    let name = "\u{200c}.git";
-    let error = metadata(name, &[("config.sol", "replacement")]).source_tree().unwrap_err();
-    assert_eq!(error.to_string(), format!("invalid contract name from explorer: {name:?}"));
 }
 
 #[test]
@@ -189,20 +191,12 @@ fn source_tree_rejects_empty_destinations_before_creating_output() {
 
 #[cfg(windows)]
 #[test]
-fn metadata_rejects_windows_path_aliases() {
-    for name in [".. ", ". ", "Example.", "Example ", "git~1", "safe:stream", r"C:relative", r"a\b"]
-    {
+fn metadata_rejects_windows_path_syntax() {
+    for name in [".. ", ". ", "safe:stream", r"C:relative", r"a\b"] {
         let error = metadata(name, &[("Contract.sol", "replacement")]).source_tree().unwrap_err();
         assert_eq!(error.to_string(), format!("invalid contract name from explorer: {name:?}"));
     }
-    for path in [
-        ".. /foundry.toml",
-        "lib/.. /foundry.toml",
-        "a/C:/foundry.toml",
-        "lib/x:y.sol",
-        "lib/git~1/config.sol",
-        "lib/Example./A.sol",
-    ] {
+    for path in ["a/C:/foundry.toml", "lib/x:y.sol"] {
         assert!(metadata("C", &[(path, "replacement")]).source_entries().is_err());
     }
     // Device names are left to the operating system rather than a source-name blacklist.
@@ -211,15 +205,9 @@ fn metadata_rejects_windows_path_aliases() {
 
 #[cfg(windows)]
 #[test]
-fn source_tree_rejects_windows_aliases_before_any_writes() {
+fn source_tree_rejects_windows_path_syntax_before_any_writes() {
     let temp = tempfile::tempdir().unwrap();
-    for path in [
-        "C/.. /foundry.toml",
-        "C/config:stream.sol",
-        "C/Example./A.sol",
-        "C/git~1/config.sol",
-        "C/nested/D:relative.sol",
-    ] {
+    for path in ["C/config:stream.sol", "C/nested/D:relative.sol"] {
         let output = temp.path().join("sources");
         let tree = SourceTree {
             entries: vec![

@@ -68,18 +68,9 @@ pub(crate) fn sanitize_path(path: impl AsRef<Path>) -> PathBuf {
 /// Ensures explorer sources are rooted in a single, non-hidden contract directory.
 pub(crate) fn validate_contract_name(name: &str) -> Result<()> {
     let mut components = Path::new(name).components();
-    // macOS can still write to HFS+ volumes, which ignore these codepoints during comparison.
-    // Match Git's core.protectHFS list to reject aliases of hidden roots on those volumes.
     if !matches!(components.next(), Some(Component::Normal(name)) if is_safe_component(name))
         || components.next().is_some()
         || name.starts_with('.')
-        || cfg!(target_os = "macos")
-            && name.chars().find(|character| {
-                !matches!(
-                    *character as u32,
-                    0x200c..=0x200f | 0x202a..=0x202e | 0x206a..=0x206f | 0xfeff
-                )
-            }) == Some('.')
     {
         return Err(EtherscanError::InvalidContractName(name.to_owned()));
     }
@@ -96,7 +87,7 @@ fn validate_destination(dir: &Path, path: &Path) -> Result<()> {
     {
         validate_contract_name(&root.to_string_lossy())?;
         // NTFS may expose hidden directory names through non-hidden 8.3 aliases.
-        // Existing entries can change the short name, so a literal git~1 check is insufficient.
+        // Resolve the actual directory name to catch aliases of .git, .vscode, and other roots.
         #[cfg(windows)]
         match std::fs::canonicalize(dir.join(root)) {
             Ok(resolved) => {
@@ -110,7 +101,7 @@ fn validate_destination(dir: &Path, path: &Path) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
-    // Existing destinations can contain symlinks even though explorer replies cannot create them.
+    // A cloned repository can contain a committed symlink such as Token -> .git.
     let mut current = dir.to_path_buf();
     for component in path.components() {
         let Component::Normal(name) = component else {
@@ -139,17 +130,8 @@ pub(crate) fn is_safe_source_path(path: &Path) -> bool {
 }
 
 fn is_safe_component(name: &std::ffi::OsStr) -> bool {
-    !cfg!(windows)
-        || name.to_str().is_some_and(|name| {
-            // Reserved devices are left to Windows filesystem semantics.
-            !name.ends_with('.')
-                && !name.ends_with(' ')
-                && !name.chars().any(|character| {
-                    character < ' '
-                        || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
-                })
-                && !name.eq_ignore_ascii_case("git~1")
-        })
+    // Prevent alternate data streams; other filename restrictions belong to the filesystem.
+    !cfg!(windows) || name.to_str().is_some_and(|name| !name.contains(':'))
 }
 
 #[cfg(test)]

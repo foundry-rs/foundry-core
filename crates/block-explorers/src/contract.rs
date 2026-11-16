@@ -241,7 +241,7 @@ impl Metadata {
     /// Maps this contract's sources to a [SourceTreeEntry] vector.
     ///
     /// Returns an error if the contract name cannot be used as a non-hidden directory or a
-    /// sanitized source path is empty or contains platform-specific path syntax or aliases.
+    /// sanitized source path is empty or contains a Windows alternate data stream separator.
     pub fn source_entries(&self) -> Result<Vec<SourceTreeEntry>> {
         crate::source_tree::validate_contract_name(&self.contract_name)?;
         let root = Path::new(&self.contract_name);
