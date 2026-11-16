@@ -241,19 +241,24 @@ impl Metadata {
     /// Maps this contract's sources to a [SourceTreeEntry] vector.
     pub fn source_entries(&self) -> Vec<SourceTreeEntry> {
         let root = Path::new(&self.contract_name);
-        let mut entries = self
-            .sources()
-            .into_iter()
-            .map(|(path, entry)| {
-                // This is relevant because the etherscan [Metadata](crate::contract::Metadata) can
-                // contain absolute paths (supported by standard-json-input). See also: <https://github.com/foundry-rs/foundry/issues/6541>
-                // for example, we want to ensure "/contracts/SimpleToken.sol" is mapped to
-                // `<root_dir>/contracts/SimpleToken.sol`.
-                let sanitized_path = crate::source_tree::sanitize_path(path);
-                let path = root.join(sanitized_path);
-                SourceTreeEntry { path, contents: entry.content }
-            })
-            .collect::<Vec<_>>();
+        let make_entry = |path: &str, contents: &str| {
+            // This is relevant because the etherscan [Metadata](crate::contract::Metadata) can
+            // contain absolute paths (supported by standard-json-input). See also: <https://github.com/foundry-rs/foundry/issues/6541>
+            // for example, we want to ensure "/contracts/SimpleToken.sol" is mapped to
+            // `<root_dir>/contracts/SimpleToken.sol`.
+            let sanitized_path = crate::source_tree::sanitize_path(path);
+            let path = root.join(sanitized_path);
+            SourceTreeEntry { path, contents: contents.to_owned() }
+        };
+        let mut entries = match &self.source_code {
+            SourceCodeMetadata::Metadata { sources, .. } | SourceCodeMetadata::Sources(sources) => {
+                sources
+                    .iter()
+                    .map(|(path, entry)| make_entry(path, &entry.content))
+                    .collect::<Vec<_>>()
+            }
+            SourceCodeMetadata::SourceCode(source) => vec![make_entry("Contract", source)],
+        };
         // Sort by path so the tree order is stable across runs (sources come from a `HashMap`).
         entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
         entries
@@ -532,8 +537,7 @@ fn is_address_only_source_code_response(response: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceCodeMetadata, is_address_only_source_code_response};
-    use std::collections::HashMap;
+    use super::*;
 
     #[test]
     fn source_code_single_file_verbatim() {
@@ -566,5 +570,47 @@ mod tests {
     fn ignores_valid_contract_metadata_shape() {
         let response = r#"{"message":"OK","result":[{"ABI":"[]","ContractName":"C","CompilerVersion":"v0.8.26+commit.8a97fa7a","OptimizationUsed":"0","OptimizationRuns":"0","SourceCode":"","EVMVersion":"Default","IsProxy":"0","ConstructorArguments":""}],"status":"1"}"#;
         assert!(!is_address_only_source_code_response(response));
+    }
+
+    #[test]
+    fn source_entries_preserve_metadata_variants() {
+        let mut metadata = serde_json::from_value::<Metadata>(serde_json::json!({
+            "SourceCode": "",
+            "ABI": "[]",
+            "ContractName": "Example",
+            "CompilerVersion": "v0.8.26+commit.8a97fa7a",
+            "OptimizationUsed": "0",
+            "Runs": "0",
+            "EVMVersion": "Default",
+            "Proxy": "0"
+        }))
+        .unwrap();
+        let sources = HashMap::from([
+            ("/contracts/Z.sol".into(), "contract Z {}".into()),
+            ("../../A.sol".into(), "contract A {}".into()),
+        ]);
+        for source_code in [
+            SourceCodeMetadata::Sources(sources.clone()),
+            SourceCodeMetadata::Metadata { language: None, sources, settings: None },
+        ] {
+            metadata.source_code = source_code;
+            let entries = metadata.source_entries();
+            assert_eq!(
+                entries.into_iter().map(|entry| (entry.path, entry.contents)).collect::<Vec<_>>(),
+                [
+                    (Path::new("Example").join("A.sol"), "contract A {}".to_string()),
+                    (Path::new("Example").join("contracts/Z.sol"), "contract Z {}".to_string()),
+                ]
+            );
+        }
+
+        metadata.source_code = SourceCodeMetadata::SourceCode("contract Raw {}".into());
+        let entries = metadata.source_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, Path::new("Example").join("Contract"));
+        assert_eq!(entries[0].contents, "contract Raw {}");
+
+        metadata.source_code = SourceCodeMetadata::Sources(HashMap::new());
+        assert!(metadata.source_entries().is_empty());
     }
 }
