@@ -298,25 +298,25 @@ impl<S: CompilerSettings> CompilerCache<S> {
     }
 
     fn remove_outdated_builds_at(&mut self, build_infos: &Path) {
-        let mut outdated = Vec::new();
-        for build_id in &self.builds {
-            if !self
-                .entries()
-                .flat_map(|e| e.artifacts.values())
-                .flat_map(|a| a.values())
-                .flat_map(|a| a.values())
-                .any(|a| a.build_id == *build_id)
-                && !self.entries().any(|e| e.coverage_build_id.as_ref() == Some(build_id))
-            {
-                outdated.push(build_id.to_owned());
-            }
-        }
-
+        let outdated =
+            self.builds.iter().filter(|id| !self.references_build(id)).cloned().collect::<Vec<_>>();
         for build_id in outdated {
             self.builds.remove(&build_id);
             let path = build_infos.join(build_id).with_extension("json");
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// Returns whether an artifact or coverage map of any entry links to the build info.
+    fn references_build(&self, build_id: &str) -> bool {
+        self.entries().any(|e| {
+            e.coverage_build_id.as_deref() == Some(build_id)
+                || e.artifacts
+                    .values()
+                    .flat_map(|a| a.values())
+                    .flat_map(|a| a.values())
+                    .any(|a| a.build_id == build_id)
+        })
     }
 
     /// Sets the `CacheEntry`'s file paths to `root` adjoined to `self.file`.
@@ -1740,7 +1740,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let ArtifactsCacheInner {
             mut cache,
             mut cached_artifacts,
-            cached_builds,
+            mut cached_builds,
             dirty_sources,
             sources_in_scope,
             project,
@@ -1795,9 +1795,17 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             }
         }
 
-        // A file whose coverage build info is gone was recompiled; a new build sets it again.
-        for entry in cache.files.values_mut() {
-            if entry.coverage_build_id.as_ref().is_some_and(|id| !cached_builds.contains_key(id)) {
+        // A recompiled file drops its reference to missing build info; a new coverage map sets it
+        // again. Files outside this compilation keep theirs and rebuild when requested.
+        for path in
+            written_build_infos.iter().flat_map(|b| b.build_context.source_id_to_path.values())
+        {
+            if let Some(entry) = cache.files.get_mut(&project.root().join(path))
+                && entry
+                    .coverage_build_id
+                    .as_ref()
+                    .is_some_and(|id| !cached_builds.contains_key(id))
+            {
                 entry.coverage_build_id = None;
             }
         }
@@ -1812,6 +1820,10 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 }
             }
         }
+
+        // Return only build infos the cache still links, so a settings change also drops the old
+        // coverage maps from this output.
+        cached_builds.retain(|id, _| cache.references_build(id));
 
         cache.prune_native_dependency_contexts(project.root());
 
