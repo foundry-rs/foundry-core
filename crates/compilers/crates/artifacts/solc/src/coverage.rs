@@ -12,6 +12,19 @@ use serde::{Deserialize, Serialize};
 pub struct SourceCoverage {
     /// The functions, modifiers, and Yul functions defined in the source.
     pub functions: Vec<FunctionCoverage>,
+    /// The contracts defined in the source that have decisions outside their functions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contracts: Vec<ContractCoverage>,
+}
+
+/// The coverage regions of one contract outside its functions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractCoverage {
+    /// The contract name.
+    pub name: String,
+    /// The decisions in state variable initializers and in base constructor arguments of
+    /// inheritance specifiers, which run in creation code.
+    pub branches: Vec<BranchCoverage>,
 }
 
 /// The coverage regions of one function.
@@ -92,7 +105,8 @@ mod tests {
         let coverage: SourceCoverage = serde_json::from_str(
             r#"{"functions":[{"name":"f","contract":"C","src":"0:30:0","count":1,
                 "statements":[{"src":"10:5:0","count":2}],
-                "branches":[{"src":"10:15:0","paths":[3,{"sub":[2,3]}]}]}]}"#,
+                "branches":[{"src":"10:15:0","paths":[3,{"sub":[2,3]}]}]}],
+                "contracts":[{"name":"C","branches":[{"src":"40:9:0","paths":[3,{"sub":[1,3]}]}]}]}"#,
         )
         .unwrap();
         let function = &coverage.functions[0];
@@ -101,5 +115,10 @@ mod tests {
         let paths = &function.branches[0].paths;
         assert_eq!(paths.iter().map(|path| path.eval(hits)).collect::<Vec<_>>(), [2, 3]);
         assert_eq!(function.statements[0].count.eval(hits), 5);
+        let initializer = &coverage.contracts[0].branches[0];
+        assert_eq!(
+            initializer.paths.iter().map(|path| path.eval(hits)).collect::<Vec<_>>(),
+            [2, 5]
+        );
     }
 }
