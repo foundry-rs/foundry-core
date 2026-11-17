@@ -291,7 +291,7 @@ impl<S: CompilerSettings> CompilerCache<S> {
         Ok(())
     }
 
-    /// Removes build infos which don't have any artifacts linked to them.
+    /// Removes build infos which don't have any artifacts or coverage maps linked to them.
     #[instrument(skip_all)]
     pub fn remove_outdated_builds(&mut self) {
         self.remove_outdated_builds_at(&self.paths.build_infos.clone());
@@ -306,6 +306,7 @@ impl<S: CompilerSettings> CompilerCache<S> {
                 .flat_map(|a| a.values())
                 .flat_map(|a| a.values())
                 .any(|a| a.build_id == *build_id)
+                && !self.entries().any(|e| e.coverage_build_id.as_ref() == Some(build_id))
             {
                 outdated.push(build_id.to_owned());
             }
@@ -634,6 +635,12 @@ pub struct CacheEntry {
     /// If this is false, then artifacts are definitely empty and it should be compiled if we may
     /// need artifacts.
     pub seen_by_compiler: bool,
+    /// The build whose build info holds this file's instrumented coverage map.
+    ///
+    /// It keeps that build info when the file produces no artifacts, such as a file of free
+    /// functions, so a warm build still serves the map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_build_id: Option<String>,
 }
 
 impl CacheEntry {
@@ -892,6 +899,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             // artifacts remain empty until we received the compiler output
             artifacts: Default::default(),
             seen_by_compiler: false,
+            coverage_build_id: None,
         };
 
         self.cache.files.insert(file, entry);
@@ -1778,6 +1786,14 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
         for build_info in written_build_infos {
             cache.builds.insert(build_info.id.clone());
+            let context = &build_info.build_context;
+            for source_id in context.coverage.keys() {
+                if let Some(path) = context.source_id_to_path.get(source_id)
+                    && let Some(entry) = cache.files.get_mut(&project.root().join(path))
+                {
+                    entry.coverage_build_id = Some(build_info.id.clone());
+                }
+            }
         }
 
         cache.prune_native_dependency_contexts(project.root());
@@ -2137,6 +2153,7 @@ mod tests {
                     version_requirement: None,
                     artifacts: Default::default(),
                     seen_by_compiler: true,
+                    coverage_build_id: None,
                 },
             );
         }
@@ -2168,5 +2185,33 @@ mod tests {
             cache.source_context_dirty_sources(root, |source| source == sensitive),
             HashSet::from([sensitive, importer, native, conservative])
         );
+    }
+
+    #[test]
+    fn coverage_keeps_build_info_without_artifacts() {
+        let build_infos = tempfile::tempdir().unwrap();
+        let mut cache = CompilerCache::<SolcSettings>::default();
+        cache.files.insert(
+            PathBuf::from("/project/src/Free.sol"),
+            CacheEntry {
+                last_modification_date: 0,
+                content_hash: String::new(),
+                interface_repr_hash: None,
+                source_name: PathBuf::from("src/Free.sol"),
+                imports: BTreeSet::new(),
+                version_requirement: None,
+                artifacts: Default::default(),
+                seen_by_compiler: true,
+                coverage_build_id: Some("coverage".to_owned()),
+            },
+        );
+        for id in ["coverage", "stale"] {
+            cache.builds.insert(id.to_owned());
+            fs::write(build_infos.path().join(id).with_extension("json"), "{}").unwrap();
+        }
+        cache.remove_outdated_builds_at(build_infos.path());
+        assert_eq!(cache.builds, BTreeSet::from(["coverage".to_owned()]));
+        assert!(build_infos.path().join("coverage.json").is_file());
+        assert!(!build_infos.path().join("stale.json").exists());
     }
 }
