@@ -163,7 +163,20 @@ pub enum Region {
         /// The index of the expanded virtual file.
         expanded_file: u32,
     },
-    /// `[2, file, start, len]`: code that constant folding removed.
+    /// `[3, file, start, len, count]`: a gap between code regions, with the count of the code
+    /// after it. A gap never starts the count of a line, but it can be the count a line
+    /// continues with.
+    Gap {
+        /// The index in the virtual file table.
+        file: u32,
+        /// The start byte offset.
+        start: u32,
+        /// The length in bytes.
+        len: u32,
+        /// The execution count.
+        count: u32,
+    },
+    /// `[2, file, start, len]`: code that constant folding or the compiler left out.
     Skipped {
         /// The index in the virtual file table.
         file: u32,
@@ -226,6 +239,7 @@ impl Region {
             Self::Code { .. } => 0,
             Self::Expansion { .. } => 1,
             Self::Skipped { .. } => 2,
+            Self::Gap { .. } => 3,
             Self::Branch { .. } => 4,
             Self::Decision { .. } => 5,
             Self::McdcBranch { .. } => 6,
@@ -238,6 +252,7 @@ impl Region {
             Self::Code { file, .. }
             | Self::Expansion { file, .. }
             | Self::Skipped { file, .. }
+            | Self::Gap { file, .. }
             | Self::Branch { file, .. }
             | Self::Decision { file, .. }
             | Self::McdcBranch { file, .. } => file,
@@ -250,6 +265,7 @@ impl Region {
             Self::Code { start, .. }
             | Self::Expansion { start, .. }
             | Self::Skipped { start, .. }
+            | Self::Gap { start, .. }
             | Self::Branch { start, .. }
             | Self::Decision { start, .. }
             | Self::McdcBranch { start, .. } => start,
@@ -262,6 +278,7 @@ impl Region {
             Self::Code { len, .. }
             | Self::Expansion { len, .. }
             | Self::Skipped { len, .. }
+            | Self::Gap { len, .. }
             | Self::Branch { len, .. }
             | Self::Decision { len, .. }
             | Self::McdcBranch { len, .. } => len,
@@ -282,7 +299,7 @@ impl Region {
             i64::from(self.len()),
         ];
         match self {
-            Self::Code { count, .. } => array.push(count.into()),
+            Self::Code { count, .. } | Self::Gap { count, .. } => array.push(count.into()),
             Self::Expansion { count, expanded_file, .. } => {
                 array.extend([i64::from(count), expanded_file.into()])
             }
@@ -322,6 +339,7 @@ impl Region {
                 expanded_file: u32_of(expanded_file)?,
             },
             (2, []) => Self::Skipped { file, start, len },
+            (3, &[count]) => Self::Gap { file, start, len, count: u32_of(count)? },
             (4, &[true_count, false_count]) => Self::Branch {
                 file,
                 start,
@@ -340,7 +358,7 @@ impl Region {
                 false_next: i32_of(false_next)?,
                 true_next: i32_of(true_next)?,
             },
-            (0 | 1 | 2 | 4 | 5 | 6, _) => {
+            (0..=6, _) => {
                 return Err(format!("a region of kind {kind} has the wrong number of fields"));
             }
             _ => return Err(format!("unknown region kind {kind}")),
@@ -409,6 +427,7 @@ mod tests {
                 [0, 0, 120, 340, 69],
                 [1, 0, 130, 8, 77, 1],
                 [2, 0, 200, 20],
+                [3, 0, 210, 5, 73],
                 [4, 0, 220, 10, 73, 14],
                 [5, 0, 220, 30, 0],
                 [6, 0, 220, 10, 73, 14, 0, 1, -1]
@@ -426,8 +445,9 @@ mod tests {
             (0x1f2e3d4c5b6a7980, 17, 3)
         );
         assert_eq!(function.regions[0], Region::Code { file: 0, start: 120, len: 340, count: 69 });
+        assert_eq!(function.regions[3], Region::Gap { file: 0, start: 210, len: 5, count: 73 });
         assert_eq!(
-            function.regions[5],
+            function.regions[6],
             Region::McdcBranch {
                 file: 0,
                 start: 220,
@@ -464,9 +484,11 @@ mod tests {
     fn rejects_malformed_maps() {
         let version_1 = MAP.replace(r#""version": 2"#, r#""version": 1"#);
         assert!(serde_json::from_str::<SourceCoverage>(&version_1).is_err());
-        let bad_kind = MAP.replace("[2, 0, 200, 20]", "[3, 0, 200, 20]");
+        let bad_kind = MAP.replace("[2, 0, 200, 20]", "[7, 0, 200, 20]");
         assert!(serde_json::from_str::<SourceCoverage>(&bad_kind).is_err());
         let short = MAP.replace("[4, 0, 220, 10, 73, 14]", "[4, 0, 220, 10, 73]");
+        let gap_without_count = MAP.replace("[3, 0, 210, 5, 73]", "[3, 0, 210, 5]");
+        assert!(serde_json::from_str::<SourceCoverage>(&gap_without_count).is_err());
         assert!(serde_json::from_str::<SourceCoverage>(&short).is_err());
         let bad_hash = MAP.replace("0x1f2e3d4c5b6a7980", "not-hex");
         assert!(serde_json::from_str::<SourceCoverage>(&bad_hash).is_err());
