@@ -1017,6 +1017,10 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             return Err("missing cache entry");
         };
 
+        if entry.coverage_build_id.as_ref().is_some_and(|id| !self.cached_builds.contains_key(id)) {
+            return Err("missing coverage build info");
+        }
+
         // only check artifact's existence if the file generated artifacts.
         // e.g. a solidity file consisting only of import statements (like interfaces that
         // re-export) do not create artifacts
@@ -1227,7 +1231,14 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         }
 
         self.cache.files.retain(|_, entry| {
-            // keep entries which already had no artifacts
+            // keep entries which already had no artifacts; a settings change recompiles them
+            // because their coverage map depends on the settings
+            if !dirty_profiles.is_empty() {
+                entry.coverage_build_id = None;
+                if entry.artifacts.is_empty() {
+                    entry.seen_by_compiler = false;
+                }
+            }
             if entry.artifacts.is_empty() {
                 return true;
             }
@@ -1784,6 +1795,12 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             }
         }
 
+        // A file whose coverage build info is gone was recompiled; a new build sets it again.
+        for entry in cache.files.values_mut() {
+            if entry.coverage_build_id.as_ref().is_some_and(|id| !cached_builds.contains_key(id)) {
+                entry.coverage_build_id = None;
+            }
+        }
         for build_info in written_build_infos {
             cache.builds.insert(build_info.id.clone());
             let context = &build_info.build_context;
