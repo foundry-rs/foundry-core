@@ -4,19 +4,6 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-#[cfg(windows)]
-use std::{
-    ffi::OsString,
-    io,
-    os::windows::ffi::{OsStrExt, OsStringExt},
-    path::Prefix,
-};
-#[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::INVALID_HANDLE_VALUE,
-    Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW},
-};
-
 #[derive(Clone, Debug)]
 pub struct SourceTreeEntry {
     pub path: PathBuf,
@@ -84,6 +71,8 @@ pub(crate) fn validate_contract_name(name: &str) -> Result<()> {
     if !matches!(components.next(), Some(Component::Normal(name)) if is_safe_component(name))
         || components.next().is_some()
         || name.starts_with('.')
+        // NTFS 8.3 aliases such as GIT~1 can resolve to hidden directories.
+        || (cfg!(windows) && name.contains('~'))
     {
         return Err(EtherscanError::InvalidContractName(name.to_owned()));
     }
@@ -99,19 +88,6 @@ fn validate_destination(dir: &Path, path: &Path) -> Result<()> {
         && components.next().is_some()
     {
         validate_contract_name(&root.to_string_lossy())?;
-        // NTFS may expose hidden directory names through non-hidden 8.3 aliases.
-        // Query only this entry: normalizing a full SMB path can require access to every ancestor.
-        #[cfg(windows)]
-        match windows_file_name(&dir.join(root)) {
-            Ok(name) => {
-                let name = name
-                    .to_str()
-                    .ok_or_else(|| EtherscanError::InvalidSourcePath(path.to_path_buf()))?;
-                validate_contract_name(name)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
     }
     // A cloned repository can contain a committed symlink such as Token -> .git.
     let mut current = dir.to_path_buf();
@@ -144,47 +120,6 @@ pub(crate) fn is_safe_source_path(path: &Path) -> bool {
 fn is_safe_component(name: &std::ffi::OsStr) -> bool {
     // Prevent alternate data streams; other filename restrictions belong to the filesystem.
     !cfg!(windows) || name.to_str().is_some_and(|name| !name.contains(':'))
-}
-
-/// Resolves an entry's long name without normalizing its ancestors.
-#[cfg(windows)]
-fn windows_file_name(path: &Path) -> io::Result<OsString> {
-    // FindFirstFileW accepts patterns; sources and the output directory must be literal paths.
-    if path.components().any(|component| {
-        matches!(component, Component::Normal(name) if name.encode_wide().any(|c| c == b'*' as u16 || c == b'?' as u16))
-    }) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "wildcards in source destination"));
-    }
-
-    // Like std::fs, retain ordinary Win32 name normalization for short paths and extend long paths.
-    // absolute is lexical and also rejects embedded NULs; it does not query filesystem ancestors.
-    let absolute = std::path::absolute(path)?;
-    let wide = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
-    let (prefix, skip) = if wide.len() + 1 >= 248 {
-        match absolute.components().next() {
-            Some(Component::Prefix(prefix)) => match prefix.kind() {
-                Prefix::Disk(_) => (r"\\?\", 0),
-                Prefix::UNC(..) => (r"\\?\UNC\", 2),
-                Prefix::DeviceNS(_) => (r"\\?\", 4),
-                _ => ("", 0),
-            },
-            _ => ("", 0),
-        }
-    } else {
-        ("", 0)
-    };
-    let wide =
-        prefix.encode_utf16().chain(wide.into_iter().skip(skip)).chain(Some(0)).collect::<Vec<_>>();
-    let mut data = WIN32_FIND_DATAW::default();
-    // SAFETY: wide is NUL-terminated and data is a valid output buffer.
-    let handle = unsafe { FindFirstFileW(wide.as_ptr(), &mut data) };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: this is a valid search handle, and all returned data has already been copied.
-    unsafe { FindClose(handle) };
-    let end = data.cFileName.iter().position(|&c| c == 0).unwrap_or(data.cFileName.len());
-    Ok(OsString::from_wide(&data.cFileName[..end]))
 }
 
 #[cfg(test)]
