@@ -80,16 +80,31 @@ impl FunctionCoverage {
 }
 
 /// An MC/DC decision of a function record.
+///
+/// A decision has either a runtime `id`, or the `expansions` that run it: the decisions of a
+/// modifier's expansions, which share one structure and vector order. The record of a modifier
+/// reports the vectors that any of its expansions executed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Decision {
     /// The runtime ID of the decision, as in its `COVERAGE` probes. Unique within a compilation.
-    pub id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
+    /// The runtime IDs of the decisions this one sums, in place of `id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expansions: Vec<u32>,
     /// The number of conditions.
     pub conditions: u32,
     /// The test vectors in test vector index order. A vector has one character per condition ID
     /// (`T`, `F`, or `-` for a condition that was not evaluated), followed by the outcome
     /// character.
     pub vectors: Vec<String>,
+}
+
+impl Decision {
+    /// The runtime IDs whose executed test vectors the decision reports.
+    pub fn runtime_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.id.into_iter().chain(self.expansions.iter().copied())
+    }
 }
 
 /// A tagged counter value, as in LLVM's coverage-mapping encoding.
@@ -432,7 +447,10 @@ mod tests {
                 [5, 0, 220, 30, 0],
                 [6, 0, 220, 10, 73, 14, 0, 1, -1]
             ],
-            "decisions": [{"id": 4, "conditions": 2, "vectors": ["TTT", "TFF", "F-F"]}]
+            "decisions": [
+                {"id": 4, "conditions": 2, "vectors": ["TTT", "TFF", "F-F"]},
+                {"expansions": [5, 6], "conditions": 2, "vectors": ["TTT", "TFF", "F-F"]}
+            ]
         }]
     }"#;
 
@@ -459,6 +477,9 @@ mod tests {
                 true_next: -1,
             }
         );
+        let decisions = &function.decisions;
+        assert_eq!(decisions[0].runtime_ids().collect::<Vec<_>>(), [4]);
+        assert_eq!(decisions[1].runtime_ids().collect::<Vec<_>>(), [5, 6]);
         let expected = serde_json::from_str::<serde_json::Value>(MAP).unwrap();
         assert_eq!(serde_json::to_value(&coverage).unwrap(), expected);
     }
