@@ -1,7 +1,7 @@
 //! Bytecode related types.
 
 use crate::{
-    FunctionDebugData, GeneratedSource, Offsets, serde_helpers,
+    CoverageAlias, FunctionDebugData, GeneratedSource, Offsets, serde_helpers,
     sourcemap::{self, SourceMap, SyntaxError},
 };
 use alloy_primitives::{Address, Bytes, hex};
@@ -32,6 +32,10 @@ pub struct Bytecode {
     /// If given, this is an unlinked object.
     #[serde(default)]
     pub link_references: BTreeMap<String, BTreeMap<String, Vec<Offsets>>>,
+    /// The coverage counters of an instrumented build that the compiler dropped in favor of
+    /// another counter of this object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_aliases: Vec<CoverageAlias>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,13 +49,22 @@ pub struct CompactBytecode {
     /// If given, this is an unlinked object.
     #[serde(default)]
     pub link_references: BTreeMap<String, BTreeMap<String, Vec<Offsets>>>,
+    /// The coverage counters of an instrumented build that the compiler dropped in favor of
+    /// another counter of this object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_aliases: Vec<CoverageAlias>,
 }
 
 impl CompactBytecode {
     /// Returns a new `CompactBytecode` object that contains nothing, as it's the case for
     /// interfaces and standalone solidity files that don't contain any contract definitions
     pub fn empty() -> Self {
-        Self { object: Default::default(), source_map: None, link_references: Default::default() }
+        Self {
+            object: Default::default(),
+            source_map: None,
+            link_references: Default::default(),
+            coverage_aliases: Default::default(),
+        }
     }
 
     /// Returns the parsed source map
@@ -102,6 +115,7 @@ impl From<Bytecode> for CompactBytecode {
             object: bcode.object,
             source_map: bcode.source_map,
             link_references: bcode.link_references,
+            coverage_aliases: bcode.coverage_aliases,
         }
     }
 }
@@ -112,6 +126,7 @@ impl From<CompactBytecode> for Bytecode {
             object: bcode.object,
             source_map: bcode.source_map,
             link_references: bcode.link_references,
+            coverage_aliases: bcode.coverage_aliases,
             function_debug_data: Default::default(),
             opcodes: Default::default(),
             generated_sources: Default::default(),
@@ -128,6 +143,7 @@ impl From<BytecodeObject> for Bytecode {
             source_map: Default::default(),
             generated_sources: Default::default(),
             link_references: Default::default(),
+            coverage_aliases: Default::default(),
         }
     }
 }
@@ -564,6 +580,23 @@ mod tests {
         let bytecode: ContractBytecode = contract.into();
         let bytecode = bytecode.unwrap();
         assert!(!bytecode.bytecode.object.is_unlinked());
+    }
+
+    #[test]
+    fn coverage_aliases_reach_the_artifact() {
+        let output = r#"{"object":"c2600100","coverageAliases":[[3,1],[7,2]]}"#;
+        let bytecode: Bytecode = serde_json::from_str(output).unwrap();
+        assert_eq!(bytecode.coverage_aliases, [[3, 1], [7, 2]]);
+
+        let compact = CompactBytecode::from(bytecode);
+        let json = serde_json::to_value(&compact).unwrap();
+        assert_eq!(json["coverageAliases"], serde_json::json!([[3, 1], [7, 2]]));
+        let artifact: CompactBytecode = serde_json::from_value(json).unwrap();
+        assert_eq!(Bytecode::from(artifact).coverage_aliases, [[3, 1], [7, 2]]);
+
+        let plain: Bytecode = serde_json::from_str(r#"{"object":"00"}"#).unwrap();
+        assert!(plain.coverage_aliases.is_empty());
+        assert!(serde_json::to_value(&plain).unwrap().get("coverageAliases").is_none());
     }
 
     #[test]

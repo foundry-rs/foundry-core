@@ -198,6 +198,7 @@ impl<'de> Deserialize<'de> for DirectDeployed {
                         object: fields.object,
                         source_map: fields.source_map,
                         link_references: fields.link_references,
+                        coverage_aliases: Default::default(),
                     }),
                     immutable_references: fields.immutable_references,
                 }))

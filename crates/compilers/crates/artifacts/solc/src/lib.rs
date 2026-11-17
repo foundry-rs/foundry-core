@@ -2053,6 +2053,7 @@ mod tests {
                 "lib2.sol".to_string(),
                 BTreeMap::from([("L".to_string(), vec![])]),
             )]),
+            coverage_aliases: vec![],
         };
 
         assert!(!code.link("lib2.sol", "Y", Address::random()));
