@@ -20,6 +20,11 @@ ignore = [
     # 0.64.0; 0.64.3 no longer depends on pin-utils.
     # TODO: Remove once alloy-signer-aws no longer pins aws-smithy-types.
     "RUSTSEC-2026-0441",
+    # https://rustsec.org/advisories/RUSTSEC-2026-0543 chrono is unmaintained.
+    # Only pulled in through the GCP KMS signer: alloy-signer-gcp 2.6.1 (latest) still requires
+    # gcloud-sdk ^0.29, which depends on chrono; gcloud-sdk >=0.33.3 uses jiff instead.
+    # TODO: Remove once alloy-signer-gcp depends on a gcloud-sdk release without chrono.
+    "RUSTSEC-2026-0543",
 ]
 
 # This section is considered when running `cargo deny check bans`.
