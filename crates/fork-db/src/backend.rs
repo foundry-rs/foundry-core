@@ -44,11 +44,14 @@ use std::{
 use tokio::select;
 use tower::Service;
 
-/// Keep state reads hash-addressed without relying on the bare-hash extension to EIP-1898.
-/// Moonbeam parses bare hashes as block numbers, while Rootstock rejects a boolean
-/// `requireCanonical`. An explicit hash object with the optional flag omitted supports both.
+/// A [`BlockId`] that serializes as an RPC block parameter for state reads.
+///
+/// A hash without a canonicality requirement is sent as `{"blockHash": "0x…"}` instead of
+/// alloy's bare hash string. Moonbeam parses bare hashes as block numbers, while Rootstock rejects
+/// a boolean `requireCanonical`; the object with the optional flag omitted supports both. Other
+/// selectors serialize unchanged.
 #[derive(Clone, Copy, Debug)]
-struct StateBlockId(BlockId);
+pub struct StateBlockId(pub BlockId);
 
 /// Largest number of new keys, accounts plus slots that were neither cached nor requested, in an
 /// access list for which the call is not simulated again: reading them directly takes no more
