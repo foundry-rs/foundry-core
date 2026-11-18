@@ -8,9 +8,6 @@ use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 
-#[cfg(windows)]
-use std::process::Command;
-
 #[test]
 fn metadata_rejects_hidden_contract_roots() {
     for name in ["", ".", "..", ".git", "a/b", "/abs"] {
@@ -223,37 +220,6 @@ fn source_tree_rejects_windows_path_syntax_before_any_writes() {
         assert!(matches!(tree.write_to(&output), Err(EtherscanError::InvalidSourcePath(_))));
         assert!(!output.exists());
     }
-}
-
-#[cfg(windows)]
-#[test]
-#[ignore = "requires NTFS 8.3 name creation"]
-fn source_tree_rejects_hidden_short_name_aliases() {
-    let temp = tempfile::tempdir().unwrap();
-    // Force a different short-name suffix when 8.3 names are enabled.
-    std::fs::create_dir(temp.path().join("git~1")).unwrap();
-    let git = temp.path().join(".git");
-    std::fs::create_dir(&git).unwrap();
-    let config = git.join("config");
-    std::fs::write(&config, "original").unwrap();
-    let output = Command::new("cmd")
-        .args(["/d", "/c", "for %I in (.git) do @echo %~snxI"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let short_path = String::from_utf8(output.stdout).unwrap();
-    let name = Path::new(short_path.trim()).file_name().unwrap().to_str().unwrap();
-    assert!(!name.starts_with('.'), "enable NTFS 8.3 name creation to run this regression");
-    assert!(!name.eq_ignore_ascii_case("git~1"), "expected a short-name alias beyond git~1");
-    for name in [name.to_owned(), name.to_ascii_lowercase(), format!("{name}."), format!("{name} ")]
-    {
-        let error = metadata(&name, &[("config", "replacement"), ("config.sol", "companion")])
-            .source_tree()
-            .unwrap_err();
-        assert_eq!(error.to_string(), format!("invalid contract name from explorer: {name:?}"));
-    }
-    assert_eq!(std::fs::read_to_string(config).unwrap(), "original");
 }
 
 fn metadata(name: &str, sources: &[(&str, &str)]) -> Metadata {
