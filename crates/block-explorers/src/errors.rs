@@ -1,6 +1,6 @@
 use alloy_chains::Chain;
 use alloy_primitives::Address;
-use std::env::VarError;
+use std::{env::VarError, path::PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EtherscanError {
@@ -58,6 +58,12 @@ pub enum EtherscanError {
     PageNotFound,
     #[error("Contract was not found: {0}")]
     ContractNotFound(Address),
+    #[error("invalid contract name from explorer: {0:?}")]
+    InvalidContractName(String),
+    #[error("invalid source path from explorer: {0:?}")]
+    InvalidSourcePath(PathBuf),
+    #[error("source path from explorer traverses a symlink: {0:?}")]
+    SourcePathSymlink(PathBuf),
 }
 
 /// etherscan/polyscan is protected by cloudflare, which can lead to html responses like `Sorry, you have been blocked` See also <https://community.cloudflare.com/t/sorry-you-have-been-blocked/110790>
