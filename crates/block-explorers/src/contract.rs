@@ -1,5 +1,5 @@
 use crate::{
-    Client, EtherscanError, Response, Result,
+    CacheLookup, Client, EtherscanError, Response, Result,
     serde_helpers::{deserialize_stringified_bool_or_u64, deserialize_stringified_u64},
     source_tree::{SourceTree, SourceTreeEntry},
     utils::{deserialize_address_opt, deserialize_source_code},
@@ -239,7 +239,11 @@ impl Metadata {
     }
 
     /// Maps this contract's sources to a [SourceTreeEntry] vector.
-    pub fn source_entries(&self) -> Vec<SourceTreeEntry> {
+    ///
+    /// Returns an error if the contract name cannot be used as a non-hidden directory or a
+    /// sanitized source path is empty or contains a Windows alternate data stream separator.
+    pub fn source_entries(&self) -> Result<Vec<SourceTreeEntry>> {
+        crate::source_tree::validate_contract_name(&self.contract_name)?;
         let root = Path::new(&self.contract_name);
         let mut entries = self
             .sources()
@@ -250,18 +254,23 @@ impl Metadata {
                 // for example, we want to ensure "/contracts/SimpleToken.sol" is mapped to
                 // `<root_dir>/contracts/SimpleToken.sol`.
                 let sanitized_path = crate::source_tree::sanitize_path(path);
+                if !crate::source_tree::is_safe_source_path(&sanitized_path) {
+                    return Err(EtherscanError::InvalidSourcePath(root.join(sanitized_path)));
+                }
                 let path = root.join(sanitized_path);
-                SourceTreeEntry { path, contents: entry.content }
+                Ok(SourceTreeEntry { path, contents: entry.content })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         // Sort by path so the tree order is stable across runs (sources come from a `HashMap`).
         entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-        entries
+        Ok(entries)
     }
 
     /// Returns the source tree of this contract's sources.
-    pub fn source_tree(&self) -> SourceTree {
-        SourceTree { entries: self.source_entries() }
+    ///
+    /// Returns the validation errors described by [`Self::source_entries`].
+    pub fn source_tree(&self) -> Result<SourceTree> {
+        Ok(SourceTree { entries: self.source_entries()? })
     }
 
     /// Returns the contract's compiler settings.
@@ -331,8 +340,14 @@ impl ContractMetadata {
     }
 
     /// Returns the combined [SourceTree] of all contracts.
-    pub fn source_tree(&self) -> SourceTree {
-        SourceTree { entries: self.items.iter().flat_map(|item| item.source_entries()).collect() }
+    ///
+    /// Returns an error if any contract's [`Metadata::source_entries`] fails validation.
+    pub fn source_tree(&self) -> Result<SourceTree> {
+        let mut entries = Vec::new();
+        for item in &self.items {
+            entries.extend(item.source_entries()?);
+        }
+        Ok(SourceTree { entries })
     }
 }
 
@@ -367,13 +382,12 @@ impl Client {
     pub async fn contract_abi(&self, address: Address) -> Result<JsonAbi> {
         // apply caching
         if let Some(ref cache) = self.cache {
-            // If this is None, then we have a cache miss
-            if let Some(src) = cache.get_abi(address) {
-                // If this is None, then the contract is not verified
-                return match src {
-                    Some(src) => Ok(src),
-                    None => Err(EtherscanError::ContractCodeNotVerified(address)),
-                };
+            match cache.get_abi(address) {
+                CacheLookup::Verified(abi) => return Ok(abi),
+                CacheLookup::Unverified => {
+                    return Err(EtherscanError::ContractCodeNotVerified(address));
+                }
+                CacheLookup::Miss => {}
             }
         }
         trace!(target: "etherscan", ?address, "GET contract abi");
@@ -437,13 +451,12 @@ impl Client {
     pub async fn contract_source_code(&self, address: Address) -> Result<ContractMetadata> {
         // apply caching
         if let Some(ref cache) = self.cache {
-            // If this is None, then we have a cache miss
-            if let Some(src) = cache.get_source(address) {
-                // If this is None, then the contract is not verified
-                return match src {
-                    Some(src) => Ok(src),
-                    None => Err(EtherscanError::ContractCodeNotVerified(address)),
-                };
+            match cache.get_source(address) {
+                CacheLookup::Verified(metadata) => return Ok(metadata),
+                CacheLookup::Unverified => {
+                    return Err(EtherscanError::ContractCodeNotVerified(address));
+                }
+                CacheLookup::Miss => {}
             }
         }
 

@@ -11,16 +11,26 @@ static SOLC_BIN_LIST_URL: &str = "https://binaries.soliditylang.org/bin/list.txt
 /// e.g. `0.8.13` -> `0.8.13+commit.abaa5c0e`
 pub async fn lookup_compiler_version(version: &Version) -> Result<Version> {
     let response = reqwest::get(SOLC_BIN_LIST_URL).await?.text().await?;
+    find_compiler_version(&response, version)
+}
+
+/// Finds the full SemVer of `version` in the `list.txt` of solc builds.
+///
+/// The list is fetched over the network, so an entry that is not valid SemVer is reported as an
+/// error instead of panicking.
+fn find_compiler_version(list: &str, version: &Version) -> Result<Version> {
     // Ignore extra metadata (`pre` or `build`)
     let version = format!("{}.{}.{}", version.major, version.minor, version.patch);
     let prefix = format!("soljson-v{version}+");
-    let v = response
+    let v = list
         .lines()
         .find(|l| l.starts_with(&prefix))
         .map(|l| l.trim_start_matches("soljson-v").trim_end_matches(".js"))
         .ok_or_else(|| EtherscanError::MissingSolcVersion(version))?;
 
-    Ok(v.parse().expect("failed to parse semver"))
+    v.parse().map_err(|err| {
+        EtherscanError::Unknown(format!("invalid solc version {v:?} in {SOLC_BIN_LIST_URL}: {err}"))
+    })
 }
 
 /// Return None if empty, otherwise parse as [Address].
@@ -207,20 +217,19 @@ where
         if amount_str == "-" {
             Ok(ParseUnits::I256(I256::ZERO))
         } else {
-            let _fi = U256::from(10_i64);
-            let mut n = I256::from_str(&amount_str)?;
-            n *= I256::from_raw(U256::from(10))
+            let n = I256::from_str(&amount_str)?;
+            let multiplier = I256::from_raw(U256::from(10))
                 .checked_pow(U256::from(exponent) - U256::from(dec_len))
                 .ok_or(ConversionError::ParseOverflow)?;
-            Ok(ParseUnits::I256(n))
+            Ok(ParseUnits::I256(n.checked_mul(multiplier).ok_or(ConversionError::ParseOverflow)?))
         }
     } else {
-        let mut a_uint = U256::from_str(&amount_str)
+        let a_uint = U256::from_str(&amount_str)
             .map_err(|e| ConversionError::FromDecStrError(e.to_string()))?;
-        a_uint *= U256::from(10)
+        let multiplier = U256::from(10)
             .checked_pow(U256::from(exponent - dec_len))
             .ok_or(ConversionError::ParseOverflow)?;
-        Ok(ParseUnits::U256(a_uint))
+        Ok(ParseUnits::U256(a_uint.checked_mul(multiplier).ok_or(ConversionError::ParseOverflow)?))
     }
 }
 
@@ -228,6 +237,30 @@ where
 mod tests {
     use super::*;
     use crate::contract::SourceCodeLanguage;
+
+    #[test]
+    fn finds_compiler_version_in_list() {
+        let list = "soljson-v0.8.12+commit.f00d7308.js\nsoljson-v0.8.13+commit.abaa5c0e.js\n";
+        let v = find_compiler_version(list, &Version::new(0, 8, 13)).unwrap();
+        assert_eq!(v, "0.8.13+commit.abaa5c0e".parse::<Version>().unwrap());
+    }
+
+    #[test]
+    fn missing_compiler_version_in_list() {
+        let list = "soljson-v0.8.12+commit.f00d7308.js\n";
+        let err = find_compiler_version(list, &Version::new(0, 8, 13)).unwrap_err();
+        assert!(matches!(err, EtherscanError::MissingSolcVersion(v) if v == "0.8.13"));
+    }
+
+    #[test]
+    fn malformed_compiler_version_in_list_is_an_error() {
+        let list = "soljson-v0.8.13+commit.abaa5c0e!.js\n";
+        let err = find_compiler_version(list, &Version::new(0, 8, 13)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Unknown error: invalid solc version \"0.8.13+commit.abaa5c0e!\" in https://binaries.soliditylang.org/bin/list.txt: unexpected character '!' after build metadata"
+        );
+    }
 
     #[test]
     fn can_deserialize_address_opt() {
@@ -289,5 +322,25 @@ mod tests {
         let json = r#"{"source_code": "source code text"}"#;
         let de: Test = serde_json::from_str(json).unwrap();
         assert_eq!(de.source_code.source_code(), src);
+    }
+
+    #[test]
+    fn parse_units_rejects_overflow() {
+        // 2^256 / 10^18 rounded up: scaling by 1e18 no longer fits in a U256.
+        let too_big = "115792089237316195423570985008687907853269984665640564039458";
+        assert!(matches!(parse_units(too_big, "ether"), Err(ConversionError::ParseOverflow)));
+        assert!(matches!(
+            parse_units(format!("-{too_big}"), "ether"),
+            Err(ConversionError::ParseOverflow)
+        ));
+        assert!(matches!(
+            parse_units("1.5", "ether"),
+            Ok(ParseUnits::U256(v)) if v == U256::from(1_500_000_000_000_000_000u128)
+        ));
+        // The largest whole-ether amount still fits.
+        let max_ether = (U256::MAX / U256::from(10).pow(U256::from(18))).to_string();
+        assert!(parse_units(&max_ether, "ether").is_ok());
+        let min_ether = format!("-{}", (I256::MAX / I256::exp10(18)));
+        assert!(parse_units(&min_ether, "ether").is_ok());
     }
 }

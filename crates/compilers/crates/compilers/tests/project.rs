@@ -4,13 +4,13 @@ use alloy_primitives::{Address, Bytes};
 use foundry_compilers::{
     Artifact, ConfigurableArtifacts, ExtraOutputFiles, ExtraOutputValues, Graph, Project,
     ProjectBuilder, ProjectCompileOutput, ProjectPathsConfig, RestrictionsWithVersion,
-    TestFileFilter,
-    buildinfo::BuildInfo,
+    TestFileFilter, Updates, apply_updates,
+    buildinfo::{BuildInfo, SourceEdit},
     cache::{CompilerCache, SOLIDITY_FILES_CACHE_FILENAME},
     compilers::{
-        CompilerOutput,
+        Compiler, CompilerInput, CompilerOutput,
         multi::{MultiCompiler, MultiCompilerLanguage, MultiCompilerSettings},
-        solc::{Solc, SolcCompiler, SolcLanguage},
+        solc::{Solc, SolcCompiler, SolcLanguage, SolcVersionedInput},
         vyper::{Vyper, VyperLanguage, VyperSettings},
     },
     flatten::Flattener,
@@ -24,7 +24,7 @@ use foundry_compilers::{
 use foundry_compilers_artifacts::{
     BytecodeHash, Contract, DevDoc, Error, ErrorDoc, EventDoc, EvmVersion, Libraries, MethodDoc,
     ModelCheckerEngine::CHC,
-    ModelCheckerSettings, Settings, Severity, SolcInput, Source, UserDoc, UserDocNotice,
+    ModelCheckerSettings, Settings, Severity, SolcInput, Source, Sources, UserDoc, UserDocNotice,
     output_selection::{
         BytecodeOutputSelection, ContractOutputSelection, DeployedBytecodeOutputSelection,
         OutputSelection,
@@ -4289,6 +4289,83 @@ fn can_detect_invalid_version() {
 }
 
 #[test]
+fn solar_resolves_mixed_exact_pragmas() {
+    let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
+    tmp.add_source("A", "pragma solidity =0.8.19; contract A {}").unwrap();
+    tmp.add_source("B", "pragma solidity =0.8.28; contract B {}").unwrap();
+
+    let solar = Version::parse("0.8.38+commit.3a70399.solar.0.2.0").unwrap();
+    tmp.project_mut().compiler.solc =
+        Some(SolcCompiler::Specific(Solc::new_with_version("/nonexistent/solar", solar)));
+    let graph = Graph::<MultiCompilerParser>::resolve(tmp.paths()).unwrap();
+    let resolved = graph.into_sources_by_version(tmp.project()).unwrap();
+    let mut versions = resolved
+        .sources
+        .values()
+        .flatten()
+        .map(|(version, ..)| version.to_string())
+        .collect::<Vec<_>>();
+    versions.sort();
+    assert_eq!(
+        versions,
+        ["0.8.19+commit.3a70399.solar.0.2.0", "0.8.28+commit.3a70399.solar.0.2.0"]
+    );
+
+    // A solc binary still serves only its own version.
+    tmp.project_mut().compiler.solc = Some(SolcCompiler::Specific(Solc::new_with_version(
+        "/nonexistent/solc",
+        Version::new(0, 8, 38),
+    )));
+    let graph = Graph::<MultiCompilerParser>::resolve(tmp.paths()).unwrap();
+    assert!(graph.into_sources_by_version(tmp.project()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn switching_from_solc_to_solar_recompiles() {
+    let solc = Solc::find_or_install(&Version::new(0, 8, 19)).unwrap();
+    let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
+    tmp.add_source("A", "pragma solidity =0.8.19; contract A {}").unwrap();
+    tmp.project_mut().compiler.solc = Some(SolcCompiler::Specific(solc.clone()));
+    tmp.compile().unwrap().assert_success();
+
+    // Stands in for Solar: it reports a Solar version and compiles with the same solc.
+    let solar = tmp.root().join("solar");
+    fs::write(
+        &solar,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n*--version*) echo 'Version: 0.8.37+commit.3a70399.solar.0.2.0';;\n*) exec '{}' \"$@\";;\nesac\n",
+            solc.solc.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&solar, fs::Permissions::from_mode(0o755)).unwrap();
+    tmp.project_mut().compiler.solc = Some(SolcCompiler::Specific(Solc::new(&solar).unwrap()));
+    let compiled = tmp.compile().unwrap();
+    compiled.assert_success();
+    assert!(!compiled.is_unchanged());
+}
+
+#[cfg(unix)]
+#[test]
+fn solar_reports_solc_version_under_any_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Stands in for Solar installed as `solc`: like Solar, it prints its native version unless
+    // `SOLC_WRAPPER=1` is set.
+    let solar = tmp.path().join("solc");
+    fs::write(
+        &solar,
+        "#!/bin/sh\nif [ \"$SOLC_WRAPPER\" = 1 ]; then\necho 'solar the Solidity compiler'\necho 'Version: 0.8.37+commit.82e7755.solar.0.2.0'\nelse\necho 'solar Version: 0.2.0'\necho 'Build Profile: dist'\nfi\n",
+    )
+    .unwrap();
+    fs::set_permissions(&solar, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        Solc::new(&solar).unwrap().version,
+        Version::parse("0.8.37+commit.82e7755.solar.0.2.0").unwrap()
+    );
+}
+
+#[test]
 fn test_severity_warnings() {
     let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
     // also treat warnings as error
@@ -6468,6 +6545,106 @@ fn preprocessor_version_invalidates_cache() {
     assert!(compile(1).is_unchanged());
     assert!(!compile(2).is_unchanged());
     assert!(compile(2).is_unchanged());
+
+    project.add_source("Added", "pragma solidity ^0.8.0; contract Added {}").unwrap();
+    let output = compile(2);
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 2);
+    assert!(compile(2).is_unchanged());
+}
+
+#[test]
+fn build_context_maps_preprocessed_offsets() {
+    const SOURCE: &str = "pragma solidity ^0.8.0;\ncontract First { function f() public pure returns (uint) { return 1; } }\ncontract Second {}\n";
+
+    #[derive(Debug)]
+    struct EditingPreprocessor;
+
+    impl Preprocessor<MultiCompiler> for EditingPreprocessor {
+        fn preprocess(
+            &self,
+            _: &MultiCompiler,
+            _: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn preprocess_with_dependencies(
+            &self,
+            _: &MultiCompiler,
+            input: &mut MultiCompilerInput,
+            _: &ProjectPathsConfig<MultiCompilerLanguage>,
+            _: &mut HashSet<PathBuf>,
+            state: &mut PreprocessorState,
+            _: &[PathBuf],
+        ) -> Result<()> {
+            let MultiCompilerInput::Solc(input) = input else { return Ok(()) };
+            let start = SOURCE.find("1;").unwrap();
+            let updates = Updates::from([(
+                PathBuf::from("test/Edited.sol"),
+                BTreeSet::from([
+                    (start, start + 1, "1 + 2 + 3".to_string()),
+                    (SOURCE.len(), SOURCE.len(), "contract Appended {}\n".to_string()),
+                ]),
+            )]);
+            apply_updates(&mut input.input.sources, updates.clone());
+            state.record_source_updates(&updates);
+            Ok(())
+        }
+    }
+
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.project_mut().update_output_selection(|selection| {
+        selection
+            .0
+            .entry("*".to_string())
+            .or_default()
+            .insert(String::new(), vec!["ast".to_string()]);
+    });
+    let path = project.add_test("Edited", SOURCE).unwrap();
+    let compile = || {
+        let output = ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(EditingPreprocessor)
+            .compile()
+            .unwrap();
+        output.assert_success();
+        output
+    };
+    let edits = |output: &ProjectCompileOutput<MultiCompiler>| {
+        let (_, build) = output.builds().next().unwrap();
+        let (id, _) = build.source_id_to_path.iter().find(|(_, p)| **p == path).unwrap();
+        build.source_edits[id].clone()
+    };
+
+    let compiled = compile();
+    let start = SOURCE.find("1;").unwrap();
+    let expected = vec![
+        SourceEdit { start, end: start + 1, len: 9 },
+        SourceEdit { start: SOURCE.len(), end: SOURCE.len(), len: 21 },
+    ];
+    assert_eq!(edits(&compiled), expected);
+
+    // Solc reports locations in the edited source.
+    let ast = compiled.find_first("Second").unwrap().ast.as_ref().unwrap();
+    let second = ast
+        .nodes
+        .iter()
+        .find(|node| node.other.get("name").is_some_and(|name| name == "Second"))
+        .unwrap();
+    let compiled_start = second.src.start;
+    assert_eq!(compiled_start, SOURCE.find("contract Second").unwrap() + 8);
+    assert_eq!(
+        SourceEdit::original_offset(&expected, compiled_start),
+        SOURCE.find("contract Second").unwrap()
+    );
+
+    // Cached builds are read back from the build info.
+    let cached = compile();
+    assert!(cached.is_unchanged());
+    assert_eq!(edits(&cached), expected);
 }
 
 #[test]
@@ -7339,24 +7516,15 @@ contract Target {{
             .unwrap();
         let original = project.project().compile_file(&target).unwrap();
         original.assert_success();
-        let original_code = original
-            .find_first("Target")
-            .unwrap()
-            .get_deployed_bytecode_bytes()
-            .unwrap()
-            .into_owned();
+        let original_code =
+            original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
         let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
         let path = project.add_source("Flattened", flattened).unwrap();
         let compiled = project.project().compile_file(path).unwrap();
         compiled.assert_success();
         assert_eq!(
             original_code,
-            compiled
-                .find_first("Target")
-                .unwrap()
-                .get_deployed_bytecode_bytes()
-                .unwrap()
-                .into_owned(),
+            compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap(),
             "{declaration}"
         );
     }
@@ -7451,24 +7619,15 @@ contract Target {{
             .unwrap();
         let original = project.project().compile_file(&target).unwrap();
         original.assert_success();
-        let original_code = original
-            .find_first("Target")
-            .unwrap()
-            .get_deployed_bytecode_bytes()
-            .unwrap()
-            .into_owned();
+        let original_code =
+            original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
         let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
         let path = project.add_source("Flattened", flattened).unwrap();
         let compiled = project.project().compile_file(path).unwrap();
         compiled.assert_success();
         assert_eq!(
             original_code,
-            compiled
-                .find_first("Target")
-                .unwrap()
-                .get_deployed_bytecode_bytes()
-                .unwrap()
-                .into_owned()
+            compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap()
         );
     }
 }
@@ -7499,14 +7658,14 @@ contract Target {
     let original = project.project().compile_file(&target).unwrap();
     original.assert_success();
     let original_code =
-        original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap().into_owned();
+        original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
     let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
     let path = project.add_source("Flattened", flattened).unwrap();
     let compiled = project.project().compile_file(path).unwrap();
     compiled.assert_success();
     assert_eq!(
         original_code,
-        compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap().into_owned()
+        compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap()
     );
 }
 
@@ -7555,24 +7714,15 @@ contract Target {{
             .unwrap();
         let original = project.project().compile_file(&target).unwrap();
         original.assert_success();
-        let original_code = original
-            .find_first("Target")
-            .unwrap()
-            .get_deployed_bytecode_bytes()
-            .unwrap()
-            .into_owned();
+        let original_code =
+            original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
         let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
         let path = project.add_source("Flattened", flattened).unwrap();
         let compiled = project.project().compile_file(path).unwrap();
         compiled.assert_success();
         assert_eq!(
             original_code,
-            compiled
-                .find_first("Target")
-                .unwrap()
-                .get_deployed_bytecode_bytes()
-                .unwrap()
-                .into_owned()
+            compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap()
         );
     }
 }
@@ -7611,24 +7761,15 @@ contract Target {{
             .unwrap();
         let original = project.project().compile_file(&target).unwrap();
         original.assert_success();
-        let original_code = original
-            .find_first("Target")
-            .unwrap()
-            .get_deployed_bytecode_bytes()
-            .unwrap()
-            .into_owned();
+        let original_code =
+            original.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap();
         let flattened = Flattener::new(project.project().clone(), &target).unwrap().flatten();
         let path = project.add_source("Flattened", flattened).unwrap();
         let compiled = project.project().compile_file(path).unwrap();
         compiled.assert_success();
         assert_eq!(
             original_code,
-            compiled
-                .find_first("Target")
-                .unwrap()
-                .get_deployed_bytecode_bytes()
-                .unwrap()
-                .into_owned(),
+            compiled.find_first("Target").unwrap().get_deployed_bytecode_bytes().unwrap(),
             "{name}"
         );
     }
@@ -7786,4 +7927,329 @@ contract Counter {
     let compiled = project.compile().unwrap();
     assert!(compiled.is_unchanged());
     assert_eq!(compiled.find_first("Counter").unwrap(), &artifact);
+}
+
+#[derive(Debug)]
+struct ContextSensitivePreprocessor;
+
+impl Preprocessor<MultiCompiler> for ContextSensitivePreprocessor {
+    fn preprocess(
+        &self,
+        _compiler: &MultiCompiler,
+        _input: &mut MultiCompilerInput,
+        _paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+        _mocks: &mut HashSet<PathBuf>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn preprocess_with_dependencies(
+        &self,
+        _compiler: &MultiCompiler,
+        input: &mut MultiCompilerInput,
+        _paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+        _mocks: &mut HashSet<PathBuf>,
+        _state: &mut PreprocessorState,
+        source_units: &[PathBuf],
+    ) -> Result<()> {
+        if let MultiCompilerInput::Solc(input) = input
+            && source_units.iter().any(|path| path == Path::new("src/Added.sol"))
+            && let Some(source) = input.input.sources.get_mut(Path::new("test/Sensitive.t.sol"))
+        {
+            source.content = source.content.replace("return 1;", "return 2;").into();
+        }
+        Ok(())
+    }
+
+    fn is_source_context_sensitive(
+        &self,
+        source: &Path,
+        paths: &ProjectPathsConfig<MultiCompilerLanguage>,
+    ) -> bool {
+        paths.is_test_or_script(source)
+    }
+
+    fn is_source_context_change_relevant(
+        &self,
+        previous: &BTreeSet<PathBuf>,
+        current: &BTreeSet<PathBuf>,
+    ) -> bool {
+        previous.symmetric_difference(current).any(|path| path == Path::new("src/Added.sol"))
+    }
+}
+
+#[test]
+fn preprocessor_context_growth_preserves_insensitive_sources() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    for i in 0..5 {
+        project
+            .add_source(&format!("C{i}"), format!("pragma solidity ^0.8.0; contract C{i} {{}}"))
+            .unwrap();
+    }
+    let compile = || {
+        ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(ContextSensitivePreprocessor)
+            .compile()
+            .unwrap()
+    };
+    let output = compile();
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 5);
+
+    project.add_test("Sensitive.t.sol", "pragma solidity ^0.8.0; contract Sensitive { function value() public pure returns (uint) { return 1; } }").unwrap();
+    let output = compile();
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 1);
+    assert!(output.compiled_artifacts().find_first("Sensitive").is_some());
+    assert!(compile().is_unchanged());
+
+    // Source-unit changes that cannot alter preprocessing keep context-sensitive artifacts.
+    let irrelevant =
+        project.add_source("Irrelevant", "pragma solidity ^0.8.0; contract Irrelevant {}").unwrap();
+    let output = compile();
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 1);
+    assert!(output.compiled_artifacts().find_first("Irrelevant").is_some());
+    fs::remove_file(irrelevant).unwrap();
+    assert!(compile().is_unchanged());
+}
+
+#[test]
+fn preprocessor_context_growth_invalidates_out_of_scope_consumers() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Unrelated", "pragma solidity ^0.8.0; contract Unrelated {}").unwrap();
+    project.add_test("Sensitive.t.sol", "pragma solidity ^0.8.0; contract Sensitive { function value() public pure returns (uint) { return 1; } }").unwrap();
+    project.add_source("Consumer", "pragma solidity ^0.8.0; import '../test/Sensitive.t.sol'; contract Consumer is Sensitive {}").unwrap();
+    let compile = || {
+        ProjectCompiler::new(project.project())
+            .unwrap()
+            .with_preprocessor(ContextSensitivePreprocessor)
+            .compile()
+            .unwrap()
+    };
+    let before = compile();
+    before.assert_success();
+    let added = project.add_source("Added", "pragma solidity ^0.8.0; contract Added {}").unwrap();
+    let output =
+        ProjectCompiler::with_sources(project.project(), Source::read_all([added]).unwrap())
+            .unwrap()
+            .with_preprocessor(ContextSensitivePreprocessor)
+            .compile()
+            .unwrap();
+    output.assert_success();
+    assert_eq!(output.compiled_artifacts().artifact_files().count(), 1);
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    assert_eq!(
+        cache.files.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([PathBuf::from("src/Added.sol"), PathBuf::from("src/Unrelated.sol")])
+    );
+
+    let after = compile();
+    after.assert_success();
+    assert_eq!(after.compiled_artifacts().artifact_files().count(), 2);
+    assert_ne!(
+        before.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap(),
+        after.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap()
+    );
+    assert!(compile().is_unchanged());
+
+    project.project_mut().cached = false;
+    let clean = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ContextSensitivePreprocessor)
+        .compile()
+        .unwrap();
+    clean.assert_success();
+    assert_eq!(
+        after.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap(),
+        clean.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap()
+    );
+
+    project.project_mut().cached = true;
+    fs::remove_file(project.paths().sources.join("Added.sol")).unwrap();
+    let removed = ProjectCompiler::new(project.project())
+        .unwrap()
+        .with_preprocessor(ContextSensitivePreprocessor)
+        .compile()
+        .unwrap();
+    removed.assert_success();
+    assert_eq!(removed.compiled_artifacts().artifact_files().count(), 2);
+    assert_eq!(
+        before.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap(),
+        removed.find_first("Consumer").unwrap().get_deployed_bytecode_bytes().unwrap()
+    );
+}
+
+#[test]
+fn can_compile_split_output_selection() {
+    assert_split_output_selection("^0.8.10");
+}
+
+// Solc 0.4 reports empty contracts for the files that a part does not select.
+#[test]
+fn can_compile_split_output_selection_old_solc() {
+    assert_split_output_selection("=0.4.26");
+}
+
+fn assert_split_output_selection(pragma: &str) {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    // The default settings select the AST, which keeps the input whole.
+    project.project_mut().settings.solc.output_selection =
+        OutputSelection::default_output_selection();
+    // Every part analyzes this library again, so its warning tests the diagnostic merge.
+    project
+        .add_source(
+            "Shared",
+            format!(
+                r"
+    // SPDX-License-Identifier: MIT
+    pragma solidity {pragma};
+    library Shared {{
+        function id(uint256 x) internal pure returns (uint256) {{
+            uint256 unused;
+            return x;
+        }}
+    }}
+   "
+            ),
+        )
+        .unwrap();
+    for i in 0..2 * OutputSelection::MIN_FILES_PER_PART {
+        project
+            .add_source(
+                &format!("C{i}"),
+                format!(
+                    r#"
+    // SPDX-License-Identifier: MIT
+    pragma solidity {pragma};
+    import "./Shared.sol";
+    contract C{i} {{
+        function f() public pure returns (uint256) {{
+            return Shared.id({i});
+        }}
+    }}
+   "#
+                ),
+            )
+            .unwrap();
+    }
+
+    project.project_mut().set_solc_jobs(1);
+    let whole = project.compile().unwrap();
+    whole.assert_success();
+    let artifacts = |output: &ProjectCompileOutput| {
+        output
+            .artifacts()
+            .map(|(name, artifact)| (name, serde_json::to_string(artifact).unwrap()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let whole_artifacts = artifacts(&whole);
+    assert_eq!(whole_artifacts.len(), 2 * OutputSelection::MIN_FILES_PER_PART + 1);
+    assert!(whole.artifacts().all(|(_, artifact)| artifact.get_bytecode_bytes().is_some()));
+    let whole_errors = whole.output().errors.clone();
+    assert_eq!(whole_errors.len(), 1, "{whole_errors:?}");
+
+    fs::remove_dir_all(&project.paths().artifacts).unwrap();
+    fs::remove_file(project.cache_path()).unwrap();
+    project.project_mut().set_solc_jobs(4);
+    let parts = project.compile().unwrap();
+    parts.assert_success();
+    assert!(!parts.is_unchanged());
+    assert_eq!(artifacts(&parts), whole_artifacts);
+    assert_eq!(parts.output().errors, whole_errors);
+}
+
+// Solc loads imports that the input does not list from disk, and a `*` file key selects their
+// outputs too.
+#[test]
+fn can_compile_split_output_selection_with_unlisted_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = canonicalize(dir.path()).unwrap();
+    fs::write(
+        root.join("Dependency.sol"),
+        "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\ncontract Dependency {}\n",
+    )
+    .unwrap();
+    let sources = (0..2 * OutputSelection::MIN_FILES_PER_PART)
+        .map(|i| {
+            let source = format!(
+                "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\nimport \"Dependency.sol\";\ncontract C{i} is Dependency {{}}\n"
+            );
+            (PathBuf::from(format!("C{i}.sol")), Source::new(source))
+        })
+        .collect();
+    let settings = Settings {
+        output_selection: OutputSelection::common_output_selection(["abi".to_string()]),
+        ..Default::default()
+    };
+    let mut settings = SolcSettings { settings, ..Default::default() };
+    settings.cli_settings.base_path = Some(root.clone());
+    settings.cli_settings.allow_paths = BTreeSet::from([root]);
+    let solc = SolcCompiler::Specific(Solc::find_or_install(&Version::new(0, 8, 28)).unwrap());
+    let input = SolcVersionedInput::build(
+        sources,
+        settings,
+        SolcLanguage::Solidity,
+        Version::new(0, 8, 28),
+    );
+
+    let whole = solc.compile(&input).unwrap();
+    assert!(whole.errors.is_empty(), "{:?}", whole.errors);
+    assert_eq!(whole.contracts.len(), 2 * OutputSelection::MIN_FILES_PER_PART + 1);
+    let parts = solc.compile_with_jobs(&input, 2).unwrap();
+    assert_eq!(parts.errors, whole.errors);
+    assert_eq!(parts.sources, whole.sources);
+    assert_eq!(parts.contracts, whole.contracts);
+}
+
+// solc reports error 2449 ("Definition of base has to precede definition of derived contract")
+// for an import cycle when the output selection covers the derived contract's file but not the
+// base contract's file. The split must not turn a clean whole input into a failed compile.
+#[test]
+fn can_compile_split_output_selection_with_import_cycle() {
+    // Padding makes these two the heaviest files, so the partition puts them in different parts.
+    let padding = "/".repeat(4096);
+    let mut sources = Sources::from([
+        (
+            PathBuf::from("A.sol"),
+            Source::new(format!(
+                "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\nimport {{B}} from \"./B.sol\";\ninterface A is B {{ function a() external; }}\n// {padding}\n"
+            )),
+        ),
+        (
+            PathBuf::from("B.sol"),
+            Source::new(format!(
+                "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\nimport {{A}} from \"./A.sol\";\ninterface B {{ function b() external view returns (A); }}\n// {padding}/\n"
+            )),
+        ),
+    ]);
+    for i in 0..2 * OutputSelection::MIN_FILES_PER_PART {
+        let source = format!(
+            "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.10;\nimport {{A}} from \"./A.sol\";\ncontract C{i} {{ A public a; }}\n"
+        );
+        sources.insert(PathBuf::from(format!("C{i}.sol")), Source::new(source));
+    }
+    let settings = Settings {
+        output_selection: OutputSelection::common_output_selection(["abi".to_string()]),
+        ..Default::default()
+    };
+    let settings = SolcSettings { settings, ..Default::default() };
+    let solc = SolcCompiler::Specific(Solc::find_or_install(&Version::new(0, 8, 28)).unwrap());
+    let input = SolcVersionedInput::build(
+        sources,
+        settings,
+        SolcLanguage::Solidity,
+        Version::new(0, 8, 28),
+    );
+
+    let whole = solc.compile(&input).unwrap();
+    assert!(whole.errors.is_empty(), "{:?}", whole.errors);
+    assert_eq!(whole.contracts.len(), 2 * OutputSelection::MIN_FILES_PER_PART + 2);
+    let parts = solc.compile_with_jobs(&input, 2).unwrap();
+    assert_eq!(parts.errors, whole.errors);
+    assert_eq!(parts.sources, whole.sources);
+    assert_eq!(parts.contracts, whole.contracts);
 }

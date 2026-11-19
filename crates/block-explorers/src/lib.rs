@@ -401,6 +401,29 @@ struct CacheEnvelope<T> {
     data: T,
 }
 
+/// What the [`Cache`] knows about a contract's ABI or source code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CacheLookup<T> {
+    /// Nothing usable is cached (no entry, an unreadable one, or an expired one): ask the
+    /// explorer.
+    Miss,
+    /// The explorer reported the contract as not verified.
+    Unverified,
+    /// The contract is verified and this is its cached data.
+    Verified(T),
+}
+
+impl<T> From<Option<Option<T>>> for CacheLookup<T> {
+    /// Maps the on-disk representation, where `null` data marks an unverified contract.
+    fn from(entry: Option<Option<T>>) -> Self {
+        match entry {
+            None => Self::Miss,
+            Some(None) => Self::Unverified,
+            Some(Some(data)) => Self::Verified(data),
+        }
+    }
+}
+
 /// Simple cache for Etherscan requests.
 ///
 /// The cache is stored at the defined `root` with the following structure:
@@ -424,16 +447,16 @@ impl Cache {
         Self { root, ttl }
     }
 
-    fn get_abi(&self, address: Address) -> Option<Option<JsonAbi>> {
-        self.get("abi", address)
+    fn get_abi(&self, address: Address) -> CacheLookup<JsonAbi> {
+        self.get::<Option<JsonAbi>>("abi", address).into()
     }
 
     fn set_abi(&self, address: Address, abi: Option<&JsonAbi>) {
         self.set("abi", address, abi)
     }
 
-    fn get_source(&self, address: Address) -> Option<Option<ContractMetadata>> {
-        self.get("sources", address)
+    fn get_source(&self, address: Address) -> CacheLookup<ContractMetadata> {
+        self.get::<Option<ContractMetadata>>("sources", address).into()
     }
 
     fn set_source(&self, address: Address, source: Option<&ContractMetadata>) {
@@ -453,12 +476,13 @@ impl Cache {
             let _ = serde_json::to_writer(
                 &mut writer,
                 &CacheEnvelope {
+                    // A TTL too large to add to the current time (e.g. `Duration::MAX`) means the
+                    // item never expires, so saturate instead of panicking.
                     expiry: SystemTime::now()
-                        .checked_add(self.ttl)
-                        .expect("cache ttl overflowed")
                         .duration_since(UNIX_EPOCH)
                         .expect("system time is before unix epoch")
-                        .as_secs(),
+                        .checked_add(self.ttl)
+                        .map_or(u64::MAX, |expiry| expiry.as_secs()),
                     data: item,
                 },
             );
@@ -562,6 +586,38 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256};
     use std::process::Command;
+
+    #[test]
+    fn cache_with_max_ttl_does_not_panic() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::new(root.path().to_path_buf(), Duration::MAX);
+        let address = Address::repeat_byte(0x11);
+        let abi = JsonAbi::default();
+
+        cache.set_abi(address, Some(&abi));
+
+        assert_eq!(cache.get_abi(address), CacheLookup::Verified(abi));
+    }
+
+    #[test]
+    fn cache_lookup_distinguishes_miss_unverified_and_verified() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), Duration::from_secs(60));
+        let unverified = Address::with_last_byte(1);
+        let verified = Address::with_last_byte(2);
+        let abi = JsonAbi::default();
+
+        assert_eq!(cache.get_abi(unverified), CacheLookup::Miss);
+
+        cache.set_abi(unverified, None);
+        cache.set_abi(verified, Some(&abi));
+        assert_eq!(cache.get_abi(unverified), CacheLookup::Unverified);
+        assert_eq!(cache.get_abi(verified), CacheLookup::Verified(abi));
+
+        let expired = Cache::new(dir.path().to_path_buf(), Duration::ZERO);
+        expired.set_abi(verified, None);
+        assert_eq!(expired.get_abi(verified), CacheLookup::Miss);
+    }
 
     // <https://github.com/foundry-rs/foundry/issues/4406>
     #[test]

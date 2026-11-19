@@ -5,9 +5,10 @@ const XCODE_HINT: &str = "the touch-id feature requires the Xcode command line t
 /// Oldest macOS release supported by the CryptoKit APIs used by the Swift shim.
 const MIN_MACOS: (u32, u32) = (11, 0);
 
-/// Oldest Swift toolchain the shim is known to link with, kept honest by the
-/// oldest-supported leg of the `touch-id-link` CI job. Swift 5.9
-/// ships with Xcode / Command Line Tools 15.0.1.
+/// Oldest Swift toolchain the shim is known to link with. Swift 5.9 ships with
+/// Xcode / Command Line Tools 15.0.1. The oldest leg of the `touch-id-link` CI
+/// job runs on Xcode 16.0, the oldest Xcode on the `macos-15` runner image,
+/// since GitHub retired the `macos-14` runners on 2026-11-02.
 const MIN_SWIFT: (u32, u32) = (5, 9);
 
 fn main() {

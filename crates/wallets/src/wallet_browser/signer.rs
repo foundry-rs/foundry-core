@@ -15,7 +15,7 @@ use crate::wallet_browser::{
 };
 
 #[cfg(feature = "tempo")]
-use tempo_alloy::primitives::transaction::{KeyAuthorization, SignedKeyAuthorization};
+use alloy_primitives::Bytes;
 
 #[derive(Clone, Debug)]
 pub struct BrowserSigner<N: Network> {
@@ -171,26 +171,30 @@ impl<N: Network> BrowserSigner<N> {
         Ok(())
     }
 
-    /// Ask the connected browser wallet to sign a Tempo `KeyAuthorization`.
+    /// Ask the connected browser wallet to sign a Tempo `KeyAuthorization`, with this signer's
+    /// address as the root account.
     ///
-    /// Cross-checks that the connected wallet is the root account named by
-    /// `key_authorization.chain_id` (when non-zero) and that this signer's
-    /// address matches what we'll send as `root_account`.
+    /// `key_authorization` is the authorization serialized as JSON, `authorization_chain_id` its
+    /// chain ID, and `digest` its signature hash. Rejects an authorization bound to a chain other
+    /// than the connected wallet's. Returns the signed authorization's RLP bytes unverified: see
+    /// [`BrowserWalletServer::request_key_authorization`](crate::wallet_browser::server::BrowserWalletServer::request_key_authorization).
     #[cfg(feature = "tempo")]
     pub async fn sign_key_authorization(
         &self,
-        key_authorization: KeyAuthorization,
-    ) -> Result<SignedKeyAuthorization> {
+        key_authorization: serde_json::Value,
+        authorization_chain_id: ChainId,
+        digest: B256,
+    ) -> Result<Bytes> {
         let chain_id = self.chain_id();
-        if key_authorization.chain_id != 0 && key_authorization.chain_id != chain_id {
+        if authorization_chain_id != 0 && authorization_chain_id != chain_id {
             return Err(alloy_signer::Error::other(format!(
-                "KeyAuthorization chainId {} does not match connected wallet chain ID {}",
-                key_authorization.chain_id, chain_id,
+                "KeyAuthorization chainId {authorization_chain_id} does not match connected \
+                 wallet chain ID {chain_id}",
             )));
         }
 
         self.server
-            .request_key_authorization(key_authorization, self.address)
+            .request_key_authorization(key_authorization, digest, self.address)
             .await
             .map_err(alloy_signer::Error::other)
     }

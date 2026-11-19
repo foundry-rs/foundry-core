@@ -8,11 +8,12 @@ use crate::{
 use alloy_network::Network;
 use alloy_primitives::{Address, map::AddressHashMap};
 use alloy_signer::Signer;
+use alloy_signer_ledger::HDPath as LedgerHDPath;
 use clap::Parser;
 use derive_builder::Builder;
 use eyre::Result;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 /// Container for multiple wallets.
 #[derive(Debug, Default)]
@@ -399,19 +400,31 @@ impl MultiWalletOpts {
 
     pub async fn ledgers(&self) -> Result<Option<Vec<WalletSigner>>> {
         if self.ledger {
-            let mut args = self.clone();
-
-            if let Some(paths) = &args.hd_paths {
-                if paths.len() > 1 {
-                    eyre::bail!("Ledger only supports one signer.");
-                }
-                args.mnemonic_indexes = None;
-            }
-
-            create_hw_wallets!(args, utils::create_ledger_signer, wallets);
-            return Ok(Some(wallets));
+            return utils::create_ledger_signers(self.ledger_paths()).await.map(Some);
         }
         Ok(None)
+    }
+
+    /// Returns the Ledger derivation paths to load, in the order given and without duplicates.
+    ///
+    /// HD paths take precedence over mnemonic indexes, which default to `[0]` on the command
+    /// line. Without either, the first Ledger Live account is used.
+    fn ledger_paths(&self) -> Vec<LedgerHDPath> {
+        let mut paths = if let Some(hd_paths) = &self.hd_paths {
+            hd_paths.iter().cloned().map(LedgerHDPath::Other).collect::<Vec<_>>()
+        } else {
+            self.mnemonic_indexes
+                .iter()
+                .flatten()
+                .map(|&index| LedgerHDPath::LedgerLive(index as usize))
+                .collect()
+        };
+        if paths.is_empty() {
+            return vec![LedgerHDPath::LedgerLive(0)];
+        }
+        let mut seen = HashSet::new();
+        paths.retain(|path| seen.insert(path.to_string()));
+        paths
     }
 
     pub async fn trezors(&self) -> Result<Option<Vec<WalletSigner>>> {
@@ -632,6 +645,51 @@ mod tests {
                 test_case.2
             )
         }
+    }
+
+    // https://github.com/foundry-rs/foundry/issues/18604
+    #[test]
+    fn ledger_paths_keep_order_and_drop_duplicates() {
+        let paths = |args: &[&str]| {
+            MultiWalletOpts::parse_from(["foundry-cli", "--ledger"].iter().chain(args))
+                .ledger_paths()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(paths(&[]), ["m/44'/60'/0'/0/0"]);
+        assert_eq!(
+            paths(&[
+                "--mnemonic-indexes",
+                "2",
+                "--mnemonic-indexes",
+                "0",
+                "--mnemonic-indexes",
+                "2"
+            ]),
+            ["m/44'/60'/2'/0/0", "m/44'/60'/0'/0/0"]
+        );
+        // HD paths replace the default mnemonic index 0 instead of adding to it.
+        assert_eq!(
+            paths(&[
+                "--hd-paths",
+                "m/44'/60'/0'/7",
+                "--hd-paths",
+                "m/44'/60'/3'/0/0",
+                "--hd-paths",
+                "m/44'/60'/0'/7"
+            ]),
+            ["m/44'/60'/0'/7", "m/44'/60'/3'/0/0"]
+        );
+        assert_eq!(
+            MultiWalletOpts::default()
+                .ledger_paths()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["m/44'/60'/0'/0/0"]
+        );
     }
 
     #[test]

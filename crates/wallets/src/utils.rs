@@ -67,7 +67,12 @@ pub async fn create_ledger_signer(
         LedgerHDPath::LedgerLive(mnemonic_index as usize)
     };
 
-    WalletSigner::from_ledger_path(derivation).await.wrap_err_with(|| {
+    create_ledger_signers(vec![derivation]).await.map(|mut signers| signers.remove(0))
+}
+
+/// Creates one [WalletSigner] for each Ledger derivation path, sharing one device connection.
+pub async fn create_ledger_signers(paths: Vec<LedgerHDPath>) -> Result<Vec<WalletSigner>> {
+    WalletSigner::from_ledger_paths(paths).await.wrap_err_with(|| {
         "\
 Could not connect to Ledger device.
 Make sure it's connected and unlocked, with no other desktop wallet apps open."

@@ -321,7 +321,7 @@ impl Solc {
         match RuntimeOrHandle::new().block_on(svm::install(&version)) {
             Ok(path) => {
                 crate::report::solc_installation_success(&version);
-                Ok(Self::new_with_version(path, version.clone()))
+                Ok(Self::new_with_version(path, version))
             }
             Err(err) => {
                 crate::report::solc_installation_error(&version, &err.to_string());
@@ -469,6 +469,15 @@ impl Solc {
         Version::new(self.version.major, self.version.minor, self.version.patch)
     }
 
+    /// Returns Solar's own release version if this compiler is Solar.
+    ///
+    /// Solar reports it in the build metadata of its solc-compatible version, for example
+    /// `0.8.38+commit.e7a91fc7.solar.0.3.0`.
+    pub fn solar_version(&self) -> Option<Version> {
+        let (_, version) = self.version.build.as_str().split_once("solar.")?;
+        Version::parse(version).ok()
+    }
+
     /// Invokes `solc --version` and parses the output as a SemVer [`Version`].
     pub fn version(solc: impl Into<PathBuf>) -> Result<Version> {
         Self::version_with_args(solc, &[])
@@ -481,10 +490,9 @@ impl Solc {
 
     fn version_impl(solc: &Path, args: &[String]) -> Result<Version> {
         let mut cmd = Command::new(solc);
-        if is_solar_binary(solc) {
-            cmd.env("SOLC_WRAPPER", "1");
-        }
-        cmd.args(args)
+        // Makes Solar report its solc-compatible version under any file name; solc ignores it.
+        cmd.env("SOLC_WRAPPER", "1")
+            .args(args)
             .arg("--version")
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
@@ -670,10 +678,11 @@ impl Solc {
 
     pub async fn async_version(solc: &Path) -> Result<Version> {
         let mut cmd = tokio::process::Command::new(solc);
-        if is_solar_binary(solc) {
-            cmd.env("SOLC_WRAPPER", "1");
-        }
-        cmd.arg("--version").stdin(Stdio::piped()).stderr(Stdio::piped()).stdout(Stdio::piped());
+        cmd.env("SOLC_WRAPPER", "1")
+            .arg("--version")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdout(Stdio::piped());
         debug!(?cmd, "getting version");
         let child = async_retry_spawn(|| cmd.spawn()).await.map_err(|e| SolcError::io(e, solc))?;
         let output = child.wait_with_output().await.map_err(|e| SolcError::io(e, solc))?;
@@ -707,10 +716,6 @@ impl Solc {
 
 fn compile_output(output: Output) -> Result<Vec<u8>> {
     if output.status.success() { Ok(output.stdout) } else { Err(SolcError::solc_output(&output)) }
-}
-
-fn is_solar_binary(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name.to_string_lossy().contains("solar"))
 }
 
 fn version_from_output(output: Output) -> Result<Version> {

@@ -41,8 +41,7 @@ impl TryFrom<StringifiedNumeric> for U64 {
     type Error = String;
 
     fn try_from(value: StringifiedNumeric) -> Result<Self, Self::Error> {
-        let value = U256::try_from(value)?;
-        Ok(value.wrapping_to::<U64>())
+        u64::try_from(U256::try_from(value)?).map(U64::from).map_err(|err| err.to_string())
     }
 }
 
@@ -211,5 +210,20 @@ mod tests {
         let s = serde_json::to_string(&tx).unwrap();
         let de: Txn = serde_json::from_str(&s).unwrap();
         assert_eq!(de, tx);
+    }
+
+    #[test]
+    fn stringified_numeric_u64_rejects_overflow() {
+        for value in [
+            StringifiedNumeric::String("18446744073709551616".into()),
+            StringifiedNumeric::String("0x10000000000000000".into()),
+            StringifiedNumeric::U256(U256::MAX),
+        ] {
+            assert_eq!(U64::try_from(value).unwrap_err(), "Uint<256> value is too large for u64");
+        }
+        assert_eq!(
+            U64::try_from(StringifiedNumeric::U256(U256::from(u64::MAX))).unwrap(),
+            U64::MAX
+        );
     }
 }

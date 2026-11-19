@@ -26,9 +26,7 @@ use crate::wallet_browser::{
 #[cfg(feature = "tempo")]
 use {
     crate::wallet_browser::types::BrowserKeyAuthorizationRequest,
-    alloy_primitives::hex,
-    alloy_rlp::Decodable,
-    tempo_alloy::primitives::transaction::{KeyAuthorization, SignedKeyAuthorization},
+    alloy_primitives::{B256, hex},
 };
 
 pub(crate) const USER_REJECTION_SIGNAL: &str = "__foundry_user_rejected__";
@@ -259,32 +257,27 @@ impl<N: Network> BrowserWalletServer<N> {
 
     /// Request a Tempo `KeyAuthorization` to be signed via the browser
     /// wallet. The wallet must drive the WebAuthn / P256 / Secp256k1
-    /// ceremony and POST back an RLP-encoded `SignedKeyAuthorization` hex
-    /// string.
+    /// ceremony for `digest` and POST back an RLP-encoded
+    /// `SignedKeyAuthorization` hex string.
     ///
-    /// The returned [`SignedKeyAuthorization`] is verified server-side:
-    /// - The signed authorization payload must match the original request (the wallet must not
-    ///   mutate security-relevant fields).
-    /// - The signature must recover to `root_account` for every supported signature scheme.
+    /// `key_authorization` is the JSON payload the wallet UI displays, and `digest` is its
+    /// signature hash. Returns the signed authorization's RLP bytes unverified: the caller must
+    /// decode them and check that the payload matches the request and that the signature recovers
+    /// to `root_account`.
     #[cfg(feature = "tempo")]
     pub async fn request_key_authorization(
         &self,
-        key_authorization: KeyAuthorization,
+        key_authorization: serde_json::Value,
+        digest: B256,
         root_account: Address,
-    ) -> Result<SignedKeyAuthorization, BrowserWalletError> {
+    ) -> Result<Bytes, BrowserWalletError> {
         if !self.is_connected().await {
             return Err(BrowserWalletError::NotConnected);
         }
-        reject_unsupported_key_authorization_fields(&key_authorization)?;
 
         let id = Uuid::new_v4();
-        let digest = key_authorization.signature_hash();
-        let request = BrowserKeyAuthorizationRequest {
-            id,
-            root_account,
-            key_authorization: key_authorization.clone(),
-            digest,
-        };
+        let request =
+            BrowserKeyAuthorizationRequest { id, root_account, key_authorization, digest };
 
         self.state.add_key_authorization_request(request).await;
 
@@ -298,39 +291,7 @@ impl<N: Network> BrowserWalletServer<N> {
                             "invalid hex in key authorization response: {e}"
                         ))
                     })?;
-                    let signed =
-                        SignedKeyAuthorization::decode(&mut bytes.as_slice()).map_err(|e| {
-                            BrowserWalletError::ServerError(format!(
-                                "invalid SignedKeyAuthorization RLP from wallet: {e}"
-                            ))
-                        })?;
-
-                    if signed.authorization != key_authorization {
-                        return Err(BrowserWalletError::ServerError(format!(
-                            "wallet returned a mutated KeyAuthorization payload: signed digest {} \
-                             but requested {}",
-                            signed.authorization.signature_hash(),
-                            key_authorization.signature_hash(),
-                        )));
-                    }
-
-                    match signed.recover_signer() {
-                        Ok(recovered) if recovered == root_account => {}
-                        Ok(recovered) => {
-                            return Err(BrowserWalletError::ServerError(format!(
-                                "wallet returned a SignedKeyAuthorization signed by \
-                                 {recovered} but the connected root account is {root_account}"
-                            )));
-                        }
-                        Err(e) => {
-                            return Err(BrowserWalletError::ServerError(format!(
-                                "wallet returned an unrecoverable SignedKeyAuthorization \
-                                 signature: {e}"
-                            )));
-                        }
-                    }
-
-                    return Ok(signed);
+                    return Ok(bytes.into());
                 } else if let Some(error) = response.error {
                     return Err(BrowserWalletError::Rejected {
                         operation: "KeyAuthorization",
@@ -372,29 +333,4 @@ impl<N: Network> BrowserWalletServer<N> {
 
         self.request_signing(sign_request).await
     }
-}
-
-#[cfg(feature = "tempo")]
-fn reject_unsupported_key_authorization_fields(
-    key_authorization: &KeyAuthorization,
-) -> Result<(), BrowserWalletError> {
-    let mut unsupported_fields = Vec::new();
-    if key_authorization.witness.is_some() {
-        unsupported_fields.push("witness");
-    }
-    if key_authorization.account.is_some() {
-        unsupported_fields.push("account");
-    }
-    if key_authorization.is_admin {
-        unsupported_fields.push("is_admin");
-    }
-
-    if !unsupported_fields.is_empty() {
-        return Err(BrowserWalletError::ServerError(format!(
-            "browser key authorization signing does not support T5 fields yet: {}",
-            unsupported_fields.join(", ")
-        )));
-    }
-
-    Ok(())
 }

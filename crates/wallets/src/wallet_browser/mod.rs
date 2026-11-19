@@ -41,12 +41,6 @@ mod tests {
             BrowserKeyAuthorizationRequest, BrowserKeyAuthorizationResponse,
         },
         alloy_primitives::B256,
-        alloy_rlp::Encodable,
-        alloy_signer_local::PrivateKeySigner,
-        tempo_alloy::primitives::transaction::{
-            KeyAuthorization, PrimitiveSignature, SignatureType, SignedKeyAuthorization,
-            tt_signature::P256SignatureWithPreHash,
-        },
     };
 
     const ALICE: Address = address!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
@@ -1182,14 +1176,16 @@ mod tests {
 
     #[cfg(feature = "tempo")]
     #[tokio::test]
-    async fn test_key_authorization_rejects_invalid_p256_signature() {
+    async fn test_key_authorization_round_trips_payload_and_signed_bytes() {
         let mut server = create_server::<Ethereum>();
         let client = client_with_token(&server);
         server.start().await.unwrap();
         connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
 
-        let authorization = KeyAuthorization::unrestricted(1, SignatureType::P256, BOB);
-        let handle = wait_for_key_authorization(&server, authorization.clone(), ALICE).await;
+        let authorization = serde_json::json!({ "chainId": "0x1", "keyId": BOB, "expiry": "0x7b" });
+        let digest = B256::repeat_byte(0x42);
+        let handle =
+            wait_for_key_authorization(&server, authorization.clone(), digest, ALICE).await;
         let resp = client
             .get(format!("http://localhost:{}/api/key-authorization/request", server.port()))
             .send()
@@ -1202,25 +1198,13 @@ mod tests {
         };
         assert_eq!(pending.root_account, ALICE);
         assert_eq!(pending.key_authorization, authorization);
-
-        let invalid_signed =
-            authorization.into_signed(PrimitiveSignature::P256(P256SignatureWithPreHash {
-                r: B256::ZERO,
-                s: B256::ZERO,
-                pub_key_x: B256::ZERO,
-                pub_key_y: B256::ZERO,
-                pre_hash: false,
-            }));
+        assert_eq!(pending.digest, digest);
 
         client
             .post(format!("http://localhost:{}/api/key-authorization/response", server.port()))
             .json(&BrowserKeyAuthorizationResponse {
                 id: pending.id,
-                signed_hex: {
-                    let mut out = Vec::new();
-                    invalid_signed.encode(&mut out);
-                    Some(format!("0x{}", alloy_primitives::hex::encode(out)))
-                },
+                signed_hex: Some("0xf80102".to_string()),
                 error: None,
             })
             .send()
@@ -1229,120 +1213,8 @@ mod tests {
             .error_for_status()
             .unwrap();
 
-        let res = handle.await.expect("key authorization flow panicked");
-        match res {
-            Err(BrowserWalletError::ServerError(message)) => {
-                assert!(
-                    message.contains("unrecoverable SignedKeyAuthorization signature"),
-                    "unexpected error message: {message}"
-                );
-            }
-            other => panic!("expected invalid P256 signature rejection, got {other:?}"),
-        }
-
-        server.stop().await.unwrap();
-    }
-
-    #[cfg(feature = "tempo")]
-    #[tokio::test]
-    async fn test_key_authorization_rejects_mutated_signed_authorization() {
-        let mut server = create_server::<Ethereum>();
-        let client = client_with_token(&server);
-        server.start().await.unwrap();
-        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
-
-        let authorization =
-            KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, BOB).with_expiry(123);
-        let handle = wait_for_key_authorization(&server, authorization.clone(), ALICE).await;
-        let resp = client
-            .get(format!("http://localhost:{}/api/key-authorization/request", server.port()))
-            .send()
-            .await
-            .unwrap();
-        let BrowserApiResponse::Ok(pending) =
-            resp.json::<BrowserApiResponse<BrowserKeyAuthorizationRequest>>().await.unwrap()
-        else {
-            panic!("expected BrowserApiResponse::Ok with a pending key authorization request");
-        };
-        assert_eq!(pending.root_account, ALICE);
-        assert_eq!(pending.key_authorization, authorization);
-
-        let mutated_authorization =
-            KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, BOB).with_expiry(456);
-        let root_signer: PrivateKeySigner =
-            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse().unwrap();
-        assert_eq!(root_signer.address(), ALICE);
-
-        let signature =
-            root_signer.sign_hash(&mutated_authorization.signature_hash()).await.unwrap();
-        let mutated_signed =
-            mutated_authorization.into_signed(PrimitiveSignature::Secp256k1(signature));
-
-        client
-            .post(format!("http://localhost:{}/api/key-authorization/response", server.port()))
-            .json(&BrowserKeyAuthorizationResponse {
-                id: pending.id,
-                signed_hex: {
-                    let mut out = Vec::new();
-                    mutated_signed.encode(&mut out);
-                    Some(format!("0x{}", alloy_primitives::hex::encode(out)))
-                },
-                error: None,
-            })
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap();
-
-        let res = handle.await.expect("key authorization flow panicked");
-        match res {
-            Err(BrowserWalletError::ServerError(message)) => {
-                assert!(
-                    message.contains("wallet returned a mutated KeyAuthorization payload"),
-                    "unexpected error message: {message}"
-                );
-            }
-            other => panic!("expected mutated key authorization rejection, got {other:?}"),
-        }
-
-        server.stop().await.unwrap();
-    }
-
-    #[cfg(feature = "tempo")]
-    #[tokio::test]
-    async fn test_key_authorization_rejects_t5_fields_before_enqueueing() {
-        let mut server = create_server::<Ethereum>();
-        let client = client_with_token(&server);
-        server.start().await.unwrap();
-        connect_wallet(&client, &server, Connection::new(ALICE, 1)).await;
-
-        let authorization = KeyAuthorization::unrestricted(1, SignatureType::Secp256k1, BOB)
-            .with_witness(B256::repeat_byte(0x53));
-        let res = server.request_key_authorization(authorization, ALICE).await;
-        match res {
-            Err(BrowserWalletError::ServerError(message)) => {
-                assert!(
-                    message.contains(
-                        "browser key authorization signing does not support T5 fields yet: witness"
-                    ),
-                    "unexpected error message: {message}"
-                );
-            }
-            other => panic!("expected unsupported T5 field rejection, got {other:?}"),
-        }
-
-        let resp = client
-            .get(format!("http://localhost:{}/api/key-authorization/request", server.port()))
-            .send()
-            .await
-            .unwrap();
-        let BrowserApiResponse::Error { message } =
-            resp.json::<BrowserApiResponse<BrowserKeyAuthorizationRequest>>().await.unwrap()
-        else {
-            panic!("expected no pending key authorization request after T5 rejection");
-        };
-        assert_eq!(message, "No pending key authorization request");
+        let signed = handle.await.expect("key authorization flow panicked").unwrap();
+        assert_eq!(signed, Bytes::from_static(&[0xf8, 0x01, 0x02]));
 
         server.stop().await.unwrap();
     }
@@ -1666,12 +1538,13 @@ mod tests {
     #[cfg(feature = "tempo")]
     async fn wait_for_key_authorization<N: Network>(
         server: &BrowserWalletServer<N>,
-        key_authorization: KeyAuthorization,
+        key_authorization: serde_json::Value,
+        digest: B256,
         root_account: Address,
-    ) -> JoinHandle<Result<SignedKeyAuthorization, BrowserWalletError>> {
+    ) -> JoinHandle<Result<Bytes, BrowserWalletError>> {
         let browser_server = server.clone();
         let join_handle = tokio::spawn(async move {
-            browser_server.request_key_authorization(key_authorization, root_account).await
+            browser_server.request_key_authorization(key_authorization, digest, root_account).await
         });
         // Let the spawned flow enqueue its pending request before the test polls the API.
         tokio::task::yield_now().await;

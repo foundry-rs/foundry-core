@@ -33,6 +33,9 @@ mod command;
 mod compiler;
 pub use compiler::{SOLC_EXTENSIONS, Solc};
 
+#[cfg(feature = "svm-solc")]
+mod solar_release;
+
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "svm-solc", derive(Default))]
 pub enum SolcCompiler {
@@ -59,6 +62,14 @@ impl Compiler for SolcCompiler {
         &self,
         input: &Self::Input,
     ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
+        self.compile_with_jobs(input, 1)
+    }
+
+    fn compile_with_jobs(
+        &self,
+        input: &Self::Input,
+        jobs: usize,
+    ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
         let mut solc = match self {
             Self::Specific(solc) => solc.clone(),
 
@@ -70,12 +81,56 @@ impl Compiler for SolcCompiler {
         solc.include_paths.clone_from(&input.cli_settings.include_paths);
         solc.extra_args.extend_from_slice(&input.cli_settings.extra_args);
 
-        let solc_output = solc.compile(&input.input)?;
+        // Only solc is known to produce the same outputs for a split selection.
+        let parts = (jobs > 1 && input.compiler_name() == "Solc")
+            .then(|| input.input.split(jobs))
+            .flatten();
+        let solc_output = match parts {
+            Some(mut parts) => {
+                trace!(parts = parts.len(), "compiling output selection in parts");
+                let mut outputs =
+                    parts.par_iter().map(|part| solc.compile(part)).collect::<Result<Vec<_>>>()?;
+                if let Some(part) = unlisted_part(&input.input, &parts, &outputs[0]) {
+                    trace!("compiling output selection of sources loaded from disk");
+                    outputs.push(solc.compile(&part)?);
+                    parts.push(part);
+                }
+                // solc reports some errors only for some output selections: in an import cycle
+                // it rejects a derived contract whose base is defined in a file that the part
+                // does not select (error 2449). The whole input is the source of truth for
+                // errors, so compile it once when any part fails.
+                if outputs.iter().any(|output| output.errors.iter().any(|error| error.is_error())) {
+                    trace!("a part reported errors, compiling the whole input");
+                    solc.compile(&input.input)?
+                } else {
+                    merge_parts(&parts, outputs)
+                }
+            }
+            None => solc.compile(&input.input)?,
+        };
         compiler_output(&solc, input, solc_output)
     }
 
     fn available_versions(&self, _language: &Self::Language) -> Vec<CompilerVersion> {
         match self {
+            // Solar implements every 0.8 release up to the one it reports, so sources pinned to
+            // different exact 0.8 versions can all resolve to it. Keeping its build metadata gives
+            // its artifacts a cache identity distinct from solc's.
+            Self::Specific(solc)
+                if solc.version.build.as_str().contains("solar")
+                    && solc.version.major == 0
+                    && solc.version.minor == 8 =>
+            {
+                (0..=solc.version.patch)
+                    .map(|patch| {
+                        CompilerVersion::Installed(Version {
+                            build: solc.version.build.clone(),
+                            ..Version::new(0, 8, patch)
+                        })
+                    })
+                    .collect()
+            }
+
             Self::Specific(solc) => vec![CompilerVersion::Installed(Version::new(
                 solc.version.major,
                 solc.version.minor,
@@ -106,6 +161,66 @@ impl Compiler for SolcCompiler {
             }
         }
     }
+}
+
+/// Returns a part that selects the `*` file outputs for the sources that solc loaded from disk
+/// and that no part of a split input selects, see [`SolcInput::split`].
+///
+/// The split expands `*` over the sources of the input only, but solc also loads missing imports
+/// through its file reader, and the whole input requests their outputs too.
+fn unlisted_part(
+    input: &SolcInput,
+    parts: &[SolcInput],
+    output: &foundry_compilers_artifacts::CompilerOutput,
+) -> Option<SolcInput> {
+    let all = input
+        .settings
+        .output_selection
+        .0
+        .get("*")
+        .filter(|all| all.values().any(|outputs| !outputs.is_empty()))?;
+    let selection = output
+        .sources
+        .keys()
+        .map(|path| path.display().to_string())
+        .filter(|file| {
+            !parts.iter().any(|part| part.settings.output_selection.0.contains_key(file))
+        })
+        .map(|file| (file, all.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if selection.is_empty() {
+        return None;
+    }
+    let mut part = input.clone();
+    part.settings.output_selection = OutputSelection(selection);
+    Some(part)
+}
+
+/// Merges the outputs of the parts of one split input, see [`SolcInput::split`].
+///
+/// Every part reports the same sources and the same analysis diagnostics again, so each source
+/// is kept once and repeated errors are dropped. Contracts come only from the part that selects
+/// their file, because old solc versions also report empty contracts for the other files.
+fn merge_parts(
+    parts: &[SolcInput],
+    outputs: Vec<foundry_compilers_artifacts::CompilerOutput>,
+) -> foundry_compilers_artifacts::CompilerOutput {
+    let mut merged = foundry_compilers_artifacts::CompilerOutput::default();
+    let mut seen = HashSet::new();
+    for (part, output) in parts.iter().zip(outputs) {
+        merged.errors.extend(output.errors.into_iter().filter(|error| seen.insert(error.clone())));
+        for (path, source) in output.sources {
+            merged.sources.entry(path).or_insert(source);
+        }
+        let selection = &part.settings.output_selection.0;
+        merged.contracts.extend(
+            output
+                .contracts
+                .into_iter()
+                .filter(|(path, _)| selection.contains_key(&path.display().to_string())),
+        );
+    }
+    merged
 }
 
 fn compiler_output(

@@ -102,9 +102,9 @@
 
 use crate::{
     ArtifactOutput, CompilerSettings, ConfigurableArtifacts, Graph, Project, ProjectCompileOutput,
-    ProjectPathsConfig, Sources,
+    ProjectPathsConfig, Sources, Updates,
     artifact_output::Artifacts,
-    buildinfo::RawBuildInfo,
+    buildinfo::{RawBuildInfo, SourceEdit},
     cache::{ArtifactsCache, abi::AbiCache},
     compilers::{Compiler, CompilerInput, CompilerOutput, Language},
     filter::SparseOutputFilter,
@@ -122,12 +122,10 @@ use foundry_compilers_core::{
 use rayon::prelude::*;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
-use std::path::Path;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
     fmt::Debug,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -237,6 +235,7 @@ pub struct PreprocessorState {
     active_replacements: HashSet<PathBuf>,
     updates: NativeDependencyUpdates,
     processed_sources: HashSet<PathBuf>,
+    source_edits: BTreeMap<PathBuf, Vec<SourceEdit>>,
 }
 
 impl PreprocessorState {
@@ -283,8 +282,24 @@ impl PreprocessorState {
         first_update
     }
 
+    /// Records the source updates applied to the current compiler job's input.
+    ///
+    /// The edits are stored in the job's build context so that compiler source locations can be
+    /// mapped back to the original sources. Only record updates that remain in the input.
+    pub fn record_source_updates(&mut self, updates: &Updates) {
+        for (file, updates) in updates {
+            self.source_edits.entry(file.clone()).or_default().extend(updates.iter().map(
+                |(start, end, update)| SourceEdit { start: *start, end: *end, len: update.len() },
+            ));
+        }
+    }
+
     fn into_updates(self) -> NativeDependencyUpdates {
         self.updates
+    }
+
+    fn take_source_edits(&mut self) -> BTreeMap<PathBuf, Vec<SourceEdit>> {
+        std::mem::take(&mut self.source_edits)
     }
 }
 
@@ -318,6 +333,39 @@ pub trait Preprocessor<C: Compiler>: Debug {
         _source_units: &[PathBuf],
     ) -> Result<()> {
         self.preprocess(compiler, input, paths, mocks)
+    }
+
+    /// Whether a source can be preprocessed differently when the source-unit set changes.
+    ///
+    /// `source` is an absolute path and may be outside the current compilation request, lack its
+    /// own cache entry, or no longer exist. Implementations must use a pure path predicate rather
+    /// than depend on file contents or existence. Returning `false` preserves its artifacts unless
+    /// an affected dependency requires invalidation. The default invalidates every cached source.
+    /// Overrides must include sources whose rewriting eligibility can change, even if they were
+    /// not rewritten previously.
+    ///
+    /// Increment [`Self::cache_version`] when a previously insensitive source can become sensitive.
+    /// Narrowing this policy without changing preprocessing output does not require a new version.
+    fn is_source_context_sensitive(
+        &self,
+        _source: &Path,
+        _paths: &ProjectPathsConfig<C::Language>,
+    ) -> bool {
+        true
+    }
+
+    /// Whether changing the source-unit set from `previous` to `current` can change the
+    /// preprocessing output of any cached source.
+    ///
+    /// Called only when the sets differ. Paths inside the project root are root-relative, and
+    /// other paths are absolute. Returning `false` keeps every cached artifact and records
+    /// `current` as the new context. The default treats every change as relevant.
+    fn is_source_context_change_relevant(
+        &self,
+        _previous: &BTreeSet<PathBuf>,
+        _current: &BTreeSet<PathBuf>,
+    ) -> bool {
+        true
     }
 }
 
@@ -362,13 +410,10 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let ResolvedSources { sources, primary_profiles, edges } =
             graph.into_sources_by_version(project)?;
 
-        // If there are multiple different versions, and we can use multiple jobs we can compile
-        // them in parallel.
-        let jobs_cnt = || sources.values().map(|v| v.len()).sum::<usize>();
-        let sources = CompilerSources {
-            jobs: (project.solc_jobs > 1 && jobs_cnt() > 1).then_some(project.solc_jobs),
-            sources,
-        };
+        // With multiple jobs, different versions and profiles compile in parallel, and the
+        // compiler can split one large input across processes.
+        let sources =
+            CompilerSources { jobs: (project.solc_jobs > 1).then_some(project.solc_jobs), sources };
 
         Ok(Self { edges, primary_profiles, project, sources, preprocessor: None })
     }
@@ -419,9 +464,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         // which is unix style `/`
         sources.slash_paths();
 
-        let preprocessor_version =
-            preprocessor.as_ref().map(|preprocessor| preprocessor.cache_version());
-        let mut cache = ArtifactsCache::new(project, edges, preprocessor_version)?;
+        let mut cache = ArtifactsCache::new(project, edges, preprocessor.as_deref())?;
         // retain and compile only dirty sources and all their imports
         sources.filter(&mut cache);
 
@@ -455,7 +498,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
         let mut output = if !project.cached
             || state.sources.sources.values().flatten().all(|(_, sources, _)| sources.is_empty())
         {
-            state.compile()?.write_artifacts_if(false)?.write_cache_if(false)?
+            state.compile()?.write_artifacts_if(false)?.write_cache()?
         } else {
             let PreprocessedState { mut sources, cache, primary_profiles, preprocessor } = state;
             let normal_mocks = cache.mocks();
@@ -528,7 +571,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                             PreprocessedState { sources, cache, primary_profiles, preprocessor }
                                 .compile()?
                                 .write_artifacts_if(false)?
-                                .write_cache_if(false)?;
+                                .write_cache()?;
                         if slash_paths {
                             output.slash_paths();
                         }
@@ -537,13 +580,11 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 };
             let (normal_artifacts, normal_builds, edges) =
                 cache.consume(&Artifacts::default(), &Vec::new(), false)?;
-            let secondary_preprocessor_version =
-                preprocessor.as_ref().map(|preprocessor| preprocessor.cache_version());
             let mut cache = ArtifactsCache::with_storage(
                 project,
                 edges,
-                secondary_preprocessor_version,
                 Some(store.paths(&project.paths)),
+                preprocessor.as_deref(),
             )?;
             let mut mocks = cache.mocks();
             mocks.extend(normal_mocks.iter().cloned());
@@ -621,7 +662,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 );
                 state.cache.update_native_dependency_contexts(native_dependencies);
             }
-            let mut output = state.write_artifacts_if(write)?.write_cache_if(write)?;
+            let mut output = state.write_artifacts_if(write)?.write_cache()?;
             if let Some(generation) = generation
                 && let Err(err) = store.publish(generation, project)
             {
@@ -720,31 +761,10 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 
         let project = cache.project();
         let ctx = cache.output_ctx();
-        // write all artifacts via the handler but only if the build succeeded and project wasn't
-        // configured with `no_artifacts == true`
-        let compiled_artifacts = if !write {
-            project.artifacts_handler().output_to_artifacts(
-                &output.contracts,
-                &output.sources,
-                ctx,
-                cache.storage_paths(),
-                &primary_profiles,
-            )
-        } else if output.has_error(
-            &project.ignored_error_codes,
-            &project.ignored_error_codes_from,
-            &project.ignored_file_paths,
-            &project.compiler_severity_filter,
-        ) {
-            trace!("skip writing cache file due to solc errors: {:?}", output.errors);
-            project.artifacts_handler().output_to_artifacts(
-                &output.contracts,
-                &output.sources,
-                ctx,
-                cache.storage_paths(),
-                &primary_profiles,
-            )
-        } else {
+        let disk_output = DiskOutput::new(write, project, &output);
+        // write all artifacts via the handler but only if the build succeeded and writing wasn't
+        // disabled
+        let compiled_artifacts = if disk_output.is_write() {
             trace!(
                 "handling artifact output for {} contracts and {} sources",
                 output.contracts.len(),
@@ -772,7 +792,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                         output,
                         cache,
                         compiled_artifacts,
-                        persist: false,
+                        disk_output: DiskOutput::StorageUnavailable,
                     });
                 }
                 Err(err) => return Err(err),
@@ -786,16 +806,70 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                         output,
                         cache,
                         compiled_artifacts: artifacts,
-                        persist: false,
+                        disk_output: DiskOutput::StorageUnavailable,
                     });
                 }
                 return Err(err);
             }
 
             artifacts
+        } else {
+            if disk_output == DiskOutput::SkipOnErrors {
+                trace!("skip writing cache file due to solc errors: {:?}", output.errors);
+            }
+            project.artifacts_handler().output_to_artifacts(
+                &output.contracts,
+                &output.sources,
+                ctx,
+                cache.storage_paths(),
+                &primary_profiles,
+            )
         };
 
-        Ok(ArtifactsState { output, cache, compiled_artifacts, persist: true })
+        Ok(ArtifactsState { output, cache, compiled_artifacts, disk_output })
+    }
+}
+
+/// Whether a compile run writes its artifacts, build infos and cache file to disk.
+///
+/// Decided once, after compiling, by [`CompiledState::write_artifacts_if`], and carried into
+/// [`ArtifactsState::write_cache`] so both stages act on the same decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiskOutput {
+    /// Writing is disabled, by `no_artifacts` or by a caller compiling without persistence:
+    /// nothing is written.
+    Disabled,
+    /// The compiler reported errors that are not ignored: nothing is written.
+    SkipOnErrors,
+    /// Optional storage failed while writing artifacts or build infos: the cache file is not
+    /// written.
+    StorageUnavailable,
+    /// Artifacts, build infos and the cache file are written.
+    Write,
+}
+
+impl DiskOutput {
+    fn new<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>(
+        write: bool,
+        project: &Project<C, T>,
+        output: &AggregatedCompilerOutput<C>,
+    ) -> Self {
+        if !write {
+            Self::Disabled
+        } else if output.has_error(
+            &project.ignored_error_codes,
+            &project.ignored_error_codes_from,
+            &project.ignored_file_paths,
+            &project.compiler_severity_filter,
+        ) {
+            Self::SkipOnErrors
+        } else {
+            Self::Write
+        }
+    }
+
+    const fn is_write(self) -> bool {
+        matches!(self, Self::Write)
     }
 }
 
@@ -805,7 +879,7 @@ struct ArtifactsState<'a, T: ArtifactOutput<CompilerContract = C::CompilerContra
     output: AggregatedCompilerOutput<C>,
     cache: ArtifactsCache<'a, T, C>,
     compiled_artifacts: Artifacts<T::Artifact>,
-    persist: bool,
+    disk_output: DiskOutput,
 }
 
 impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
@@ -816,28 +890,16 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
     /// this concludes the [`Project::compile()`] statemachine
     #[instrument(skip_all)]
     fn write_cache(self) -> Result<ProjectCompileOutput<C, T>> {
-        let write = !self.cache.project().no_artifacts;
-        self.write_cache_if(write)
-    }
-
-    fn write_cache_if(self, write: bool) -> Result<ProjectCompileOutput<C, T>> {
-        let ArtifactsState { output, cache, compiled_artifacts, persist } = self;
+        let ArtifactsState { output, cache, compiled_artifacts, disk_output } = self;
         let project = cache.project();
         let ignored_error_codes = project.ignored_error_codes.clone();
         let ignored_error_codes_from = project.ignored_error_codes_from.clone();
         let ignored_file_paths = project.ignored_file_paths.clone();
         let compiler_severity_filter = project.compiler_severity_filter;
-        let has_error = output.has_error(
-            &ignored_error_codes,
-            &ignored_error_codes_from,
-            &ignored_file_paths,
-            &compiler_severity_filter,
-        );
-        let skip_write_to_disk = !write || !persist || has_error;
-        trace!(has_error, project.no_artifacts, skip_write_to_disk, cache_path=?project.cache_path(),"prepare writing cache file");
+        trace!(?disk_output, cache_path=?project.cache_path(), "prepare writing cache file");
 
         let (cached_artifacts, cached_builds, edges) =
-            cache.consume(&compiled_artifacts, &output.build_infos, !skip_write_to_disk)?;
+            cache.consume(&compiled_artifacts, &output.build_infos, disk_output.is_write())?;
 
         project.artifacts_handler().handle_cached_artifacts(&cached_artifacts)?;
 
@@ -964,6 +1026,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
         };
 
         let mut jobs = Vec::new();
+        let mut jobs_source_edits = Vec::new();
         for (language, versioned_sources) in self.sources {
             for (version, sources, (profile, opt_settings)) in versioned_sources {
                 let mut opt_settings = opt_settings.clone();
@@ -1030,6 +1093,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                     )?;
                 }
 
+                jobs_source_edits.push(preprocessor_state.take_source_edits());
                 jobs.push((input, profile, actually_dirty));
             }
         }
@@ -1055,7 +1119,9 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
 
         let mut aggregated = AggregatedCompilerOutput::default();
 
-        for (input, mut output, profile, actually_dirty) in results {
+        for ((input, mut output, profile, actually_dirty), source_edits) in
+            results.into_iter().zip(jobs_source_edits)
+        {
             let version = input.version();
 
             // Mark all files as seen by the compiler
@@ -1063,7 +1129,11 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                 cache.compiler_seen(file);
             }
 
-            let build_info = RawBuildInfo::new(&input, &output, project.build_info)?;
+            let mut build_info = RawBuildInfo::new(&input, &output, project.build_info)?;
+            build_info.build_context.source_edits = source_edits
+                .into_iter()
+                .filter_map(|(file, edits)| Some((output.sources.get(&file)?.id, edits)))
+                .collect();
 
             #[cfg(windows)]
             {
@@ -1208,7 +1278,7 @@ fn compile_parallel<'a, C: Compiler>(
                     input.settings_summary().as_deref(),
                     actually_dirty.as_slice(),
                 );
-                compiler.compile(&input).map(move |output| {
+                compiler.compile_with_jobs(&input, num_jobs).map(move |output| {
                     report::compiler_success(
                         &input.compiler_name(),
                         input.version(),
@@ -1232,8 +1302,6 @@ mod tests {
     };
     #[cfg(all(feature = "project-util", feature = "svm-solc"))]
     use foundry_compilers_artifacts::output_selection::ContractOutputSelection;
-    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
-    use std::path::Path;
 
     fn known(paths: &[&str]) -> NativeDependencyState {
         NativeDependencyState::Known(paths.iter().map(PathBuf::from).collect::<BTreeSet<_>>())

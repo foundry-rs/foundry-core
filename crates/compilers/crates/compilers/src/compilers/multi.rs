@@ -352,10 +352,19 @@ impl Compiler for MultiCompiler {
         &self,
         input: &Self::Input,
     ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
+        self.compile_with_jobs(input, 1)
+    }
+
+    fn compile_with_jobs(
+        &self,
+        input: &Self::Input,
+        jobs: usize,
+    ) -> Result<CompilerOutput<Self::CompilationError, Self::CompilerContract>> {
         match input {
             MultiCompilerInput::Solc(input) => {
                 if let Some(solc) = &self.solc {
-                    Compiler::compile(solc, input).map(|res| res.map_err(MultiCompilerError::Solc))
+                    solc.compile_with_jobs(input, jobs)
+                        .map(|res| res.map_err(MultiCompilerError::Solc))
                 } else {
                     Err(SolcError::msg("solc compiler is not available"))
                 }
