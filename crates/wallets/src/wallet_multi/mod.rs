@@ -410,8 +410,8 @@ impl MultiWalletOpts {
     /// HD paths take precedence over mnemonic indexes, which default to `[0]` on the command
     /// line. Without either, the first Ledger Live account is used.
     fn ledger_paths(&self) -> Vec<LedgerHDPath> {
-        let mut paths: Vec<_> = if let Some(hd_paths) = &self.hd_paths {
-            hd_paths.iter().map(|path| LedgerHDPath::Other(path.clone())).collect()
+        let mut paths = if let Some(hd_paths) = &self.hd_paths {
+            hd_paths.iter().cloned().map(LedgerHDPath::Other).collect::<Vec<_>>()
         } else {
             self.mnemonic_indexes
                 .iter()

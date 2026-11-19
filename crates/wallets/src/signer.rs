@@ -77,8 +77,7 @@ fn usb_available() -> bool {
 
 impl WalletSigner {
     pub async fn from_ledger_path(path: LedgerHDPath) -> Result<Self> {
-        let mut signers = Self::from_ledger_paths(vec![path]).await?;
-        Ok(signers.remove(0))
+        Self::from_ledger_paths(vec![path]).await.map(|mut signers| signers.remove(0))
     }
 
     /// Opens the Ledger device once and returns one signer for each derivation path.
