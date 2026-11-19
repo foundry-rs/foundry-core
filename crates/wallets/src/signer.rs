@@ -4,12 +4,16 @@ use alloy_dyn_abi::TypedData;
 use alloy_network::TxSigner;
 use alloy_primitives::{Address, B256, ChainId, Signature, hex};
 use alloy_signer::Signer;
-use alloy_signer_ledger::{HDPath as LedgerHDPath, LedgerSigner};
+use alloy_signer_ledger::{
+    HDPath as LedgerHDPath, LedgerError, LedgerSigner,
+    coins_ledger::transports::{Ledger, LedgerAsync},
+};
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
 use alloy_signer_trezor::{HDPath as TrezorHDPath, TrezorSigner};
 use alloy_sol_types::{Eip712Domain, SolStruct};
 use async_trait::async_trait;
-use std::{collections::HashSet, path::PathBuf};
+use futures_util::lock::Mutex;
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use tracing::warn;
 
 #[cfg(feature = "aws-kms")]
@@ -73,13 +77,27 @@ fn usb_available() -> bool {
 
 impl WalletSigner {
     pub async fn from_ledger_path(path: LedgerHDPath) -> Result<Self> {
+        let mut signers = Self::from_ledger_paths(vec![path]).await?;
+        Ok(signers.remove(0))
+    }
+
+    /// Opens the Ledger device once and returns one signer for each derivation path.
+    ///
+    /// The signers share the device connection, because the device cannot be opened again while
+    /// a signer holds it.
+    pub async fn from_ledger_paths(paths: Vec<LedgerHDPath>) -> Result<Vec<Self>> {
         #[cfg(not(target_family = "wasm"))]
         if !hid_api_available() {
             return Err(WalletSignerError::LedgerHidInit);
         }
 
-        let ledger = LedgerSigner::new(path, None).await?;
-        Ok(Self::Ledger(ledger))
+        let transport = Arc::new(Mutex::new(Ledger::init().await.map_err(LedgerError::from)?));
+        let mut signers = Vec::with_capacity(paths.len());
+        for path in paths {
+            let ledger = LedgerSigner::new_with_transport(path, None, transport.clone()).await?;
+            signers.push(Self::Ledger(ledger));
+        }
+        Ok(signers)
     }
 
     pub async fn from_trezor_path(path: TrezorHDPath) -> Result<Self> {
