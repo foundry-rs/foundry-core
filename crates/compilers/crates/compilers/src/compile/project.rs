@@ -406,9 +406,18 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         if let Some(filter) = &project.sparse_output {
             sources.retain(|f, _| filter.is_match(f))
         }
+        // Compiler inputs, and so metadata, carry the library root remappings, so they must not
+        // depend on which sources are compiled: take them from the whole project.
+        let input_files = project.paths.input_files();
+        let is_project = sources.len() == input_files.len()
+            && input_files.iter().all(|file| sources.contains_key(file));
         let graph = Graph::resolve_sources(&project.paths, sources)?;
-        let ResolvedSources { sources, primary_profiles, edges } =
+        let ResolvedSources { sources, primary_profiles, mut edges } =
             graph.into_sources_by_version(project)?;
+        if !is_project {
+            edges.resolved_remappings =
+                Graph::<C::Parser>::resolve(&project.paths)?.remappings().clone();
+        }
 
         // With multiple jobs, different versions and profiles compile in parallel, and the
         // compiler can split one large input across processes.
@@ -1003,6 +1012,8 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
         // Include additional paths collected during graph resolution.
         let mut include_paths = project.paths.include_paths.clone();
         include_paths.extend(graph.include_paths().clone());
+        let mut remappings = project.paths.remappings.clone();
+        remappings.extend(graph.remappings().iter().cloned());
 
         // Get current list of mocks from cache. This will be passed to preprocessors and updated
         // accordingly, then set back in cache.
@@ -1054,7 +1065,7 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                     .with_base_path(&project.paths.root)
                     .with_allow_paths(&project.paths.allowed_paths)
                     .with_include_paths(&include_paths)
-                    .with_remappings(&project.paths.remappings);
+                    .with_remappings(&remappings);
 
                 // Keep graph, cache, and sparse-output keys absolute. Contextual sources outside
                 // the project root only need root-relative names in the compiler input.

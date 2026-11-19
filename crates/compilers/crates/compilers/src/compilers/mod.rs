@@ -181,6 +181,7 @@ pub trait SourceParser: Clone + Debug + Send + Sync {
         &mut self,
         _nodes: &mut Vec<Node<Self::ParsedSource>>,
         _include_paths: &BTreeSet<PathBuf>,
+        _remappings: &BTreeSet<Remapping>,
     ) -> Result<()> {
         Ok(())
     }

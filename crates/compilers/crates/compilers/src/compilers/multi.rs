@@ -470,6 +470,7 @@ impl SourceParser for MultiCompilerParser {
         &mut self,
         all_nodes: &mut Vec<crate::resolver::Node<Self::ParsedSource>>,
         include_paths: &BTreeSet<PathBuf>,
+        remappings: &BTreeSet<Remapping>,
     ) -> Result<()> {
         // Must maintain original order.
         let mut solc_nodes = Vec::new();
@@ -493,8 +494,8 @@ impl SourceParser for MultiCompilerParser {
             }
         }
 
-        self.solc.finalize_imports(&mut solc_nodes, include_paths)?;
-        self.vyper.finalize_imports(&mut vyper_nodes, include_paths)?;
+        self.solc.finalize_imports(&mut solc_nodes, include_paths, remappings)?;
+        self.vyper.finalize_imports(&mut vyper_nodes, include_paths, remappings)?;
 
         // Assume that the order was not changed by the parsers.
         let mut solc_nodes = solc_nodes.into_iter();

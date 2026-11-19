@@ -676,9 +676,18 @@ impl SourceParser for SolParser {
         &mut self,
         nodes: &mut Vec<Node<Self::ParsedSource>>,
         include_paths: &BTreeSet<PathBuf>,
+        remappings: &BTreeSet<Remapping>,
     ) -> Result<()> {
         let compiler = &mut self.compiler;
-        compiler.sess_mut().opts.include_paths.extend(include_paths.iter().cloned());
+        let opts = &mut compiler.sess_mut().opts;
+        opts.include_paths.extend(include_paths.iter().cloned());
+        opts.import_remappings.extend(remappings.iter().map(|r| {
+            solar::sema::interface::config::ImportRemapping {
+                context: r.context.clone().unwrap_or_default(),
+                prefix: r.name.clone(),
+                path: r.path.clone(),
+            }
+        }));
         compiler.enter_mut(|compiler| {
             let mut pcx = compiler.parse();
             pcx.set_resolve_imports(true);

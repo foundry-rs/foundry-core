@@ -52,7 +52,10 @@ use crate::{
     resolver::parse::SolParser,
 };
 use core::fmt;
-use foundry_compilers_artifacts::sources::{Source, Sources};
+use foundry_compilers_artifacts::{
+    remappings::Remapping,
+    sources::{Source, Sources},
+};
 use foundry_compilers_core::{
     error::{Result, SolcError},
     utils,
@@ -120,12 +123,13 @@ pub struct GraphEdges<P: SourceParser> {
     num_input_files: usize,
     /// tracks all imports that we failed to resolve for a file
     unresolved_imports: HashSet<(PathBuf, PathBuf)>,
-    /// tracks additional include paths resolved by scanning all imports of the graph
-    ///
-    /// Absolute imports, like `import "src/Contract.sol"` are possible, but this does not play
-    /// nice with the standard-json import format, since the VFS won't be able to resolve
-    /// "src/Contract.sol" without help via `--include-path`
+    /// Additional include paths resolved by scanning all imports of the graph: the project root
+    /// and the search paths of Vyper imports.
     resolved_solc_include_paths: BTreeSet<PathBuf>,
+    /// Remappings of absolute imports inside nested libraries, scoped to the library root.
+    ///
+    /// See [`ProjectPathsConfig::resolve_import_and_remappings`].
+    pub(crate) resolved_remappings: BTreeSet<Remapping>,
 }
 
 impl<P: SourceParser> Default for GraphEdges<P> {
@@ -141,6 +145,7 @@ impl<P: SourceParser> Default for GraphEdges<P> {
             num_input_files: Default::default(),
             unresolved_imports: Default::default(),
             resolved_solc_include_paths: Default::default(),
+            resolved_remappings: Default::default(),
         }
     }
 }
@@ -179,6 +184,12 @@ impl<P: SourceParser> GraphEdges<P> {
     /// Returns all additional `--include-paths`
     pub const fn include_paths(&self) -> &BTreeSet<PathBuf> {
         &self.resolved_solc_include_paths
+    }
+
+    /// Returns the remappings that compilers need to resolve absolute imports inside nested
+    /// libraries the way the graph does.
+    pub const fn remappings(&self) -> &BTreeSet<Remapping> {
+        &self.resolved_remappings
     }
 
     /// Returns all imports that we failed to resolve
@@ -303,6 +314,12 @@ impl<P: SourceParser> Graph<P> {
         &self.edges.indices
     }
 
+    /// Returns the remappings of absolute imports inside nested libraries, see
+    /// [`GraphEdges::remappings`].
+    pub const fn remappings(&self) -> &BTreeSet<Remapping> {
+        self.edges.remappings()
+    }
+
     /// Returns `true` if the graph is empty.
     pub const fn is_empty(&self) -> bool {
         self.nodes.is_empty()
@@ -396,10 +413,11 @@ impl<P: SourceParser> Graph<P> {
         let mut nodes = Vec::with_capacity(unresolved.len());
         let mut rev_edges = Vec::with_capacity(unresolved.len());
 
-        // tracks additional paths that should be used with `--include-path`, these are libraries
-        // that use absolute imports like `import "src/Contract.sol"`
+        // Tracks additional include paths and the remappings of absolute imports inside nested
+        // libraries, such as `import "src/Contract.sol"`.
         let mut resolved_solc_include_paths = BTreeSet::new();
         resolved_solc_include_paths.insert(paths.root.clone());
+        let mut resolved_remappings = BTreeSet::new();
 
         // keep track of all unique paths that we failed to resolve to not spam the reporter with
         // the same path
@@ -417,10 +435,10 @@ impl<P: SourceParser> Graph<P> {
                 for import_path in
                     node.data.resolve_imports(paths, &mut resolved_solc_include_paths)?
                 {
-                    match paths.resolve_import_and_include_paths(
+                    match paths.resolve_import_and_remappings(
                         cwd,
                         &import_path,
-                        &mut resolved_solc_include_paths,
+                        &mut resolved_remappings,
                     ) {
                         Ok(target) => {
                             if !index.contains_key(&target) {
@@ -484,7 +502,7 @@ impl<P: SourceParser> Graph<P> {
             );
         }
 
-        parser.finalize_imports(&mut nodes, &resolved_solc_include_paths)?;
+        parser.finalize_imports(&mut nodes, &resolved_solc_include_paths, &resolved_remappings)?;
 
         let edges = GraphEdges {
             edges,
@@ -501,6 +519,7 @@ impl<P: SourceParser> Graph<P> {
             parser: Some(parser),
             unresolved_imports,
             resolved_solc_include_paths,
+            resolved_remappings,
         };
         Ok(Self { nodes, edges, root: paths.root.clone() })
     }

@@ -15,6 +15,7 @@ use foundry_compilers_core::{
     error::{Result, SolcError, SolcIoError},
     utils::{self, strip_prefix_owned},
 };
+use path_slash::PathExt as _;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -396,13 +397,15 @@ impl<L> ProjectPathsConfig<L> {
     ///
     /// The `cwd` path is the parent dir of the file that includes the `import`
     ///
-    /// This will also populate the `include_paths` with any nested library root paths that should
-    /// be provided to solc via `--include-path` because it uses absolute imports.
-    pub fn resolve_import_and_include_paths(
+    /// An absolute import inside a nested library, such as `import "src/Config.sol"`, resolves
+    /// from that library's root. For each one, this adds to `remappings` a remapping of the import
+    /// scoped to the library root, so the compiler names the imported file as the resolver does and
+    /// applies the library's contextual remappings to its imports.
+    pub fn resolve_import_and_remappings(
         &self,
         cwd: &Path,
         import: &Path,
-        include_paths: &mut BTreeSet<PathBuf>,
+        remappings: &mut BTreeSet<Remapping>,
     ) -> Result<PathBuf> {
         let component = import
             .components()
@@ -426,12 +429,22 @@ impl<L> ProjectPathsConfig<L> {
                 // "src/interfaces/IConfig.sol"` which could either point to `cwd +
                 // src/interfaces/IConfig.sol`, or make use of a remapping (`src/=....`)
                 if let Some(lib) = self.find_library_ancestor(cwd)
-                    && let Some((include_path, import)) =
+                    && let Some((library_root, resolved)) =
                         utils::resolve_absolute_library(lib, cwd, import)
                 {
-                    // track the path for this absolute import inside a nested library
-                    include_paths.insert(include_path);
-                    return Ok(import);
+                    // An include path would let the compiler load the file under the import name,
+                    // outside the library root's remapping context. Imports that are already
+                    // absolute paths, such as resolved Vyper imports, need no remapping.
+                    if import.is_relative() {
+                        let context =
+                            library_root.strip_prefix(&self.root).unwrap_or(&library_root);
+                        remappings.insert(Remapping {
+                            context: Some(format!("{}/", context.to_slash_lossy())),
+                            name: import.to_slash_lossy().into_owned(),
+                            path: resolved.display().to_string(),
+                        });
+                    }
+                    return Ok(resolved);
                 }
                 // also try to resolve absolute imports from the project paths
                 for path in [&self.root, &self.sources, &self.tests, &self.scripts] {
@@ -456,7 +469,7 @@ impl<L> ProjectPathsConfig<L> {
     ///
     /// The `cwd` path is the parent dir of the file that includes the `import`
     pub fn resolve_import(&self, cwd: &Path, import: &Path) -> Result<PathBuf> {
-        self.resolve_import_and_include_paths(cwd, import, &mut Default::default())
+        self.resolve_import_and_remappings(cwd, import, &mut Default::default())
     }
 
     /// Attempts to find the path to the real solidity file that's imported via the given `import`
@@ -1283,7 +1296,7 @@ mod tests {
         // relative import
         assert_eq!(
             config
-                .resolve_import_and_include_paths(
+                .resolve_import_and_remappings(
                     &config.sources,
                     Path::new("./A.sol"),
                     &mut Default::default(),
@@ -1295,7 +1308,7 @@ mod tests {
         // direct import
         assert_eq!(
             config
-                .resolve_import_and_include_paths(
+                .resolve_import_and_remappings(
                     &config.sources,
                     Path::new("src/A.sol"),
                     &mut Default::default(),
@@ -1303,6 +1316,26 @@ mod tests {
                 .unwrap(),
             config.sources.join("A.sol")
         );
+    }
+
+    #[test]
+    fn absolute_library_import_adds_no_remapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ProjectPathsConfig::builder().root(dir.path()).build::<()>().unwrap();
+        let dependency = config.root.join("lib/dependency");
+        fs::create_dir_all(dependency.join("src")).unwrap();
+        fs::create_dir_all(dependency.join("deploy")).unwrap();
+        fs::write(dependency.join("src/A.sol"), "").unwrap();
+
+        let mut remappings = BTreeSet::new();
+        let cwd = dependency.join("deploy");
+        assert_eq!(
+            config
+                .resolve_import_and_remappings(&cwd, &dependency.join("src/A.sol"), &mut remappings)
+                .unwrap(),
+            dependency.join("src/A.sol")
+        );
+        assert!(remappings.is_empty());
     }
 
     #[test]
@@ -1323,7 +1356,7 @@ mod tests {
 
         assert_eq!(
             config
-                .resolve_import_and_include_paths(
+                .resolve_import_and_remappings(
                     &config.sources,
                     Path::new("@dependency/A.sol"),
                     &mut Default::default(),
@@ -1369,7 +1402,7 @@ mod tests {
 
         assert_eq!(
             config
-                .resolve_import_and_include_paths(
+                .resolve_import_and_remappings(
                     &dependency,
                     Path::new("library/Vm.sol"),
                     &mut Default::default(),
@@ -1379,7 +1412,7 @@ mod tests {
         );
         assert_eq!(
             config
-                .resolve_import_and_include_paths(
+                .resolve_import_and_remappings(
                     &config.sources,
                     Path::new("library/Vm.sol"),
                     &mut Default::default(),
@@ -1419,7 +1452,7 @@ mod tests {
 
         assert_eq!(
             config
-                .resolve_import_and_include_paths(
+                .resolve_import_and_remappings(
                     &config.root.join("../node_modules/dependency"),
                     Path::new("library/Vm.sol"),
                     &mut Default::default(),
@@ -1454,7 +1487,7 @@ mod tests {
         // Test that single file import / remapping resolves to file.
         assert!(
             config
-                .resolve_import_and_include_paths(
+                .resolve_import_and_remappings(
                     &config.sources,
                     Path::new("@my-lib/B.sol"),
                     &mut Default::default(),
@@ -1508,7 +1541,7 @@ mod tests {
         // Resolve the relative import from BytesUtils.sol
         let cwd = importing_file.parent().unwrap();
         let resolved = config
-            .resolve_import_and_include_paths(
+            .resolve_import_and_remappings(
                 cwd,
                 Path::new("./LibMem/LibMem.sol"),
                 &mut Default::default(),

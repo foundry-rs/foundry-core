@@ -206,8 +206,9 @@ where
         settings.remappings = self
             .paths
             .remappings
-            .clone()
-            .into_iter()
+            .iter()
+            .chain(graph.remappings())
+            .cloned()
             .map(|r| r.into_relative(self.root()).to_relative_remapping())
             .collect::<Vec<_>>();
 

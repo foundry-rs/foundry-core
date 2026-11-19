@@ -1355,6 +1355,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             invalidate_cache: bool,
             preprocessor: Option<&dyn Preprocessor<C>>,
             current_source_units: &BTreeSet<PathBuf>,
+            edges_remappings: &BTreeSet<Remapping>,
         ) -> (CompilerCache<C::Settings>, bool, BTreeSet<String>) {
             let preprocessed = preprocessor.is_some();
             let preprocessor_version = preprocessor.map_or(0, Preprocessor::cache_version);
@@ -1366,6 +1367,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
                 .paths
                 .remappings
                 .iter()
+                .chain(edges_remappings)
                 .cloned()
                 .map(|remapping| {
                     // Relativize both the target and the context; `Remapping::strip_prefix` only
@@ -1436,8 +1438,14 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             let invalidate_cache = !edges.unresolved_imports().is_empty();
 
             // read the cache file if it already exists
-            let (mut cache, source_context_changed, discarded_builds) =
-                get_cache(project, storage, invalidate_cache, preprocessor, &current_source_units);
+            let (mut cache, source_context_changed, discarded_builds) = get_cache(
+                project,
+                storage,
+                invalidate_cache,
+                preprocessor,
+                &current_source_units,
+                edges.remappings(),
+            );
 
             cache.remove_missing_files();
 

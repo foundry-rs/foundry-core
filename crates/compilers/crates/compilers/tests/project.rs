@@ -5950,6 +5950,58 @@ fn can_handle_nested_absolute_imports() {
     assert!(compiled.find_first("IConfig").is_some());
 }
 
+// An absolute import inside a dependency must keep the dependency's contextual remappings, and
+// the remappings this adds must not depend on which sources are compiled.
+#[test]
+fn nested_absolute_imports_keep_library_remappings() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.paths_mut().remappings.extend([
+        Remapping::from_str("dep/=lib/dep/").unwrap(),
+        Remapping::from_str("helpers/=lib/helpers/src/").unwrap(),
+        Remapping::from_str("lib/dep/:helpers/=lib/dep/lib/helpers/src/").unwrap(),
+    ]);
+    for (path, content) in [
+        ("helpers/src/Helper.sol", "contract RootHelper {}"),
+        ("dep/lib/helpers/src/Helper.sol", "contract DepHelper {}"),
+        ("dep/src/Dep.sol", r#"import "helpers/Helper.sol"; contract Dep is DepHelper {}"#),
+        ("dep/deploy/DepDeploy.sol", r#"import "src/Dep.sol"; contract DepDeploy {}"#),
+    ] {
+        project.add_lib(path, format!("pragma solidity ^0.8.10; {content}")).unwrap();
+    }
+    project
+        .add_test(
+            "DepDeploy.t.sol",
+            r#"pragma solidity ^0.8.10; import "dep/deploy/DepDeploy.sol"; contract DepDeployTest {}"#,
+        )
+        .unwrap();
+    let root = project.add_source("Root", "pragma solidity ^0.8.10; contract Root {}").unwrap();
+
+    let compiled = project.compile().unwrap();
+    compiled.assert_success();
+    assert!(compiled.find_first("DepHelper").is_some());
+    assert!(compiled.find_first("RootHelper").is_none());
+
+    // The bytecode ends with the hash of the metadata, which lists the compiler's remappings.
+    let bytecode = |compiled: &ProjectCompileOutput| {
+        compiled.find_first("Root").unwrap().bytecode.clone().unwrap().object
+    };
+    project.project().cleanup().unwrap();
+    let single = project.project().compile_files([&root]).unwrap();
+    single.assert_success();
+    assert_eq!(bytecode(&single), bytecode(&compiled));
+
+    let input = project.project().standard_json_input(&root).unwrap();
+    assert!(
+        input
+            .settings
+            .remappings
+            .iter()
+            .any(|r| r.to_string() == "lib/dep/:src/Dep.sol=lib/dep/src/Dep.sol"),
+        "{:?}",
+        input.settings.remappings
+    );
+}
+
 #[test]
 fn can_handle_nested_test_absolute_imports() {
     let project = TempProject::<MultiCompiler>::dapptools().unwrap();
