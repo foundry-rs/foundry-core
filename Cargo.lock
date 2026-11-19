@@ -3063,6 +3063,7 @@ dependencies = [
  "dirs",
  "eth-keystore",
  "eyre",
+ "futures-util",
  "hidapi-rusb",
  "reqwest 0.13.5",
  "rpassword",
