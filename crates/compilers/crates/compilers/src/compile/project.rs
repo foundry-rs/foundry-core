@@ -407,7 +407,8 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             sources.retain(|f, _| filter.is_match(f))
         }
         // Compiler inputs, and so metadata, carry the library root remappings, so they must not
-        // depend on which sources are compiled: take them from the whole project.
+        // depend on which sources are compiled: add those of the whole project. Files outside
+        // the project keep their own.
         let input_files = project.paths.input_files();
         let is_project = sources.len() == input_files.len()
             && input_files.iter().all(|file| sources.contains_key(file));
@@ -415,8 +416,9 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let ResolvedSources { sources, primary_profiles, mut edges } =
             graph.into_sources_by_version(project)?;
         if !is_project {
-            edges.resolved_remappings =
-                Graph::<C::Parser>::resolve(&project.paths)?.remappings().clone();
+            edges
+                .resolved_remappings
+                .extend(Graph::<C::Parser>::resolve(&project.paths)?.remappings().iter().cloned());
         }
 
         // With multiple jobs, different versions and profiles compile in parallel, and the

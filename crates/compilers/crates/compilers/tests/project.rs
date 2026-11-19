@@ -5964,7 +5964,9 @@ fn nested_absolute_imports_keep_library_remappings() {
         ("helpers/src/Helper.sol", "contract RootHelper {}"),
         ("dep/lib/helpers/src/Helper.sol", "contract DepHelper {}"),
         ("dep/src/Dep.sol", r#"import "helpers/Helper.sol"; contract Dep is DepHelper {}"#),
-        ("dep/deploy/DepDeploy.sol", r#"import "src/Dep.sol"; contract DepDeploy {}"#),
+        ("dep/deploy/DepDeploy.sol", r#"import "src/Dep.sol"; contract DepDeploy is Dep {}"#),
+        ("dep/src/DepConfig.sol", "contract DepConfig {}"),
+        ("dep/script/DepScript.sol", r#"import "src/DepConfig.sol"; contract DepScript {}"#),
     ] {
         project.add_lib(path, format!("pragma solidity ^0.8.10; {content}")).unwrap();
     }
@@ -5989,6 +5991,10 @@ fn nested_absolute_imports_keep_library_remappings() {
     let single = project.project().compile_files([&root]).unwrap();
     single.assert_success();
     assert_eq!(bytecode(&single), bytecode(&compiled));
+
+    // A library file that no project source reaches keeps its own library root remappings.
+    let script = project.paths().libraries[0].join("dep/script/DepScript.sol");
+    project.project().compile_files([script]).unwrap().assert_success();
 
     let input = project.project().standard_json_input(&root).unwrap();
     assert!(
