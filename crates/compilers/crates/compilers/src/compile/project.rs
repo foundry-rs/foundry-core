@@ -416,9 +416,11 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let ResolvedSources { sources, primary_profiles, mut edges } =
             graph.into_sources_by_version(project)?;
         if !is_project {
-            edges
-                .resolved_remappings
-                .extend(Graph::<C::Parser>::resolve(&project.paths)?.remappings().iter().cloned());
+            // Only the compiled sources report their unresolved imports.
+            let quiet = report::Report::new(report::NoReporter::default());
+            let project_graph =
+                report::with_scoped(&quiet, || Graph::<C::Parser>::resolve(&project.paths))?;
+            edges.resolved_remappings.extend(project_graph.remappings().iter().cloned());
         }
 
         // With multiple jobs, different versions and profiles compile in parallel, and the
