@@ -5987,14 +5987,19 @@ fn nested_absolute_imports_keep_library_remappings() {
     let bytecode = |compiled: &ProjectCompileOutput| {
         compiled.find_first("Root").unwrap().bytecode.clone().unwrap().object
     };
+
+    // A library file that no project source reaches still compiles, and compiling it does not
+    // change the project's compiler inputs, so the cache stays valid.
+    let script = project.paths().libraries[0].join("dep/script/DepScript.sol");
+    let mixed = project.project().compile_files([&script, &root]).unwrap();
+    mixed.assert_success();
+    assert_eq!(bytecode(&mixed), bytecode(&compiled));
+    assert!(project.compile().unwrap().is_unchanged());
+
     project.project().cleanup().unwrap();
     let single = project.project().compile_files([&root]).unwrap();
     single.assert_success();
     assert_eq!(bytecode(&single), bytecode(&compiled));
-
-    // A library file that no project source reaches keeps its own library root remappings.
-    let script = project.paths().libraries[0].join("dep/script/DepScript.sol");
-    project.project().compile_files([script]).unwrap().assert_success();
 
     let input = project.project().standard_json_input(&root).unwrap();
     assert!(

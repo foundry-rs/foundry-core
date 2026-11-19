@@ -407,8 +407,9 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             sources.retain(|f, _| filter.is_match(f))
         }
         // Compiler inputs, and so metadata, carry the library root remappings, so they must not
-        // depend on which sources are compiled: add those of the whole project. Files outside
-        // the project keep their own.
+        // depend on which sources are compiled: use those of the whole project. Files outside the
+        // project reach their library root through an include path instead, which is not part of
+        // the metadata.
         let input_files = project.paths.input_files();
         let is_project = sources.len() == input_files.len()
             && input_files.iter().all(|file| sources.contains_key(file));
@@ -420,7 +421,15 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             let quiet = report::Report::new(report::NoReporter::default());
             let project_graph =
                 report::with_scoped(&quiet, || Graph::<C::Parser>::resolve(&project.paths))?;
-            edges.resolved_remappings.extend(project_graph.remappings().iter().cloned());
+            let remappings = project_graph.remappings();
+            for remapping in std::mem::take(&mut edges.resolved_remappings) {
+                if !remappings.contains(&remapping)
+                    && let Some(context) = remapping.context
+                {
+                    edges.resolved_solc_include_paths.insert(project.paths.root.join(context));
+                }
+            }
+            edges.resolved_remappings = remappings.clone();
         }
 
         // With multiple jobs, different versions and profiles compile in parallel, and the

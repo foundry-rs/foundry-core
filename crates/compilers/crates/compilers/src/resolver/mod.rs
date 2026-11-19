@@ -125,7 +125,7 @@ pub struct GraphEdges<P: SourceParser> {
     unresolved_imports: HashSet<(PathBuf, PathBuf)>,
     /// Additional include paths resolved by scanning all imports of the graph: the project root
     /// and the search paths of Vyper imports.
-    resolved_solc_include_paths: BTreeSet<PathBuf>,
+    pub(crate) resolved_solc_include_paths: BTreeSet<PathBuf>,
     /// Remappings of absolute imports inside nested libraries, scoped to the library root.
     ///
     /// See [`ProjectPathsConfig::resolve_import_and_remappings`].
