@@ -24,10 +24,10 @@ zstd = ["dep:zstd"]
 [dependencies]
 alloy-chains = { workspace = true, features = ["serde"] }
 alloy-consensus.workspace = true
-alloy-json-rpc = "2.2.0"
+alloy-json-rpc = "2.6.1"
 alloy-primitives = { workspace = true, features = ["map"] }
-alloy-provider = { version = "2.2.0", default-features = false }
-alloy-rpc-types = { version = "2.2.0", features = ["eth"] }
+alloy-provider = { version = "2.6.1", default-features = false }
+alloy-rpc-types = { version = "2.6.1", features = ["eth"] }
 
 eyre.workspace = true
 futures = "0.3.32"
@@ -46,6 +46,6 @@ url = "2.5.8"
 zstd = { version = "0.14.0", optional = true }
 
 [dev-dependencies]
-alloy-rpc-client = "2.2.0"
+alloy-rpc-client = "2.6.1"
 tempfile.workspace = true
 tiny_http = "0.12.0"
