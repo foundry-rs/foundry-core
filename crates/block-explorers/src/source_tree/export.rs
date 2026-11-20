@@ -69,13 +69,17 @@ impl SourceTree {
     /// [`Self::write_to`]. [`ExportMode::CreateNew`] is the default policy.
     ///
     /// Checks the whole batch for existing files, conflicting types, duplicate destinations and
-    /// symlinks below `dir` before publishing the first file. The caller may pass a symlink
-    /// to an existing directory as `dir`. If `dir` contains `..`,
-    /// the path through the last `..` must already resolve. Files are published
-    /// individually in entry order. A concurrent create-only export cannot replace a file that
-    /// wins the race. On Unix, new files use the usual creation permissions (0666 subject to
-    /// the process umask), and replacements preserve the existing file's read, write and
-    /// execute permission bits.
+    /// symlinks below `dir` before publishing the first file. The caller may pass a symlink to an
+    /// existing directory as `dir`. If `dir` contains `..`, the path through the last `..` must
+    /// already resolve. Files are published individually in entry order. A concurrent create-only
+    /// export cannot replace a file that wins the race.
+    ///
+    /// [`ExportMode::Overwrite`] replaces an existing file with a new one instead of rewriting it
+    /// in place, so it needs write access to the containing directory and other hard links keep
+    /// the old contents. On Unix, new files use the usual creation permissions (0666 subject to
+    /// the process umask), and replacements preserve the existing file's read, write and execute
+    /// permission bits. Other metadata, such as ownership and extended attributes, is not carried
+    /// over.
     ///
     /// On Unix, publishing a new file in either mode requires support for a no-replace rename
     /// or hard links. For example, on macOS exFAT volumes this can return [`ExportError::Io`].
@@ -91,25 +95,21 @@ impl SourceTree {
         let files = &mut Builder::new();
         #[cfg(unix)]
         files.permissions(fs::Permissions::from_mode(0o666));
-        #[cfg(unix)]
-        let mut staging = None;
         for (path, entry) in paths.iter().zip(&self.entries) {
             let destination = dir.join(path);
             let io_error = ExportError::io(&destination);
             let Some(parent) = destination.parent() else { continue };
-            validate_destination(dir, path).map_err(ExportError::at(&destination))?;
+            let (.., existing) =
+                validate_destination(dir, path).map_err(ExportError::at(&destination))?;
+            mode.check_file(&destination, existing)?;
             fs::create_dir_all(parent).map_err(io_error)?;
-            #[cfg(unix)]
-            if mode == ExportMode::Overwrite
-                && let Some(key) = path.parent()
-                && staging.as_ref().map(|(previous, _)| *previous) != Some(key)
-            {
-                // Keep replacements private until persist sets each file's permissions.
-                staging = Some((key, private_tempdir_in(parent).map_err(io_error)?));
-            }
-            #[cfg(unix)]
-            let parent = staging.as_ref().map_or(parent, |(_, temp)| temp.path());
-            let mut file = files.tempfile_in(parent).map_err(io_error)?;
+            // A replacement stays owner-only until persist copies the existing file's permissions.
+            let file = if existing.is_some() {
+                NamedTempFile::new_in(parent)
+            } else {
+                files.tempfile_in(parent)
+            };
+            let mut file = file.map_err(io_error)?;
             file.write_all(entry.contents.as_bytes()).map_err(io_error)?;
             mode.persist(file, &destination)?;
         }
