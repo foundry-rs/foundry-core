@@ -2076,10 +2076,7 @@ mod tests {
     use alloy_rpc_client::ClientBuilder;
     use parking_lot::Mutex;
     use serde_json::{Value, json};
-    use std::{
-        path::PathBuf,
-        sync::mpsc::{Receiver, channel},
-    };
+    use std::{path::PathBuf, sync::mpsc::channel};
     use tiny_http::{Response, Server};
 
     type Backend = SharedBackend<AnyNetwork, BlockEnv>;
