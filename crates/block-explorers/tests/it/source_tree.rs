@@ -451,15 +451,28 @@ fn export_creates_files_with_normal_permissions() {
 #[test]
 fn overwrite_preserves_existing_access_permissions() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("Existing.sol");
-    fs::write(&path, "original").unwrap();
-    let tree = source_tree(&[("Existing.sol", "replacement")]);
-    for mode in [0o600, 0o640, 0o755] {
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
-        tree.export_to(dir.path(), ExportMode::Overwrite).unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode);
-        assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
+    let files = [
+        ("Private.sol", 0o600),
+        ("Shared.sol", 0o640),
+        ("nested/Executable.sol", 0o755),
+        ("Last.sol", 0o644),
+    ];
+    fs::create_dir(dir.path().join("nested")).unwrap();
+    for (name, mode) in files {
+        let path = dir.path().join(name);
+        fs::write(&path, "original").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
+
+    let tree = source_tree(&files.map(|(name, _)| (name, name)));
+    tree.export_to(dir.path(), ExportMode::Overwrite).unwrap();
+    for (name, mode) in files {
+        let path = dir.path().join(name);
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode);
+        assert_eq!(fs::read_to_string(path).unwrap(), name);
+    }
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 4);
+    assert_eq!(fs::read_dir(dir.path().join("nested")).unwrap().count(), 1);
 }
 
 #[test]

@@ -31,7 +31,7 @@ impl SourceTree {
     /// Existing files are overwritten in entry order. For user-directed exports, see
     /// [`Self::export_to`].
     pub fn write_to(&self, dir: &Path) -> Result<()> {
-        let paths = self.output_paths().collect::<Vec<_>>();
+        let paths = self.output_paths();
         for path in &paths {
             validate_destination(dir, path)?;
         }
@@ -47,17 +47,20 @@ impl SourceTree {
         Ok(())
     }
 
-    fn output_paths(&self) -> impl Iterator<Item = PathBuf> {
-        self.entries.iter().map(|entry| {
-            let mut path = sanitize_path(&entry.path);
-            if path.extension().is_none() {
-                let with_extension = path.with_extension("sol");
-                if !self.entries.iter().any(|entry| entry.path == with_extension) {
-                    path = with_extension;
+    fn output_paths(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .map(|entry| {
+                let mut path = sanitize_path(&entry.path);
+                if path.extension().is_none() {
+                    let with_extension = path.with_extension("sol");
+                    if !self.entries.iter().any(|entry| entry.path == with_extension) {
+                        path = with_extension;
+                    }
                 }
-            }
-            path
-        })
+                path
+            })
+            .collect()
     }
 }
 

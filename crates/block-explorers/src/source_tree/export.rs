@@ -76,10 +76,15 @@ impl SourceTree {
     pub fn export_to(&self, dir: &Path, mode: ExportMode) -> Result<(), ExportError> {
         // Inspect the directory entry itself even with a trailing separator.
         let dir = dir.components().as_path();
-        let paths = self.output_paths().collect::<Vec<_>>();
+        let paths = self.output_paths();
         mode.preflight(dir, &paths)?;
         fs::create_dir_all(dir).map_err(|source| ExportError::Io { path: dir.into(), source })?;
 
+        let files = &mut Builder::new();
+        #[cfg(unix)]
+        files.permissions(fs::Permissions::from_mode(0o666));
+        #[cfg(unix)]
+        let mut staging = None;
         for (path, entry) in paths.iter().zip(&self.entries) {
             let destination = dir.join(path);
             let io_error = |source| ExportError::Io { path: destination.clone(), source };
@@ -87,25 +92,25 @@ impl SourceTree {
                 validate_destination(dir, path)
                     .map_err(|err| ExportError::at_destination(err, &destination))?;
                 fs::create_dir_all(parent).map_err(io_error)?;
-                let builder = &mut Builder::new();
                 #[cfg(unix)]
-                let staging = if mode == ExportMode::Overwrite {
-                    // Keep replacement contents private until the destination permissions are set.
-                    Some(
-                        builder
-                            .permissions(fs::Permissions::from_mode(0o700))
-                            .tempdir_in(parent)
-                            .map_err(io_error)?,
-                    )
+                let parent = if mode == ExportMode::Overwrite {
+                    // Keep replacements private until persist sets each file's permissions.
+                    let relative_parent = path.parent();
+                    let temp = match &staging {
+                        Some((previous, temp)) if *previous == relative_parent => temp,
+                        _ => {
+                            let temp = Builder::new()
+                                .permissions(fs::Permissions::from_mode(0o700))
+                                .tempdir_in(parent)
+                                .map_err(io_error)?;
+                            &staging.insert((relative_parent, temp)).1
+                        }
+                    };
+                    temp.path()
                 } else {
-                    None
+                    parent
                 };
-                #[cfg(unix)]
-                let parent = {
-                    builder.permissions(fs::Permissions::from_mode(0o666));
-                    staging.as_ref().map_or(parent, |dir| dir.path())
-                };
-                let mut file = builder.tempfile_in(parent).map_err(io_error)?;
+                let mut file = files.tempfile_in(parent).map_err(io_error)?;
                 file.write_all(entry.contents.as_bytes()).map_err(io_error)?;
                 mode.persist(file, &destination)?;
             }
