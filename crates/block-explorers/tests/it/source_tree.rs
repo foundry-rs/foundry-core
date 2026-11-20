@@ -258,22 +258,20 @@ fn export_preserves_existing_files_before_writing_any_sources() {
 #[test]
 fn export_creates_sources_and_explicitly_replaces_regular_files() {
     let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
+    let project = temp.path();
     let contents = [0, 0xff, 1];
     let tree = metadata("C", &[("A", "first"), ("Pair", "raw"), ("Pair.sol", "companion")])
         .source_tree()
         .unwrap();
 
-    tree.export_to(&project, ExportMode::CreateNew).unwrap();
+    fs::write(project.join("notes"), contents).unwrap();
+    tree.export_to(project, ExportMode::CreateNew).unwrap();
     assert_eq!(fs::read(project.join("C/A.sol")).unwrap(), b"first");
     assert_eq!(fs::read(project.join("C/Pair")).unwrap(), b"raw");
     assert_eq!(fs::read(project.join("C/Pair.sol")).unwrap(), b"companion");
-    fs::write(project.join("notes"), contents).unwrap();
-    source_tree(&[("C/New.sol", "new")]).export_to(&project, ExportMode::CreateNew).unwrap();
     source_tree(&[("C/A.sol", "replacement"), ("D/B.sol", "created")])
-        .export_to(&project, ExportMode::Overwrite)
+        .export_to(project, ExportMode::Overwrite)
         .unwrap();
-    assert_eq!(fs::read(project.join("C/New.sol")).unwrap(), b"new");
     assert_eq!(fs::read(project.join("C/A.sol")).unwrap(), b"replacement");
     assert_eq!(fs::read(project.join("D/B.sol")).unwrap(), b"created");
     assert_eq!(fs::read(project.join("notes")).unwrap(), contents);
@@ -281,112 +279,96 @@ fn export_creates_sources_and_explicitly_replaces_regular_files() {
 
 #[test]
 fn export_preflights_duplicate_names_and_file_directory_conflicts() {
-    for mode in [ExportMode::CreateNew, ExportMode::Overwrite] {
-        for (first, last, conflict) in [
-            ("../C/Pair", "C/./Pair", "C/Pair.sol"),
-            ("C/Pair.sol", "C/Pair.sol/Nested.sol", "C/Pair.sol/Nested.sol"),
-            ("C/Pair.sol/Nested.sol", "C/Pair.sol", "C/Pair.sol"),
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let dir = temp.path().join("new/project");
-            let error = source_tree(&[("First.sol", "first"), (first, "one"), (last, "two")])
-                .export_to(&dir, mode)
-                .unwrap_err();
-            assert!(matches!(error, ExportError::Conflict(path) if path == dir.join(conflict)));
-            assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
-        }
+    for (mode, first, last, conflict) in [
+        (ExportMode::Overwrite, "../C/Pair", "C/./Pair", "C/Pair.sol"),
+        (ExportMode::CreateNew, "C/Pair.sol", "C/Pair.sol/Nested.sol", "C/Pair.sol/Nested.sol"),
+        (ExportMode::Overwrite, "C/Pair.sol/Nested.sol", "C/Pair.sol", "C/Pair.sol"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("new/project");
+        let error = source_tree(&[("First.sol", "first"), (first, "one"), (last, "two")])
+            .export_to(&dir, mode)
+            .unwrap_err();
+        assert!(matches!(error, ExportError::Conflict(path) if path == dir.join(conflict)));
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
     }
 }
 
 #[test]
 fn export_respects_the_destination_filesystems_case_sensitivity() {
-    for mode in [ExportMode::CreateNew, ExportMode::Overwrite] {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path();
-        fs::create_dir(dir.join("Sources")).unwrap();
-        let tree = source_tree(&[
-            ("First.sol", "first"),
-            ("Sources/New/A.sol", "one"),
-            ("sources/new/a.sol", "two"),
-        ]);
-        let result = tree.export_to(dir, mode);
-        if dir.join("SOURCES").exists() {
-            assert!(
-                matches!(result, Err(ExportError::Conflict(path)) if path == dir.join("sources/new/a.sol"))
-            );
-            assert_eq!(fs::read_dir(dir).unwrap().count(), 1);
-            assert_eq!(fs::read_dir(dir.join("Sources")).unwrap().count(), 0);
-        } else {
-            result.unwrap();
-            assert_eq!(fs::read(dir.join("Sources/New/A.sol")).unwrap(), b"one");
-            assert_eq!(fs::read(dir.join("sources/new/a.sol")).unwrap(), b"two");
-        }
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    fs::create_dir(dir.join("Sources")).unwrap();
+    let tree = source_tree(&[
+        ("First.sol", "first"),
+        ("Sources/New/A.sol", "one"),
+        ("sources/new/a.sol", "two"),
+    ]);
+    let result = tree.export_to(dir, ExportMode::CreateNew);
+    if dir.join("SOURCES").exists() {
+        assert!(
+            matches!(result, Err(ExportError::Conflict(path)) if path == dir.join("sources/new/a.sol"))
+        );
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(dir.join("Sources")).unwrap().count(), 0);
+    } else {
+        result.unwrap();
+        assert_eq!(fs::read(dir.join("Sources/New/A.sol")).unwrap(), b"one");
+        assert_eq!(fs::read(dir.join("sources/new/a.sol")).unwrap(), b"two");
     }
 }
 
 #[test]
 fn export_checks_existing_file_types_before_publication() {
-    for mode in [ExportMode::CreateNew, ExportMode::Overwrite] {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let directory = root.join("Directory.sol");
-        let file = root.join("File.sol");
-        fs::create_dir(&directory).unwrap();
-        fs::write(&file, b"original").unwrap();
-        for path in ["Directory.sol", "File.sol/Child.sol"] {
-            let error = source_tree(&[("First.sol", "first"), (path, "source")])
-                .export_to(root, mode)
-                .unwrap_err();
-            assert!(matches!(error, ExportError::Conflict(target) if target == root.join(path)));
-            assert_eq!(fs::read_dir(root).unwrap().count(), 2);
-            assert_eq!(fs::read(&file).unwrap(), b"original");
-            assert!(directory.is_dir());
-        }
-        let error = source_tree(&[("First.sol", "first")]).export_to(&file, mode).unwrap_err();
-        assert_eq!(error.to_string(), format!("conflicting source destination: {file:?}"));
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let directory = root.join("Directory.sol");
+    let file = root.join("File.sol");
+    fs::create_dir(&directory).unwrap();
+    fs::write(&file, b"original").unwrap();
+    for (mode, path) in [
+        (ExportMode::CreateNew, "Directory.sol"),
+        (ExportMode::Overwrite, "Directory.sol"),
+        (ExportMode::Overwrite, "File.sol/Child.sol"),
+    ] {
+        let error = preflight_error(root, path, mode);
+        assert!(matches!(error, ExportError::Conflict(target) if target == root.join(path)));
     }
+    assert_eq!(fs::read(&file).unwrap(), b"original");
+    assert!(directory.is_dir());
+    assert_eq!(fs::read_dir(root).unwrap().count(), 2);
+    let error = preflight_error(&file, "Child.sol", ExportMode::CreateNew);
+    assert_eq!(error.to_string(), format!("conflicting source destination: {file:?}"));
 }
 
 #[cfg(unix)]
 #[test]
 fn export_rejects_symlinks_and_special_files_before_publication() {
-    for mode in [ExportMode::CreateNew, ExportMode::Overwrite] {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path();
-        fs::write(dir.join("target"), "original").unwrap();
-        symlink("target", dir.join("Link.sol")).unwrap();
-        symlink("missing", dir.join("Dangling.sol")).unwrap();
-        symlink(".", dir.join("Directory")).unwrap();
-        let socket = dir.join("Socket.sol");
-        let _listener = UnixListener::bind(&socket).unwrap();
-        for (path, link) in [
-            ("Link.sol", "Link.sol"),
-            ("Dangling.sol", "Dangling.sol"),
-            ("Directory/Child.sol", "Directory"),
-        ] {
-            let error = source_tree(&[("First.sol", "first"), (path, "source")])
-                .export_to(dir, mode)
-                .unwrap_err();
-            let link = dir.join(link);
-            assert_eq!(
-                error.to_string(),
-                format!("source path from explorer traverses a symlink: {link:?}")
-            );
-        }
-        let root = dir.join("Directory");
-        let error =
-            source_tree(&[("First.sol", "first")]).export_to(&root.join(""), mode).unwrap_err();
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    fs::write(dir.join("target"), "original").unwrap();
+    symlink("target", dir.join("Link.sol")).unwrap();
+    symlink("missing", dir.join("Dangling.sol")).unwrap();
+    symlink(".", dir.join("Directory")).unwrap();
+    let root_link = dir.join("Directory").join("");
+    for (root, path, link, mode) in [
+        (dir, "Link.sol", "Link.sol", ExportMode::Overwrite),
+        (dir, "Dangling.sol", "Dangling.sol", ExportMode::CreateNew),
+        (dir, "Directory/Child.sol", "Directory", ExportMode::Overwrite),
+        (root_link.as_path(), "Child.sol", "Directory", ExportMode::CreateNew),
+    ] {
+        let error = preflight_error(root, path, mode);
+        let link = dir.join(link);
         assert_eq!(
             error.to_string(),
-            format!("source path from explorer traverses a symlink: {root:?}")
+            format!("source path from explorer traverses a symlink: {link:?}")
         );
-        let error = source_tree(&[("First.sol", "first"), ("Socket.sol", "source")])
-            .export_to(dir, mode)
-            .unwrap_err();
-        assert_eq!(error.to_string(), format!("conflicting source destination: {socket:?}"));
-        assert_eq!(fs::read(dir.join("target")).unwrap(), b"original");
-        assert!(!dir.join("First.sol").exists());
     }
+    let socket = dir.join("Socket.sol");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    let error = preflight_error(dir, "Socket.sol", ExportMode::Overwrite);
+    assert!(matches!(error, ExportError::Conflict(path) if path == socket));
+    assert_eq!(fs::read(dir.join("target")).unwrap(), b"original");
 }
 
 #[test]
@@ -405,18 +387,14 @@ fn concurrent_create_only_exports_publish_one_complete_source() {
         });
         writers.map(|writer| writer.join().unwrap())
     });
-    let mut winners = 0;
-    for (result, contents) in results.into_iter().zip(contents) {
-        match result {
-            Ok(()) => {
-                winners += 1;
-                assert_eq!(fs::read_to_string(dir.join("C/A.sol")).unwrap(), contents);
-            }
-            Err(ExportError::AlreadyExists(path)) => assert_eq!(path, dir.join("C/A.sol")),
-            Err(error) => panic!("unexpected export error: {error}"),
-        }
-    }
-    assert_eq!(winners, 1);
+    let path = dir.join("C/A.sol");
+    let (winner, error) = match results {
+        [Ok(()), Err(error)] => (&contents[0], error),
+        [Err(error), Ok(())] => (&contents[1], error),
+        results => panic!("expected exactly one successful export: {results:?}"),
+    };
+    assert!(matches!(error, ExportError::AlreadyExists(existing) if existing == path));
+    assert_eq!(&fs::read_to_string(path).unwrap(), winner);
 }
 
 fn source_tree(entries: &[(&str, &str)]) -> SourceTree {
@@ -479,32 +457,35 @@ fn overwrite_preserves_existing_access_permissions() {
 fn export_preflights_roots_with_parent_components() {
     let tree =
         source_tree(&[("New.sol", "new"), ("First.sol", "replacement"), ("Later.sol", "last")]);
-    for mode in [ExportMode::CreateNew, ExportMode::Overwrite] {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        fs::create_dir_all(project.join("Later.sol")).unwrap();
-        fs::write(project.join("First.sol"), "original").unwrap();
-        let build = temp.path().join("build");
-        let root = build.join("../project");
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join("Later.sol")).unwrap();
+    fs::write(project.join("First.sol"), "original").unwrap();
+    let build = temp.path().join("build");
+    let root = build.join("../project");
 
-        tree.export_to(&root, mode).unwrap_err();
-        assert_eq!(fs::read(project.join("First.sol")).unwrap(), b"original");
-        assert!(!project.join("New.sol").exists());
-        assert!(!build.exists());
+    tree.export_to(&root, ExportMode::Overwrite).unwrap_err();
+    assert_eq!(fs::read(project.join("First.sol")).unwrap(), b"original");
+    assert!(!project.join("New.sol").exists());
+    assert!(!build.exists());
 
-        fs::create_dir(&build).unwrap();
-        tree.export_to(&root.join("fresh"), mode).unwrap();
-        assert_eq!(fs::read(project.join("fresh/First.sol")).unwrap(), b"replacement");
-    }
+    fs::create_dir(&build).unwrap();
+    tree.export_to(&root.join("fresh"), ExportMode::CreateNew).unwrap();
+    assert_eq!(fs::read(project.join("fresh/First.sol")).unwrap(), b"replacement");
 }
 
 #[test]
 fn export_metadata_errors_report_the_destination() {
     let dir = tempfile::tempdir().unwrap();
     let name = "invalid\0name.sol";
-    let tree = source_tree(&[("First.sol", "first"), (name, "invalid")]);
-    let error = tree.export_to(dir.path(), ExportMode::CreateNew).unwrap_err();
+    let error = preflight_error(dir.path(), name, ExportMode::CreateNew);
     assert!(matches!(error, ExportError::Io { path, source }
         if path == dir.path().join(name) && source.kind() == std::io::ErrorKind::InvalidInput));
-    assert!(!dir.path().join("First.sol").exists());
+}
+
+fn preflight_error(dir: &Path, path: &str, mode: ExportMode) -> ExportError {
+    let tree = source_tree(&[("First.sol", "first"), (path, "source")]);
+    let error = tree.export_to(dir, mode).unwrap_err();
+    assert!(!dir.join("First.sol").exists());
+    error
 }

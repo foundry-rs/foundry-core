@@ -99,10 +99,7 @@ impl SourceTree {
                     let temp = match &staging {
                         Some((previous, temp)) if *previous == relative_parent => temp,
                         _ => {
-                            let temp = Builder::new()
-                                .permissions(fs::Permissions::from_mode(0o700))
-                                .tempdir_in(parent)
-                                .map_err(io_error)?;
+                            let temp = private_tempdir_in(parent).map_err(io_error)?;
                             &staging.insert((relative_parent, temp)).1
                         }
                     };
@@ -132,10 +129,7 @@ impl ExportMode {
             return Err(ExportError::Conflict(dir.to_owned()));
         }
 
-        let mut staging = HashMap::<_, TempDir>::new();
-        let scratch = &mut Builder::new();
-        #[cfg(unix)]
-        scratch.permissions(fs::Permissions::from_mode(0o700));
+        let mut staging = HashMap::new();
         for path in paths {
             let destination = dir.join(path);
             let target = validate_destination(dir, path)
@@ -148,7 +142,7 @@ impl ExportMode {
             let (anchor, id) = existing_directory(&target.directory).map_err(io_error)?;
             let temp = match staging.entry(id) {
                 Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => entry.insert(scratch.tempdir_in(anchor).map_err(io_error)?),
+                Entry::Vacant(entry) => entry.insert(private_tempdir_in(anchor).map_err(io_error)?),
             };
             let staged = temp.path().join(target.suffix);
             let staging_error = |source: io::Error| {
@@ -196,15 +190,19 @@ impl ExportMode {
     }
 
     fn check_file(self, path: &Path, file_type: Option<fs::FileType>) -> Result<(), ExportError> {
-        let Some(file_type) = file_type else { return Ok(()) };
-        if !file_type.is_file() {
-            return Err(ExportError::Conflict(path.into()));
+        match file_type {
+            Some(ty) if !ty.is_file() => Err(ExportError::Conflict(path.into())),
+            Some(_) if self == Self::CreateNew => Err(ExportError::AlreadyExists(path.into())),
+            _ => Ok(()),
         }
-        if self == Self::CreateNew {
-            return Err(ExportError::AlreadyExists(path.into()));
-        }
-        Ok(())
     }
+}
+
+fn private_tempdir_in(parent: &Path) -> io::Result<TempDir> {
+    let builder = &mut Builder::new();
+    #[cfg(unix)]
+    builder.permissions(fs::Permissions::from_mode(0o700));
+    builder.tempdir_in(parent)
 }
 
 // The requested export root itself may have missing parents.
