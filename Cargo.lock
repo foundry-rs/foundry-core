@@ -2896,6 +2896,7 @@ dependencies = [
  "alloy-primitives",
  "foundry-compilers",
  "reqwest 0.13.5",
+ "same-file",
  "semver 1.0.28",
  "serde",
  "serde_json",
