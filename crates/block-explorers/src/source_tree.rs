@@ -129,11 +129,15 @@ fn validate_destination<'a>(dir: &Path, path: &'a Path) -> Result<Destination<'a
 }
 
 fn destination_type(path: &Path) -> Result<Option<fs::FileType>> {
+    Ok(destination_metadata(path)?.map(|metadata| metadata.file_type()))
+}
+
+fn destination_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_symlink() => {
             Err(EtherscanError::SourcePathSymlink(path.to_owned()))
         }
-        Ok(metadata) => Ok(Some(metadata.file_type())),
+        Ok(metadata) => Ok(Some(metadata)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }

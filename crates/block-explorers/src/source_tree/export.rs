@@ -1,6 +1,6 @@
 //! User-directed source exports.
 
-use super::{SourceTree, destination_type, validate_destination};
+use super::{SourceTree, destination_metadata, destination_type, validate_destination};
 use crate::{EtherscanError, Result};
 use std::{
     collections::{HashMap, hash_map::Entry},
@@ -46,6 +46,17 @@ pub enum ExportError {
     },
 }
 
+impl ExportError {
+    fn at_destination(error: EtherscanError, path: &Path) -> Self {
+        match error {
+            EtherscanError::IO(err) if err.kind() == io::ErrorKind::NotADirectory => {
+                Self::Conflict(path.to_owned())
+            }
+            error => Self::Source(error),
+        }
+    }
+}
+
 impl SourceTree {
     /// Exports sources into a new or existing directory using the same final names as
     /// [`Self::write_to`]. [`ExportMode::CreateNew`] is the default policy.
@@ -53,7 +64,9 @@ impl SourceTree {
     /// Checks the whole batch for existing files, conflicting types, duplicate destinations and
     /// symlinks at or below `dir` before publishing the first file. Files are published
     /// individually in entry order. A concurrent create-only export cannot replace a file that
-    /// wins the race.
+    /// wins the race. On Unix, new files use the usual creation permissions (0666 subject to
+    /// the process umask), and replacements preserve the existing file's read, write and
+    /// execute permission bits.
     ///
     /// An I/O error during publication may leave earlier files in place. As with
     /// [`Self::write_to`], callers must control the output directory and its ancestors
@@ -69,9 +82,28 @@ impl SourceTree {
             let destination = dir.join(path);
             let io_error = |source| ExportError::Io { path: destination.clone(), source };
             if let Some(parent) = destination.parent() {
-                validate_destination(dir, path)?;
+                validate_destination(dir, path)
+                    .map_err(|err| ExportError::at_destination(err, &destination))?;
                 fs::create_dir_all(parent).map_err(io_error)?;
-                let mut file = NamedTempFile::new_in(parent).map_err(io_error)?;
+                let builder = &mut Builder::new();
+                #[cfg(unix)]
+                let staging = if mode == ExportMode::Overwrite {
+                    // Keep replacement contents private until the destination permissions are set.
+                    Some(
+                        builder
+                            .permissions(fs::Permissions::from_mode(0o700))
+                            .tempdir_in(parent)
+                            .map_err(io_error)?,
+                    )
+                } else {
+                    None
+                };
+                #[cfg(unix)]
+                let parent = {
+                    builder.permissions(fs::Permissions::from_mode(0o666));
+                    staging.as_ref().map_or(parent, |dir| dir.path())
+                };
+                let mut file = builder.tempfile_in(parent).map_err(io_error)?;
                 file.write_all(entry.contents.as_bytes()).map_err(io_error)?;
                 mode.persist(file, &destination)?;
             }
@@ -82,7 +114,8 @@ impl SourceTree {
 
 impl ExportMode {
     fn preflight(self, dir: &Path, paths: &[PathBuf]) -> Result<(), ExportError> {
-        if let Some(file_type) = destination_type(dir)?
+        if let Some(file_type) =
+            destination_type(dir).map_err(|err| ExportError::at_destination(err, dir))?
             && !file_type.is_dir()
         {
             return Err(ExportError::Conflict(dir.to_owned()));
@@ -93,8 +126,9 @@ impl ExportMode {
         #[cfg(unix)]
         scratch.permissions(fs::Permissions::from_mode(0o700));
         for path in paths {
-            let target = validate_destination(dir, path)?;
             let destination = dir.join(path);
+            let target = validate_destination(dir, path)
+                .map_err(|err| ExportError::at_destination(err, &destination))?;
             self.check_file(&destination, target.file_type)?;
 
             // Reserve names in a scratch directory on the target filesystem so case and Unicode
@@ -128,8 +162,19 @@ impl ExportMode {
     }
 
     fn persist(self, file: NamedTempFile, path: &Path) -> Result<(), ExportError> {
-        let replace = self == Self::Overwrite && self.check_file(path, destination_type(path)?)?;
-        let result = if replace { file.persist(path) } else { file.persist_noclobber(path) };
+        let result = if self == Self::Overwrite
+            && let Some(metadata) =
+                destination_metadata(path).map_err(|err| ExportError::at_destination(err, path))?
+        {
+            self.check_file(path, Some(metadata.file_type()))?;
+            #[cfg(unix)]
+            file.as_file()
+                .set_permissions(fs::Permissions::from_mode(metadata.mode() & 0o777))
+                .map_err(|source| ExportError::Io { path: path.into(), source })?;
+            file.persist(path)
+        } else {
+            file.persist_noclobber(path)
+        };
         result.map(|_| ()).map_err(|err| {
             if err.error.kind() == io::ErrorKind::AlreadyExists {
                 ExportError::AlreadyExists(path.into())
@@ -139,15 +184,15 @@ impl ExportMode {
         })
     }
 
-    fn check_file(self, path: &Path, file_type: Option<fs::FileType>) -> Result<bool, ExportError> {
-        let Some(file_type) = file_type else { return Ok(false) };
+    fn check_file(self, path: &Path, file_type: Option<fs::FileType>) -> Result<(), ExportError> {
+        let Some(file_type) = file_type else { return Ok(()) };
         if !file_type.is_file() {
             return Err(ExportError::Conflict(path.into()));
         }
         if self == Self::CreateNew {
             return Err(ExportError::AlreadyExists(path.into()));
         }
-        Ok(true)
+        Ok(())
     }
 }
 

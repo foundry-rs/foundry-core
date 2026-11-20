@@ -6,7 +6,10 @@ use foundry_block_explorers::{
 use std::{fs, path::Path, sync::Barrier, thread};
 
 #[cfg(unix)]
-use std::os::unix::{fs::symlink, net::UnixListener};
+use std::os::unix::{
+    fs::{PermissionsExt, symlink},
+    net::UnixListener,
+};
 
 #[test]
 fn metadata_rejects_hidden_contract_roots() {
@@ -330,14 +333,11 @@ fn export_checks_existing_file_types_before_publication() {
         let file = root.join("File.sol");
         fs::create_dir(&directory).unwrap();
         fs::write(&file, b"original").unwrap();
-        for (path, expected) in [
-            ("Directory.sol", format!("conflicting source destination: {directory:?}")),
-            ("File.sol/Child.sol", format!("source destination is not a directory: {file:?}")),
-        ] {
+        for path in ["Directory.sol", "File.sol/Child.sol"] {
             let error = source_tree(&[("First.sol", "first"), (path, "source")])
                 .export_to(root, mode)
                 .unwrap_err();
-            assert_eq!(error.to_string(), expected);
+            assert!(matches!(error, ExportError::Conflict(target) if target == root.join(path)));
             assert_eq!(fs::read_dir(root).unwrap().count(), 2);
             assert_eq!(fs::read(&file).unwrap(), b"original");
             assert!(directory.is_dir());
@@ -428,5 +428,36 @@ fn source_tree(entries: &[(&str, &str)]) -> SourceTree {
                 contents: contents.into(),
             })
             .collect(),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn export_creates_files_with_normal_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference = dir.path().join("reference");
+    fs::write(&reference, "").unwrap();
+    let expected = fs::metadata(reference).unwrap().permissions().mode() & 0o777;
+    for policy in [ExportMode::CreateNew, ExportMode::Overwrite] {
+        let name = "New.sol";
+        source_tree(&[(name, "new")]).export_to(dir.path(), policy).unwrap();
+        let path = dir.path().join(name);
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, expected);
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn overwrite_preserves_existing_access_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Existing.sol");
+    fs::write(&path, "original").unwrap();
+    let tree = source_tree(&[("Existing.sol", "replacement")]);
+    for mode in [0o600, 0o640, 0o755] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        tree.export_to(dir.path(), ExportMode::Overwrite).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
     }
 }
