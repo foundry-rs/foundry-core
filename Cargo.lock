@@ -2889,13 +2889,14 @@ dependencies = [
 
 [[package]]
 name = "foundry-block-explorers"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "alloy-chains",
  "alloy-json-abi",
  "alloy-primitives",
  "foundry-compilers",
  "reqwest 0.13.5",
+ "same-file",
  "semver 1.0.28",
  "serde",
  "serde_json",
@@ -3063,6 +3064,7 @@ dependencies = [
  "dirs",
  "eth-keystore",
  "eyre",
+ "futures-util",
  "hidapi-rusb",
  "reqwest 0.13.5",
  "rpassword",

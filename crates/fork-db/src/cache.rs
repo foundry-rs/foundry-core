@@ -783,7 +783,7 @@ mod tests {
         assert_eq!(cache.data.storage.read().len(), 1);
         assert!(cache.data.block_hashes.read().is_empty());
 
-        let _s = serde_json::to_string(&cache).unwrap();
+        serde_json::to_string(&cache).unwrap();
     }
 
     #[test]
@@ -847,7 +847,7 @@ mod tests {
         let cache: JsonBlockCacheData<BlockEnv> = serde_json::from_str(s).unwrap();
         assert_eq!(cache.data.accounts.read().len(), 1);
 
-        let _s = serde_json::to_string(&cache).unwrap();
+        serde_json::to_string(&cache).unwrap();
     }
 
     #[test]
@@ -922,36 +922,29 @@ mod tests {
     }
 
     #[test]
+    fn set_block_env_replaces_block_env() {
+        let block_env = BlockEnv { number: U256::from(123) };
+        let meta = BlockchainDbMeta::default().set_block_env(block_env.clone());
+        assert_eq!(meta.block_env, block_env);
+    }
+
+    #[test]
     fn exact_fork_identity_invalidates_cache_metadata() {
-        let meta = BlockchainDbMeta::<BlockEnv>::default()
-            .with_fork_identity(B256::with_last_byte(1), B256::with_last_byte(2));
-        assert_ne!(
-            meta,
-            BlockchainDbMeta::<BlockEnv>::default()
-                .with_fork_identity(B256::with_last_byte(3), B256::with_last_byte(2))
-        );
-        assert_ne!(
-            meta,
-            BlockchainDbMeta::<BlockEnv>::default()
-                .with_fork_identity(B256::with_last_byte(1), B256::with_last_byte(4))
-        );
+        let meta = |fork_hash, source_id| {
+            BlockchainDbMeta::<BlockEnv>::default().with_fork_identity(
+                B256::with_last_byte(fork_hash),
+                B256::with_last_byte(source_id),
+            )
+        };
+        assert_ne!(meta(1, 2), meta(3, 2));
+        assert_ne!(meta(1, 2), meta(1, 4));
     }
 
     #[test]
     fn can_return_cache_path_if_set() {
-        // set
-        let cache_db = JsonBlockCacheDB::<BlockEnv>::new(
-            Arc::new(RwLock::new(BlockchainDbMeta::default())),
-            Some(PathBuf::from("/tmp/foo")),
-        );
-        assert_eq!(Some(Path::new("/tmp/foo")), cache_db.cache_path());
-
-        // unset
-        let cache_db = JsonBlockCacheDB::<BlockEnv>::new(
-            Arc::new(RwLock::new(BlockchainDbMeta::default())),
-            None,
-        );
-        assert_eq!(None, cache_db.cache_path());
+        let cache_db = |path| JsonBlockCacheDB::<BlockEnv>::new(Arc::default(), path);
+        assert_eq!(cache_db(Some("/tmp/foo".into())).cache_path(), Some(Path::new("/tmp/foo")));
+        assert_eq!(cache_db(None).cache_path(), None);
     }
 
     #[test]

@@ -3,7 +3,7 @@ name = "foundry-block-explorers"
 description = "Bindings for Etherscan.io and other block explorer APIs"
 keywords = ["crypto", "ethers", "ethereum", "web3", "etherscan"]
 
-version = "0.25.0"
+version = "0.26.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -35,11 +35,14 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 semver.workspace = true
+tempfile.workspace = true
 
 foundry-compilers = { workspace = true, optional = true }
 
+[target.'cfg(not(unix))'.dependencies]
+same-file = "1.0.6"
+
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 serial_test = "4.0.1"
 tracing-subscriber.workspace = true
