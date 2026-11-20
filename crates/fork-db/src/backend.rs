@@ -2099,7 +2099,7 @@ mod tests {
         fn new(
             handler: impl Fn(&str, &Value) -> Result<Value, Value> + Send + Sync + 'static,
         ) -> Self {
-            Self::serve(handler, false)
+            Self::serve(move |method, params, _| handler(method, params), false)
         }
 
         /// Like [`Self::new`], but answers each request on its own thread, so a handler can delay
@@ -2107,11 +2107,13 @@ mod tests {
         fn concurrent(
             handler: impl Fn(&str, &Value) -> Result<Value, Value> + Send + Sync + 'static,
         ) -> Self {
-            Self::serve(handler, true)
+            Self::serve(move |method, params, _| handler(method, params), true)
         }
 
+        /// Answers each call with `handler(method, params, in_batch)`, where `in_batch` tells
+        /// whether the call is a member of a batch request.
         fn serve(
-            handler: impl Fn(&str, &Value) -> Result<Value, Value> + Send + Sync + 'static,
+            handler: impl Fn(&str, &Value, bool) -> Result<Value, Value> + Send + Sync + 'static,
             concurrent: bool,
         ) -> Self {
             let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
@@ -2129,7 +2131,9 @@ mod tests {
                     let respond = move || {
                         let answer = |rpc: &Value| {
                             let mut response = json!({"jsonrpc": "2.0", "id": rpc["id"]});
-                            match handler(rpc["method"].as_str().unwrap(), &rpc["params"]) {
+                            let (method, params) =
+                                (rpc["method"].as_str().unwrap(), &rpc["params"]);
+                            match handler(method, params, body.is_array()) {
                                 Ok(result) => response["result"] = result,
                                 Err(error) => response["error"] = error,
                             }
@@ -2205,12 +2209,14 @@ mod tests {
             }
         }
 
-        fn methods(&self) -> Vec<String> {
-            self.calls().iter().map(|call| call[0].as_str().unwrap().to_string()).collect()
-        }
-
-        fn count(&self, method: &str) -> usize {
-            self.calls().iter().filter(|call| call[0] == method).count()
+        /// Returns how often each method was called, as a JSON object.
+        fn counts(&self) -> Value {
+            let mut counts = json!({});
+            for call in self.calls() {
+                let count = &mut counts[call[0].as_str().unwrap()];
+                *count = json!(count.as_u64().unwrap_or(0) + 1);
+            }
+            counts
         }
     }
 
@@ -2381,7 +2387,7 @@ mod tests {
         assert!(backend.account(Address::with_last_byte(1)).is_err());
         assert!(backend.account(Address::with_last_byte(2)).is_err());
         assert_eq!(backend.accounts_len(), 0);
-        assert_eq!(rpc.methods(), ["eth_getAccountInfo"; 2]);
+        assert_eq!(rpc.counts(), json!({"eth_getAccountInfo": 2}));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2391,7 +2397,15 @@ mod tests {
 
         let account = backend.account(Address::with_last_byte(1)).unwrap().unwrap();
         assert_eq!(account.balance, U256::from(65535));
-        assert!(rpc.count("eth_getBalance") > 0);
+        assert_eq!(
+            rpc.counts(),
+            json!({
+                "eth_getAccountInfo": 1,
+                "eth_getBalance": 1,
+                "eth_getTransactionCount": 1,
+                "eth_getCode": 1,
+            })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2474,6 +2488,15 @@ mod tests {
         assert_eq!(account.balance, U256::from(42));
         assert_eq!(account.nonce, 7);
         assert_eq!(mode.load(), AccountFetchMode::SupportsAccountInfo);
+        assert_eq!(
+            rpc.counts(),
+            json!({
+                "eth_getAccountInfo": 1,
+                "eth_getBalance": 1,
+                "eth_getTransactionCount": 1,
+                "eth_getCode": 1,
+            })
+        );
     }
 
     /// Fetched values land in the shared database, where clones on other threads see them.
@@ -2574,7 +2597,7 @@ mod tests {
         assert_eq!((backend.cache_hits(), backend.cache_misses()), (0, 1));
         assert_eq!(backend.storage_at(address, slot).unwrap(), U256::from(42));
         assert_eq!((backend.cache_hits(), backend.cache_misses()), (1, 1));
-        assert_eq!(rpc.methods(), ["eth_getStorageAt"]);
+        assert_eq!(rpc.counts(), json!({"eth_getStorageAt": 1}));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2648,10 +2671,11 @@ mod tests {
         let cache = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
         assert_eq!(cache.db().accounts.read().keys().collect::<Vec<_>>(), [&joined]);
         let storage = cache.db().storage.read();
-        assert_eq!(storage.keys().collect::<Vec<_>>(), [&joined]);
-        assert_eq!(storage[&joined].len(), 2);
-        assert_eq!(storage[&joined][&U256::from(1)], U256::from(42));
-        assert_eq!(storage[&joined][&U256::from(2)], U256::from(42));
+        let slots = StorageInfo::from_iter([
+            (U256::from(1), U256::from(42)),
+            (U256::from(2), U256::from(42)),
+        ]);
+        assert_eq!(*storage, AddressHashMap::from_iter([(joined, slots)]));
     }
 
     /// Serves storage value 42 and anchor block 10 with parent `parent_hash`.
@@ -2739,7 +2763,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn exact_anchor_returns_zero_for_post_anchor_block() {
         let rpc = MockRpc::rejecting();
-        let backend = rpc.anchored(rpc.exact_meta(ANCHOR), ForkBlock::new(10, ANCHOR));
+        // Without a chain, any block hash lookup would first ask the rejecting server for it.
+        let meta = rpc.meta().with_fork_identity(ANCHOR, B256::with_last_byte(1));
+        let backend = rpc.anchored(meta, ForkBlock::new(10, ANCHOR));
 
         assert_eq!(backend.block_hash(11).unwrap(), B256::ZERO);
         assert!(rpc.calls().is_empty());
@@ -2935,29 +2961,31 @@ mod tests {
     }
 
     /// Answers account and storage reads with 42 and `eth_createAccessList` with `access_list`.
-    /// The first read of `failing_slot` waits for its release and then fails, like a rate-limited
-    /// member of a prefetch batch.
+    /// With `failing_slot`, storage reads inside batch requests wait until its flag is set, and
+    /// the read of that slot fails, like a rate-limited member of a prefetch batch.
     fn access_list_rpc(
         access_list: Result<Value, Value>,
-        failing_slot: Option<(U256, Receiver<()>)>,
+        failing_slot: Option<(U256, Arc<AtomicBool>)>,
     ) -> MockRpc {
-        let failing_slot = Mutex::new(failing_slot);
-        MockRpc::new(move |method, params| match method {
-            "eth_createAccessList" => access_list.clone(),
-            "eth_getAccountInfo" => Ok(json!({"balance": "0x2a", "nonce": "0x0", "code": "0x"})),
-            "eth_getStorageAt" => {
-                let mut failing = failing_slot.lock();
-                if let Some((slot, release)) = &*failing
-                    && params[1] == json!(slot)
-                {
-                    release.recv().unwrap();
-                    *failing = None;
-                    return Err(json!({"code": -32005, "message": "rate limited"}));
+        MockRpc::serve(
+            move |method, params, in_batch| match method {
+                "eth_createAccessList" => access_list.clone(),
+                "eth_getAccountInfo" => {
+                    Ok(json!({"balance": "0x2a", "nonce": "0x0", "code": "0x"}))
                 }
-                Ok(json!("0x2a"))
-            }
-            _ => Err(unsupported(method)),
-        })
+                "eth_getStorageAt" => {
+                    if in_batch && let Some((slot, released)) = &failing_slot {
+                        wait_until("batch release", || released.load(Ordering::Relaxed));
+                        if params[1] == json!(slot) {
+                            return Err(json!({"code": -32005, "message": "rate limited"}));
+                        }
+                    }
+                    Ok(json!("0x2a"))
+                }
+                _ => Err(unsupported(method)),
+            },
+            false,
+        )
     }
 
     /// An access list with one slot of `target` and one of `other`.
@@ -2984,11 +3012,11 @@ mod tests {
             .input(Bytes::from(vec![selector, 0, 0, 0, 1]).into())
     }
 
-    /// Waits until the two accounts and two slots of the access list have been requested.
-    fn wait_for_prefetch(backend: &Backend) {
+    /// Waits until `done` returns true, failing after 10 seconds.
+    fn wait_until(what: &str, done: impl Fn() -> bool) {
         let started = std::time::Instant::now();
-        while backend.cache_misses() < 4 {
-            assert!(started.elapsed() < Duration::from_secs(10), "prefetch did not start");
+        while !done() {
+            assert!(started.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -3001,7 +3029,8 @@ mod tests {
         let mut backend = access_list_backend(&rpc, Some(123.into())).await;
 
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
-        wait_for_prefetch(&backend);
+        // Waits until the two accounts and two slots of the access list have been requested.
+        wait_until("prefetch", || backend.cache_misses() >= 4);
         // Reads of the listed keys are served from the prefetch; the slot of `other` stays out
         // of the cache until it is read.
         assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
@@ -3052,9 +3081,10 @@ mod tests {
         }
         assert!(backend.wants_access_list(&access_list_call(target, 0xaa), B256::ZERO, false));
 
-        assert_eq!(rpc.count("eth_createAccessList"), 4);
-        assert_eq!(rpc.count("eth_getStorageAt"), 7);
-        assert_eq!(rpc.count("eth_getAccountInfo"), 2);
+        assert_eq!(
+            rpc.counts(),
+            json!({"eth_createAccessList": 4, "eth_getStorageAt": 7, "eth_getAccountInfo": 2})
+        );
         let simulation = rpc.calls().into_iter().find(|call| call[0] == "eth_createAccessList");
         assert_eq!(simulation.unwrap()[1], json!([access_list_call(target, 0xaa), "0x7b"]));
     }
@@ -3063,18 +3093,20 @@ mod tests {
     async fn access_list_prefetch_retries_failed_batch_members() {
         let target = Address::with_last_byte(1);
         let other = Address::with_last_byte(2);
-        let (release, release_rx) = channel();
-        let rpc = access_list_rpc(listed(target, other), Some((U256::from(1), release_rx)));
+        let release = Arc::new(AtomicBool::new(false));
+        let rpc =
+            access_list_rpc(listed(target, other), Some((U256::from(1), Arc::clone(&release))));
         let mut backend = access_list_backend(&rpc, None).await;
 
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
-        wait_for_prefetch(&backend);
+        // Waits until the two accounts and two slots of the access list have been requested.
+        wait_until("prefetch", || backend.cache_misses() >= 4);
         // The read joins the held batch. Its member fails, so a read of its own answers it; the
         // other slot of the batch is served from the prefetch.
         let reader = backend.clone();
         let read = std::thread::spawn(move || reader.storage_at(target, U256::from(1)));
         std::thread::sleep(Duration::from_millis(100));
-        release.send(()).unwrap();
+        release.store(true, Ordering::Relaxed);
         assert_eq!(read.join().unwrap().unwrap(), U256::from(42));
         assert_eq!(backend.storage_at(other, U256::from(2)).unwrap(), U256::from(42));
         // The failed batch stopped prefetching.
@@ -3082,8 +3114,10 @@ mod tests {
         backend.do_any_request(async { Ok(()) }).unwrap();
         assert_eq!(backend.storage_at(target, U256::from(3)).unwrap(), U256::from(42));
 
-        assert_eq!(rpc.count("eth_createAccessList"), 1);
-        assert_eq!(rpc.count("eth_getStorageAt"), 4);
+        assert_eq!(
+            rpc.counts(),
+            json!({"eth_createAccessList": 1, "eth_getStorageAt": 4, "eth_getAccountInfo": 2})
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3100,7 +3134,10 @@ mod tests {
             backend.do_any_request(async { Ok(()) }).unwrap();
             assert_eq!(backend.storage_at(target, U256::from(slot)).unwrap(), U256::from(42));
             // Waits for the simulation, so the next call does not find it in flight.
-            assert_eq!(rpc.count("eth_createAccessList"), slot);
+            assert_eq!(
+                rpc.counts(),
+                json!({"eth_createAccessList": slot, "eth_getStorageAt": slot})
+            );
         }
     }
 
@@ -3112,18 +3149,15 @@ mod tests {
 
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
         // Waits for the rejection, which arrives after the simulation request.
-        let started = std::time::Instant::now();
-        while backend.wants_access_list(&access_list_call(target, 0xbb), B256::ZERO, false) {
-            assert!(started.elapsed() < Duration::from_secs(10), "simulation was not rejected");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("rejection", || {
+            !backend.wants_access_list(&access_list_call(target, 0xbb), B256::ZERO, false)
+        });
         assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
         backend.prefetch_access_list(access_list_call(target, 0xbb), None, B256::ZERO);
         backend.do_any_request(async { Ok(()) }).unwrap();
         assert_eq!(backend.storage_at(target, U256::from(2)).unwrap(), U256::from(42));
 
-        assert_eq!(rpc.count("eth_createAccessList"), 1);
-        assert_eq!(rpc.count("eth_getStorageAt"), 2);
+        assert_eq!(rpc.counts(), json!({"eth_createAccessList": 1, "eth_getStorageAt": 2}));
     }
 
     #[tokio::test(flavor = "multi_thread")]
