@@ -461,3 +461,37 @@ fn overwrite_preserves_existing_access_permissions() {
         assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
     }
 }
+
+#[test]
+fn export_preflights_roots_with_parent_components() {
+    let tree =
+        source_tree(&[("New.sol", "new"), ("First.sol", "replacement"), ("Later.sol", "last")]);
+    for mode in [ExportMode::CreateNew, ExportMode::Overwrite] {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(project.join("Later.sol")).unwrap();
+        fs::write(project.join("First.sol"), "original").unwrap();
+        let build = temp.path().join("build");
+        let root = build.join("../project");
+
+        tree.export_to(&root, mode).unwrap_err();
+        assert_eq!(fs::read(project.join("First.sol")).unwrap(), b"original");
+        assert!(!project.join("New.sol").exists());
+        assert!(!build.exists());
+
+        fs::create_dir(&build).unwrap();
+        tree.export_to(&root.join("fresh"), mode).unwrap();
+        assert_eq!(fs::read(project.join("fresh/First.sol")).unwrap(), b"replacement");
+    }
+}
+
+#[test]
+fn export_metadata_errors_report_the_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "invalid\0name.sol";
+    let tree = source_tree(&[("First.sol", "first"), (name, "invalid")]);
+    let error = tree.export_to(dir.path(), ExportMode::CreateNew).unwrap_err();
+    assert!(matches!(error, ExportError::Io { path, source }
+        if path == dir.path().join(name) && source.kind() == std::io::ErrorKind::InvalidInput));
+    assert!(!dir.path().join("First.sol").exists());
+}

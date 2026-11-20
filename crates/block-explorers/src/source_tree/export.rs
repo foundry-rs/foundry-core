@@ -52,6 +52,7 @@ impl ExportError {
             EtherscanError::IO(err) if err.kind() == io::ErrorKind::NotADirectory => {
                 Self::Conflict(path.to_owned())
             }
+            EtherscanError::IO(source) => Self::Io { path: path.to_owned(), source },
             error => Self::Source(error),
         }
     }
@@ -62,7 +63,8 @@ impl SourceTree {
     /// [`Self::write_to`]. [`ExportMode::CreateNew`] is the default policy.
     ///
     /// Checks the whole batch for existing files, conflicting types, duplicate destinations and
-    /// symlinks at or below `dir` before publishing the first file. Files are published
+    /// symlinks at or below `dir` before publishing the first file. If `dir` contains `..`,
+    /// the path through the last `..` must already resolve. Files are published
     /// individually in entry order. A concurrent create-only export cannot replace a file that
     /// wins the race. On Unix, new files use the usual creation permissions (0666 subject to
     /// the process umask), and replacements preserve the existing file's read, write and
@@ -114,6 +116,10 @@ impl SourceTree {
 
 impl ExportMode {
     fn preflight(self, dir: &Path, paths: &[PathBuf]) -> Result<(), ExportError> {
+        // Creating missing directories before `..` could reveal existing destinations.
+        if let Some(parent) = dir.ancestors().find(|p| p.ends_with("..")) {
+            fs::metadata(parent).map_err(|err| ExportError::at_destination(err.into(), dir))?;
+        }
         if let Some(file_type) =
             destination_type(dir).map_err(|err| ExportError::at_destination(err, dir))?
             && !file_type.is_dir()
