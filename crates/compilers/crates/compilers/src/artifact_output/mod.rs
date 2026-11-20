@@ -1272,12 +1272,14 @@ mod tests {
                 object: BytecodeObject::Bytecode(Default::default()),
                 source_map: Some("creation-map".to_string()),
                 link_references: BTreeMap::new(),
+                ethdebug: None,
             }),
             deployed_bytecode: Some(CompactDeployedBytecode {
                 bytecode: Some(CompactBytecode {
                     object: BytecodeObject::Bytecode(Default::default()),
                     source_map: Some("runtime-map".to_string()),
                     link_references: BTreeMap::new(),
+                    ethdebug: None,
                 }),
                 immutable_references: BTreeMap::new(),
             }),
