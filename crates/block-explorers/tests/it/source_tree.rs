@@ -341,21 +341,42 @@ fn export_checks_existing_file_types_before_publication() {
 
 #[cfg(unix)]
 #[test]
+fn export_follows_a_directory_symlink_at_the_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("project");
+    let link = temp.path().join("link");
+    fs::create_dir(&target).unwrap();
+    symlink(&target, &link).unwrap();
+
+    for (root, mode, contents) in [
+        (link.clone(), ExportMode::CreateNew, "first"),
+        (link.join(""), ExportMode::Overwrite, "replacement"),
+    ] {
+        source_tree([("C/A.sol", contents)]).export_to(&root, mode).unwrap();
+        assert_eq!(fs::read_to_string(target.join("C/A.sol")).unwrap(), contents);
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn export_rejects_symlinks_and_special_files_before_publication() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
-    symlink("missing", dir.join("Dangling.sol")).unwrap();
-    symlink(".", dir.join("Directory")).unwrap();
-    let root_link = dir.join("Directory").join("");
-    for (root, path, link) in [
-        (dir, "Dangling.sol", dir.join("Dangling.sol")),
-        (root_link.as_path(), "Child.sol", dir.join("Directory")),
-    ] {
-        let error = preflight_error(root, path, ExportMode::CreateNew);
-        assert!(
-            matches!(error, ExportError::Source(EtherscanError::SourcePathSymlink(p)) if p == link)
-        );
-    }
+    let link = dir.join("Dangling.sol");
+    symlink("missing", &link).unwrap();
+    let error = preflight_error(dir, "Dangling.sol", ExportMode::CreateNew);
+    assert!(
+        matches!(error, ExportError::Source(EtherscanError::SourcePathSymlink(p)) if p == link)
+    );
+
+    let error = preflight_error(&link.join(""), "Child.sol", ExportMode::CreateNew);
+    assert!(matches!(error, ExportError::Io { path, source }
+        if path == link && source.kind() == std::io::ErrorKind::NotFound));
+
+    fs::write(dir.join("missing"), "original").unwrap();
+    let error = preflight_error(&link, "Child.sol", ExportMode::CreateNew);
+    assert!(matches!(error, ExportError::Conflict(path) if path == link));
+
     let socket = dir.join("Socket.sol");
     let _listener = UnixListener::bind(&socket).unwrap();
     let error = preflight_error(dir, "Socket.sol", ExportMode::Overwrite);

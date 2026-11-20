@@ -69,18 +69,20 @@ impl SourceTree {
     /// [`Self::write_to`]. [`ExportMode::CreateNew`] is the default policy.
     ///
     /// Checks the whole batch for existing files, conflicting types, duplicate destinations and
-    /// symlinks at or below `dir` before publishing the first file. If `dir` contains `..`,
+    /// symlinks below `dir` before publishing the first file. The caller may pass a symlink
+    /// to an existing directory as `dir`. If `dir` contains `..`,
     /// the path through the last `..` must already resolve. Files are published
     /// individually in entry order. A concurrent create-only export cannot replace a file that
     /// wins the race. On Unix, new files use the usual creation permissions (0666 subject to
     /// the process umask), and replacements preserve the existing file's read, write and
     /// execute permission bits.
     ///
-    /// An I/O error during publication may leave earlier files in place. As with
+    /// On Unix, publishing a new file in either mode requires support for a no-replace rename
+    /// or hard links. For example, on macOS exFAT volumes this can return [`ExportError::Io`].
+    /// A publication error may leave created directories and earlier files in place. As with
     /// [`Self::write_to`], callers must control the output directory and its ancestors
     /// throughout the export.
     pub fn export_to(&self, dir: &Path, mode: ExportMode) -> Result<(), ExportError> {
-        // Inspect the directory entry itself even with a trailing separator.
         let dir = dir.components().as_path();
         let paths = self.output_paths();
         mode.preflight(dir, &paths)?;
@@ -121,10 +123,11 @@ impl ExportMode {
         if let Some(parent) = dir.ancestors().find(|p| p.ends_with("..")) {
             fs::metadata(parent).map_err(ExportError::at(dir))?;
         }
-        if let Some(metadata) = destination_metadata(dir).map_err(ExportError::at(dir))?
-            && !metadata.is_dir()
-        {
-            return Err(ExportError::Conflict(dir.to_owned()));
+        match fs::metadata(dir) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(ExportError::Conflict(dir.into())),
+            Err(err) if err.kind() == io::ErrorKind::NotFound && !dir.is_symlink() => {}
+            Err(err) => return Err(ExportError::at(dir)(err)),
         }
 
         let mut staging = HashMap::new();
