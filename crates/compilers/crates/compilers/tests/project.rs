@@ -4549,6 +4549,104 @@ fn can_recompile_unchanged_with_empty_files() {
 }
 
 #[test]
+fn coverage_build_info_of_artifactless_file_stays_current() {
+    let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
+    tmp.project_mut().build_info = true;
+    // Without AST output, a file of free functions produces no artifacts.
+    tmp.project_mut().settings.solc.output_selection = OutputSelection::default_output_selection();
+    tmp.add_source(
+        "Free",
+        "pragma solidity ^0.8.10; function free() pure returns (uint) { return 1; }",
+    )
+    .unwrap();
+    // Its artifact keeps the first build info alive.
+    let contract = tmp.add_source("C", "pragma solidity ^0.8.10; contract C {}").unwrap();
+    tmp.compile().unwrap().assert_success();
+
+    let cache_path = tmp.project().cache_path().to_path_buf();
+    let set_coverage_build_id = |id: Option<&str>| {
+        let mut cache: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        let entry = &mut cache["files"]["src/Free.sol"];
+        match id {
+            Some(id) => entry["coverageBuildId"] = id.into(),
+            None => assert!(entry.get("coverageBuildId").is_none()),
+        }
+        fs::write(&cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        cache["builds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    // A missing coverage build info recompiles the file once.
+    set_coverage_build_id(Some("missing"));
+    assert!(!tmp.compile().unwrap().is_unchanged());
+    let [build_id] = <[_; 1]>::try_from(set_coverage_build_id(None)).unwrap();
+    assert!(tmp.compile().unwrap().is_unchanged());
+
+    // Only the coverage reference keeps the build info now.
+    fs::remove_file(contract).unwrap();
+    set_coverage_build_id(Some(&build_id));
+    assert!(tmp.compile().unwrap().is_unchanged());
+    let build_info = tmp.paths().build_infos.join(&build_id).with_extension("json");
+    assert!(build_info.is_file());
+
+    // A settings change recompiles the file and drops its old coverage build info, also from the
+    // output of that build.
+    tmp.project_mut().settings.solc.optimizer.enabled = Some(true);
+    let compiled = tmp.compile().unwrap();
+    assert!(!compiled.is_unchanged());
+    assert!(compiled.builds().all(|(id, _)| *id != build_id));
+    set_coverage_build_id(None);
+    assert!(!build_info.exists());
+}
+
+#[test]
+fn coverage_build_info_outside_compilation_survives() {
+    let mut tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
+    tmp.project_mut().build_info = true;
+    // Without AST output, a file of free functions produces no artifacts.
+    tmp.project_mut().settings.solc.output_selection = OutputSelection::default_output_selection();
+    let a = tmp.add_source("A", "pragma solidity ^0.8.10; function a() pure {}").unwrap();
+    tmp.add_source("B", "pragma solidity ^0.8.10; function b() pure {}").unwrap();
+    // Its artifact keeps the first build info alive.
+    let contract = tmp.add_source("C", "pragma solidity ^0.8.10; contract C {}").unwrap();
+    tmp.compile().unwrap().assert_success();
+
+    let cache_path = tmp.project().cache_path().to_path_buf();
+    let edit_cache = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut cache: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        edit(&mut cache);
+        fs::write(&cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
+        cache
+    };
+
+    // Only B's coverage reference keeps the build info now.
+    let build_id = edit_cache(&|cache| {
+        cache["files"]["src/B.sol"]["coverageBuildId"] = cache["builds"][0].clone();
+    })["builds"][0]
+        .clone();
+    fs::remove_file(contract).unwrap();
+    assert!(tmp.compile().unwrap().is_unchanged());
+
+    // A's coverage build info is gone, so no cached build info can be read.
+    edit_cache(&|cache| {
+        cache["builds"].as_array_mut().unwrap().push("gone".into());
+        cache["files"]["src/A.sol"]["coverageBuildId"] = "gone".into();
+    });
+    tmp.project().compile_file(a).unwrap().assert_success();
+    let cache = edit_cache(&|_| {});
+    assert!(cache["files"]["src/A.sol"].get("coverageBuildId").is_none());
+    assert_eq!(cache["files"]["src/B.sol"]["coverageBuildId"], build_id);
+    let build_info = tmp.paths().build_infos.join(build_id.as_str().unwrap());
+    assert!(build_info.with_extension("json").is_file());
+}
+
+#[test]
 fn can_emit_empty_artifacts() {
     let tmp = TempProject::<MultiCompiler>::dapptools().unwrap();
 

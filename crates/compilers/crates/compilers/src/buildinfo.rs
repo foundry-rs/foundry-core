@@ -3,6 +3,7 @@
 use crate::compilers::{
     CompilationError, CompilerContract, CompilerInput, CompilerOutput, Language,
 };
+use foundry_compilers_artifacts::SourceCoverage;
 use foundry_compilers_core::{error::Result, utils};
 use semver::Version;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -33,6 +34,15 @@ impl<I: DeserializeOwned, O: DeserializeOwned> BuildInfo<I, O> {
     }
 }
 
+/// Collects the instrumented coverage maps of a compiler output, by source id.
+fn source_coverage<E, C>(output: &CompilerOutput<E, C>) -> BTreeMap<u32, SourceCoverage> {
+    output
+        .sources
+        .values()
+        .filter_map(|source| Some((source.id, source.coverage.clone()?)))
+        .collect()
+}
+
 /// Additional context we cache for each compiler run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildContext<L> {
@@ -45,6 +55,12 @@ pub struct BuildContext<L> {
     /// Compiler source locations refer to the edited sources.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub source_edits: BTreeMap<u32, Vec<SourceEdit>>,
+    /// Instrumented coverage map by source id, present only for coverage builds.
+    ///
+    /// The map is per-source compiler output, not an artifact, so caching it here lets a warm
+    /// build serve it from the reloaded build info instead of recompiling.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub coverage: BTreeMap<u32, SourceCoverage>,
 }
 
 impl<L: Language> BuildContext<L> {
@@ -61,7 +77,12 @@ impl<L: Language> BuildContext<L> {
             }
         }
 
-        Ok(Self { source_id_to_path, language: input.language(), source_edits: BTreeMap::new() })
+        Ok(Self {
+            source_id_to_path,
+            language: input.language(),
+            source_edits: BTreeMap::new(),
+            coverage: source_coverage(output),
+        })
     }
 
     pub fn join_all(&mut self, root: &Path) {
@@ -134,6 +155,7 @@ impl<L: Language> RawBuildInfo<L> {
                 source_id_to_path: payload.source_id_to_path.clone(),
                 language: input.language(),
                 source_edits: BTreeMap::new(),
+                coverage: source_coverage(output),
             }
         } else {
             BuildContext::new(input, output)?

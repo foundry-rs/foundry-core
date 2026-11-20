@@ -519,6 +519,7 @@ impl CompilerSettings for SolcSettings {
                     via_ssa_cfg,
                     experimental,
                     debug,
+                    solar,
                     libraries,
                 },
             ..
@@ -534,6 +535,7 @@ impl CompilerSettings for SolcSettings {
             && *via_ssa_cfg == other.settings.via_ssa_cfg
             && *experimental == other.settings.experimental
             && *debug == other.settings.debug
+            && *solar == other.settings.solar
             && *libraries == other.settings.libraries
             && output_selection.is_subset_of(&other.settings.output_selection)
     }
@@ -807,7 +809,7 @@ mod tests {
         let output = CompilerOutput {
             sources: BTreeMap::from([(
                 "src/file.sol".to_string().into(),
-                SourceFile { id: 1, ast: None },
+                SourceFile { id: 1, ast: None, coverage: None },
             )]),
             contracts: BTreeMap::new(),
             errors: Vec::new(),
@@ -826,9 +828,18 @@ mod tests {
         );
         let output = CompilerOutput {
             sources: BTreeMap::from([
-                ("src//file.sol".to_string().into(), SourceFile { id: 1, ast: None }),
-                ("src/file.sol".to_string().into(), SourceFile { id: 2, ast: None }),
-                ("generated.sol".to_string().into(), SourceFile { id: 3, ast: None }),
+                (
+                    "src//file.sol".to_string().into(),
+                    SourceFile { id: 1, ast: None, coverage: None },
+                ),
+                (
+                    "src/file.sol".to_string().into(),
+                    SourceFile { id: 2, ast: None, coverage: None },
+                ),
+                (
+                    "generated.sol".to_string().into(),
+                    SourceFile { id: 3, ast: None, coverage: None },
+                ),
             ]),
             contracts: BTreeMap::from([
                 (
