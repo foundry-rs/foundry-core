@@ -2081,6 +2081,9 @@ mod tests {
 
     type Backend = SharedBackend<AnyNetwork, BlockEnv>;
 
+    /// Answers a call from its method, its params, and whether it is a member of a batch.
+    type Handler = dyn Fn(&str, &Value, bool) -> Result<Value, Value> + Send + Sync;
+
     const ANCHOR: B256 = B256::with_last_byte(0xaa);
 
     /// In-process JSON-RPC server that records every call, including each member of a batch, as
@@ -2096,7 +2099,7 @@ mod tests {
         fn new(
             handler: impl Fn(&str, &Value) -> Result<Value, Value> + Send + Sync + 'static,
         ) -> Self {
-            Self::serve(move |method, params, _| handler(method, params), false)
+            Self::serve(Box::new(move |method, params, _| handler(method, params)), false)
         }
 
         /// Like [`Self::new`], but answers each request on its own thread, so a handler can delay
@@ -2104,18 +2107,15 @@ mod tests {
         fn concurrent(
             handler: impl Fn(&str, &Value) -> Result<Value, Value> + Send + Sync + 'static,
         ) -> Self {
-            Self::serve(move |method, params, _| handler(method, params), true)
+            Self::serve(Box::new(move |method, params, _| handler(method, params)), true)
         }
 
         /// Answers each call with `handler(method, params, in_batch)`, where `in_batch` tells
         /// whether the call is a member of a batch request.
-        fn serve(
-            handler: impl Fn(&str, &Value, bool) -> Result<Value, Value> + Send + Sync + 'static,
-            concurrent: bool,
-        ) -> Self {
+        fn serve(handler: Box<Handler>, concurrent: bool) -> Self {
             let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
             let calls = Arc::<Mutex<Vec<Value>>>::default();
-            let handler = Arc::new(handler);
+            let handler = Arc::<Handler>::from(handler);
             let (server2, calls2) = (Arc::clone(&server), Arc::clone(&calls));
             std::thread::spawn(move || {
                 for mut request in server2.incoming_requests() {
@@ -2501,15 +2501,13 @@ mod tests {
     async fn shared_backend() {
         let hash = B256::with_last_byte(10);
         let rpc = MockRpc::new(move |method, _| match method {
+            "eth_chainId" => Ok(json!("0x1")),
             "eth_getAccountInfo" => Ok(json!({"balance": "0x2a", "nonce": "0x7", "code": "0x"})),
             "eth_getStorageAt" => Ok(json!("0x2a")),
             "eth_getBlockByNumber" => Ok(block(10, hash, B256::ZERO)),
             _ => Err(unsupported(method)),
         });
-        let meta = rpc
-            .meta()
-            .set_chain(Chain::mainnet())
-            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let meta = rpc.meta().with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
         let backend = rpc.backend(meta, None).await;
         let address = Address::with_last_byte(1);
 
@@ -2965,14 +2963,14 @@ mod tests {
         failing_slot: Option<(U256, Arc<AtomicBool>)>,
     ) -> MockRpc {
         MockRpc::serve(
-            move |method, params, in_batch| match method {
+            Box::new(move |method, params, in_batch| match method {
                 "eth_createAccessList" => access_list.clone(),
                 "eth_getAccountInfo" => {
                     Ok(json!({"balance": "0x2a", "nonce": "0x0", "code": "0x"}))
                 }
                 "eth_getStorageAt" => {
                     if in_batch && let Some((slot, released)) = &failing_slot {
-                        wait_until("batch release", || released.load(Ordering::Relaxed));
+                        wait_until("batch release", &|| released.load(Ordering::Relaxed));
                         if params[1] == json!(slot) {
                             return Err(json!({"code": -32005, "message": "rate limited"}));
                         }
@@ -2980,7 +2978,7 @@ mod tests {
                     Ok(json!("0x2a"))
                 }
                 _ => Err(unsupported(method)),
-            },
+            }),
             false,
         )
     }
@@ -3010,7 +3008,7 @@ mod tests {
     }
 
     /// Waits until `done` returns true, failing after 10 seconds.
-    fn wait_until(what: &str, done: impl Fn() -> bool) {
+    fn wait_until(what: &str, done: &dyn Fn() -> bool) {
         let started = std::time::Instant::now();
         while !done() {
             assert!(started.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
@@ -3027,7 +3025,7 @@ mod tests {
 
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
         // Waits until the two accounts and two slots of the access list have been requested.
-        wait_until("prefetch", || backend.cache_misses() >= 4);
+        wait_until("prefetch", &|| backend.cache_misses() >= 4);
         // Reads of the listed keys are served from the prefetch; the slot of `other` stays out
         // of the cache until it is read.
         assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
@@ -3097,7 +3095,7 @@ mod tests {
 
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
         // Waits until the two accounts and two slots of the access list have been requested.
-        wait_until("prefetch", || backend.cache_misses() >= 4);
+        wait_until("prefetch", &|| backend.cache_misses() >= 4);
         // The read joins the held batch. Its member fails, so a read of its own answers it; the
         // other slot of the batch is served from the prefetch.
         let reader = backend.clone();
@@ -3146,7 +3144,7 @@ mod tests {
 
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
         // Waits for the rejection, which arrives after the simulation request.
-        wait_until("rejection", || {
+        wait_until("rejection", &|| {
             !backend.wants_access_list(&access_list_call(target, 0xbb), B256::ZERO, false)
         });
         assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
