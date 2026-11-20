@@ -120,11 +120,12 @@ fn source_tree_checks_final_symlink_destinations_before_any_writes() {
         let metadata = ContractMetadata {
             items: vec![metadata("Safe", &[("Contract.sol", "valid")]), metadata("C", &sources)],
         };
-        let error = metadata.source_tree().unwrap().write_to(&output).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("source path from explorer traverses a symlink: {link:?}")
-        );
+        let tree = metadata.source_tree().unwrap();
+        let expected = format!("source path from explorer traverses a symlink: {link:?}");
+        assert_eq!(tree.write_to(&output).unwrap_err().to_string(), expected);
+        for mode in [ExportMode::CreateNew, ExportMode::Overwrite] {
+            assert_eq!(tree.export_to(&output, mode).unwrap_err().to_string(), expected);
+        }
         assert_eq!(std::fs::read_to_string(config).unwrap(), "original");
         assert!(!output.join("Safe").exists());
     }
@@ -343,29 +344,22 @@ fn export_checks_existing_file_types_before_publication() {
 fn export_rejects_symlinks_and_special_files_before_publication() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
-    fs::write(dir.join("target"), "original").unwrap();
-    symlink("target", dir.join("Link.sol")).unwrap();
     symlink("missing", dir.join("Dangling.sol")).unwrap();
     symlink(".", dir.join("Directory")).unwrap();
     let root_link = dir.join("Directory").join("");
-    for (root, path, link, mode) in [
-        (dir, "Link.sol", "Link.sol", ExportMode::Overwrite),
-        (dir, "Dangling.sol", "Dangling.sol", ExportMode::CreateNew),
-        (dir, "Directory/Child.sol", "Directory", ExportMode::Overwrite),
-        (root_link.as_path(), "Child.sol", "Directory", ExportMode::CreateNew),
+    for (root, path, link) in [
+        (dir, "Dangling.sol", dir.join("Dangling.sol")),
+        (root_link.as_path(), "Child.sol", dir.join("Directory")),
     ] {
-        let error = preflight_error(root, path, mode);
-        let link = dir.join(link);
-        assert_eq!(
-            error.to_string(),
-            format!("source path from explorer traverses a symlink: {link:?}")
+        let error = preflight_error(root, path, ExportMode::CreateNew);
+        assert!(
+            matches!(error, ExportError::Source(EtherscanError::SourcePathSymlink(p)) if p == link)
         );
     }
     let socket = dir.join("Socket.sol");
     let _listener = UnixListener::bind(&socket).unwrap();
     let error = preflight_error(dir, "Socket.sol", ExportMode::Overwrite);
     assert!(matches!(error, ExportError::Conflict(path) if path == socket));
-    assert_eq!(fs::read(dir.join("target")).unwrap(), b"original");
 }
 
 #[test]

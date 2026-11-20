@@ -89,8 +89,11 @@ pub(crate) fn validate_contract_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Returns the last validated parent and the file type of an existing leaf.
-fn validate_destination(dir: &Path, path: &Path) -> Result<(PathBuf, Option<fs::FileType>)> {
+/// Returns the checked directory, the remaining relative path and the type of an existing leaf.
+fn validate_destination<'a>(
+    dir: &Path,
+    path: &'a Path,
+) -> Result<(PathBuf, &'a Path, Option<fs::FileType>)> {
     if !is_safe_source_path(path) {
         return Err(EtherscanError::InvalidSourcePath(path.to_path_buf()));
     }
@@ -102,13 +105,15 @@ fn validate_destination(dir: &Path, path: &Path) -> Result<(PathBuf, Option<fs::
     }
     // A cloned repository can contain a committed symlink such as Token -> .git.
     let mut current = dir.to_path_buf();
-    let mut components = path.components();
-    while let Some(component) = components.next() {
-        current.push(component);
+    let mut parts = path.iter();
+    loop {
+        let suffix = parts.as_path();
+        let name = parts.next().ok_or_else(|| EtherscanError::InvalidSourcePath(path.into()))?;
+        current.push(name);
         let metadata = destination_metadata(&current)?;
-        if metadata.is_none() || components.as_path().as_os_str().is_empty() {
+        if metadata.is_none() || parts.as_path().as_os_str().is_empty() {
             current.pop();
-            return Ok((current, metadata.map(|m| m.file_type())));
+            return Ok((current, suffix, metadata.map(|m| m.file_type())));
         }
         if metadata.is_some_and(|m| !m.is_dir()) {
             return Err(io::Error::new(
@@ -118,7 +123,6 @@ fn validate_destination(dir: &Path, path: &Path) -> Result<(PathBuf, Option<fs::
             .into());
         }
     }
-    Err(EtherscanError::InvalidSourcePath(path.to_owned()))
 }
 
 fn destination_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
