@@ -1,8 +1,12 @@
 use crate::{EtherscanError, Result};
 use std::{
-    fs::create_dir_all,
+    fs::{self, create_dir_all},
+    io,
     path::{Component, Path, PathBuf},
 };
+
+mod export;
+pub use export::{ExportError, ExportMode};
 
 #[derive(Clone, Debug)]
 pub struct SourceTreeEntry {
@@ -23,21 +27,11 @@ impl SourceTree {
     /// destinations are checked before creating directories or writing files. Existing symlink
     /// components below `dir` are rejected. Validation errors leave the destination untouched,
     /// while filesystem errors during writing can leave partial output.
+    ///
+    /// Existing files are overwritten in entry order. For user-directed exports, see
+    /// [`Self::export_to`].
     pub fn write_to(&self, dir: &Path) -> Result<()> {
-        let paths = self
-            .entries
-            .iter()
-            .map(|entry| {
-                let mut path = sanitize_path(&entry.path);
-                if path.extension().is_none() {
-                    let with_extension = path.with_extension("sol");
-                    if !self.entries.iter().any(|entry| entry.path == with_extension) {
-                        path = with_extension;
-                    }
-                }
-                path
-            })
-            .collect::<Vec<_>>();
+        let paths = self.output_paths();
         for path in &paths {
             validate_destination(dir, path)?;
         }
@@ -51,6 +45,22 @@ impl SourceTree {
             }
         }
         Ok(())
+    }
+
+    fn output_paths(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .map(|entry| {
+                let mut path = sanitize_path(&entry.path);
+                if path.extension().is_none() {
+                    let with_extension = path.with_extension("sol");
+                    if !self.entries.iter().any(|entry| entry.path == with_extension) {
+                        path = with_extension;
+                    }
+                }
+                path
+            })
+            .collect()
     }
 }
 
@@ -79,7 +89,11 @@ pub(crate) fn validate_contract_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_destination(dir: &Path, path: &Path) -> Result<()> {
+/// Returns the checked directory, the remaining relative path and the type of an existing leaf.
+fn validate_destination<'a>(
+    dir: &Path,
+    path: &'a Path,
+) -> Result<(PathBuf, &'a Path, Option<fs::FileType>)> {
     if !is_safe_source_path(path) {
         return Err(EtherscanError::InvalidSourcePath(path.to_path_buf()));
     }
@@ -91,21 +105,35 @@ fn validate_destination(dir: &Path, path: &Path) -> Result<()> {
     }
     // A cloned repository can contain a committed symlink such as Token -> .git.
     let mut current = dir.to_path_buf();
-    for component in path.components() {
-        let Component::Normal(name) = component else {
-            return Err(EtherscanError::InvalidSourcePath(path.to_path_buf()));
-        };
+    let mut parts = path.iter();
+    loop {
+        let suffix = parts.as_path();
+        let name = parts.next().ok_or_else(|| EtherscanError::InvalidSourcePath(path.into()))?;
         current.push(name);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(EtherscanError::SourcePathSymlink(current));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
+        let metadata = destination_metadata(&current)?;
+        if metadata.is_none() || parts.as_path().as_os_str().is_empty() {
+            current.pop();
+            return Ok((current, suffix, metadata.map(|m| m.file_type())));
+        }
+        if metadata.is_some_and(|m| !m.is_dir()) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("source destination is not a directory: {current:?}"),
+            )
+            .into());
         }
     }
-    Ok(())
+}
+
+fn destination_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_symlink() => {
+            Err(EtherscanError::SourcePathSymlink(path.to_owned()))
+        }
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Checks that sanitization left a nonempty relative path with ordinary filesystem components.
