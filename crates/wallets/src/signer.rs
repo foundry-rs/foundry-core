@@ -32,7 +32,7 @@ use alloy_signer_gcp::{
 use alloy_signer_turnkey::TurnkeySigner;
 
 #[cfg(feature = "azure-key-vault")]
-use alloy_signer_azure::AzureSigner;
+use alloy_signer_azure::{AzureSigner, AzureSignerError};
 
 pub type Result<T> = std::result::Result<T, WalletSignerError>;
 
@@ -214,14 +214,12 @@ impl WalletSigner {
     pub async fn from_azure(key_id: String) -> Result<Self> {
         #[cfg(feature = "azure-key-vault")]
         {
-            let credential = crate::azure::credential()
-                .map_err(|e| WalletSignerError::Azure(Box::new(e.into())))?;
-
-            Ok(Self::Azure(
-                AzureSigner::from_key_id(&key_id, credential, None, None)
-                    .await
-                    .map_err(|e| WalletSignerError::Azure(Box::new(e)))?,
-            ))
+            let credential =
+                crate::azure::credential().map_err(|e| Box::new(AzureSignerError::from(e)))?;
+            let signer = AzureSigner::from_key_id(&key_id, credential, None, None)
+                .await
+                .map_err(Box::new)?;
+            Ok(Self::Azure(signer))
         }
 
         #[cfg(not(feature = "azure-key-vault"))]

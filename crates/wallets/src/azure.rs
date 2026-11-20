@@ -9,21 +9,23 @@ use alloy_signer_azure::{
     azure_identity::{
         ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
         ManagedIdentityCredentialOptions, UserAssignedId, WorkloadIdentityCredential,
+        WorkloadIdentityCredentialOptions,
     },
 };
 use async_trait::async_trait;
 use std::{
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
-/// Maximum time to wait for a managed identity token.
+/// Maximum time to wait for the first managed identity token.
 ///
 /// Outside Azure, the managed identity endpoint may accept connections without answering, and the
-/// Azure SDK retries it for over a minute.
+/// Azure SDK retries it for over a minute. Once it has returned a token, later requests keep the
+/// SDK's retries.
 const MANAGED_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Returns the credential used to authenticate Azure Key Vault requests.
@@ -64,8 +66,13 @@ fn credential_from_env(
         let client_id = required("AZURE_CLIENT_ID")?;
         return Ok(ClientSecretCredential::new(&tenant_id, client_id, secret.into(), None)?);
     }
-    if env("AZURE_FEDERATED_TOKEN_FILE").is_some() {
-        return Ok(WorkloadIdentityCredential::new(None)?);
+    if let Some(token_file_path) = env("AZURE_FEDERATED_TOKEN_FILE") {
+        return Ok(WorkloadIdentityCredential::new(Some(WorkloadIdentityCredentialOptions {
+            tenant_id: Some(required("AZURE_TENANT_ID")?),
+            client_id: Some(required("AZURE_CLIENT_ID")?),
+            token_file_path: Some(token_file_path.into()),
+            ..Default::default()
+        }))?);
     }
 
     let mut sources: Vec<Arc<dyn TokenCredential>> = vec![DeveloperToolsCredential::new(None)?];
@@ -78,6 +85,7 @@ fn credential_from_env(
         Ok(managed_identity) => sources.push(Arc::new(TimeoutCredential {
             inner: managed_identity,
             timeout: MANAGED_IDENTITY_TIMEOUT,
+            responded: AtomicBool::new(false),
         })),
         Err(err) => debug!(%err, "managed identity credential unavailable"),
     }
@@ -120,11 +128,13 @@ impl TokenCredential for ChainedCredential {
     }
 }
 
-/// Fails a credential source that does not return a token within `timeout`.
+/// Fails a credential source that does not return its first token within `timeout`.
 #[derive(Debug)]
 struct TimeoutCredential {
     inner: Arc<dyn TokenCredential>,
     timeout: Duration,
+    /// Whether the source has returned a token, after which requests are no longer timed out.
+    responded: AtomicBool,
 }
 
 #[async_trait]
@@ -134,28 +144,34 @@ impl TokenCredential for TimeoutCredential {
         scopes: &[&str],
         options: Option<TokenRequestOptions<'_>>,
     ) -> azure_core::Result<AccessToken> {
-        tokio::time::timeout(self.timeout, self.inner.get_token(scopes, options)).await.map_err(
-            |_| {
+        if self.responded.load(Ordering::Relaxed) {
+            return self.inner.get_token(scopes, options).await;
+        }
+
+        let token = tokio::time::timeout(self.timeout, self.inner.get_token(scopes, options))
+            .await
+            .map_err(|_| {
                 azure_core::Error::with_message(
                     ErrorKind::Credential,
                     format!("managed identity timed out after {} seconds", self.timeout.as_secs()),
                 )
-            },
-        )?
+            })??;
+        self.responded.store(true, Ordering::Relaxed);
+        Ok(token)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_signer_azure::azure_core::time::OffsetDateTime;
+    use azure_core::time::OffsetDateTime;
     use std::{collections::HashMap, sync::atomic::AtomicU32};
 
-    /// A credential source that returns a fixed result, optionally never completing.
+    /// A credential source that returns a fixed result, optionally after a delay.
     #[derive(Debug, Default)]
     struct MockSource {
         token: Option<&'static str>,
-        hang: bool,
+        delay: Duration,
         calls: AtomicU32,
     }
 
@@ -168,8 +184,8 @@ mod tests {
             Arc::new(Self::default())
         }
 
-        fn hang() -> Arc<Self> {
-            Arc::new(Self { hang: true, ..Default::default() })
+        fn slow(delay: Duration) -> Arc<Self> {
+            Arc::new(Self { token: Some("slow"), delay, ..Default::default() })
         }
     }
 
@@ -181,9 +197,7 @@ mod tests {
             _options: Option<TokenRequestOptions<'_>>,
         ) -> azure_core::Result<AccessToken> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            if self.hang {
-                std::future::pending::<()>().await;
-            }
+            tokio::time::sleep(self.delay).await;
             let Some(token) = self.token else {
                 return Err(azure_core::Error::with_message(ErrorKind::Credential, "no login"));
             };
@@ -223,12 +237,32 @@ mod tests {
         assert_eq!(err, "no Azure credential source returned a token:\nno login\nno login");
     }
 
+    fn timeout(inner: Arc<MockSource>, responded: bool) -> TimeoutCredential {
+        TimeoutCredential {
+            inner,
+            timeout: Duration::from_secs(10),
+            responded: AtomicBool::new(responded),
+        }
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn timeout_fails_hanging_source() {
-        let credential =
-            TimeoutCredential { inner: MockSource::hang(), timeout: Duration::from_secs(10) };
+    async fn timeout_fails_slow_first_token() {
+        let credential = timeout(MockSource::slow(Duration::from_secs(11)), false);
         let err = credential.get_token(&["scope"], None).await.unwrap_err().to_string();
         assert_eq!(err, "managed identity timed out after 10 seconds");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_only_applies_until_first_token() {
+        let credential = timeout(MockSource::slow(Duration::from_secs(5)), false);
+        credential.get_token(&["scope"], None).await.unwrap();
+
+        // A slow refresh after the first token waits for the source's own retries.
+        let source = MockSource::slow(Duration::from_secs(11));
+        let credential =
+            TimeoutCredential { inner: source, responded: credential.responded, ..credential };
+        let token = credential.get_token(&["scope"], None).await.unwrap();
+        assert_eq!(token.token.secret(), "slow");
     }
 
     #[test]
@@ -256,7 +290,9 @@ mod tests {
         let client = ("AZURE_CLIENT_ID", "11111111-1111-1111-1111-111111111111");
 
         credential_from_env(env(&[("AZURE_CLIENT_SECRET", "secret"), tenant, client])).unwrap();
-        credential_from_env(env(&[client])).unwrap();
+        let token_file = tempfile::NamedTempFile::new().unwrap();
+        let token_file = ("AZURE_FEDERATED_TOKEN_FILE", token_file.path().to_str().unwrap());
+        credential_from_env(env(&[token_file, tenant, client])).unwrap();
         credential_from_env(env(&[])).unwrap();
     }
 }

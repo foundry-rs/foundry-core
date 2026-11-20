@@ -461,7 +461,11 @@ impl MultiWalletOpts {
         #[cfg(feature = "aws-kms")]
         if self.aws {
             let mut wallets = vec![];
-            for key in key_ids_from_env("AWS_KMS_KEY_IDS", "AWS_KMS_KEY_ID")? {
+            for key in key_ids_from_env(
+                |key| std::env::var(key).ok(),
+                "AWS_KMS_KEY_IDS",
+                "AWS_KMS_KEY_ID",
+            )? {
                 let aws_signer = WalletSigner::from_aws(key).await?;
                 wallets.push(aws_signer)
             }
@@ -531,7 +535,11 @@ impl MultiWalletOpts {
         #[cfg(feature = "azure-key-vault")]
         if self.azure {
             let mut wallets = vec![];
-            for key_id in key_ids_from_env("AZURE_KEY_VAULT_KEY_IDS", "AZURE_KEY_VAULT_KEY_ID")? {
+            for key_id in key_ids_from_env(
+                |key| std::env::var(key).ok(),
+                "AZURE_KEY_VAULT_KEY_IDS",
+                "AZURE_KEY_VAULT_KEY_ID",
+            )? {
                 let azure_signer = WalletSigner::from_azure(key_id).await?;
                 wallets.push(azure_signer);
             }
@@ -561,11 +569,26 @@ impl MultiWalletOpts {
 
 /// Reads comma-separated key identifiers from `ids_var`, falling back to the single `id_var`.
 ///
-/// Whitespace around identifiers and empty entries are ignored.
+/// Whitespace around identifiers and empty entries are ignored, and a blank `ids_var` falls back to
+/// `id_var`. At least one identifier is required.
 #[cfg(any(feature = "aws-kms", feature = "azure-key-vault"))]
-fn key_ids_from_env(ids_var: &str, id_var: &str) -> Result<Vec<String>> {
-    let ids = std::env::var(ids_var).or_else(|_| std::env::var(id_var))?;
-    Ok(ids.split(',').map(str::trim).filter(|id| !id.is_empty()).map(str::to_string).collect())
+fn key_ids_from_env(
+    env: impl Fn(&str) -> Option<String>,
+    ids_var: &str,
+    id_var: &str,
+) -> Result<Vec<String>> {
+    let ids = env(ids_var)
+        .filter(|ids| !ids.trim().is_empty())
+        .or_else(|| env(id_var))
+        .unwrap_or_default();
+    let ids = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    eyre::ensure!(!ids.is_empty(), "{ids_var} or {id_var} must be set to at least one key ID");
+    Ok(ids)
 }
 
 #[cfg(test)]
@@ -767,24 +790,25 @@ mod tests {
 
     #[test]
     #[cfg(any(feature = "aws-kms", feature = "azure-key-vault"))]
-    fn key_ids_from_env_prefers_list() {
-        const IDS: &str = "FOUNDRY_TEST_KEY_IDS";
-        const ID: &str = "FOUNDRY_TEST_KEY_ID";
+    fn key_ids_prefer_list() {
+        let key_ids = |vars: &[(&str, &str)]| {
+            let env = |key: &str| {
+                vars.iter().find(|(name, _)| *name == key).map(|(_, value)| value.to_string())
+            };
+            key_ids_from_env(env, "KEY_IDS", "KEY_ID").map_err(|err| err.to_string())
+        };
 
-        unsafe {
-            std::env::set_var(ID, "single");
+        assert_eq!(key_ids(&[("KEY_ID", "single")]).unwrap(), ["single"]);
+        assert_eq!(key_ids(&[("KEY_ID", "single"), ("KEY_IDS", " ")]).unwrap(), ["single"]);
+        assert_eq!(
+            key_ids(&[("KEY_ID", "single"), ("KEY_IDS", "first, second,")]).unwrap(),
+            ["first", "second"]
+        );
+        for vars in [&[][..], &[("KEY_IDS", " , ")]] {
+            assert_eq!(
+                key_ids(vars).unwrap_err(),
+                "KEY_IDS or KEY_ID must be set to at least one key ID"
+            );
         }
-        assert_eq!(key_ids_from_env(IDS, ID).unwrap(), ["single"]);
-
-        unsafe {
-            std::env::set_var(IDS, "first, second,");
-        }
-        assert_eq!(key_ids_from_env(IDS, ID).unwrap(), ["first", "second"]);
-
-        unsafe {
-            std::env::remove_var(IDS);
-            std::env::remove_var(ID);
-        }
-        assert!(key_ids_from_env(IDS, ID).is_err());
     }
 }
