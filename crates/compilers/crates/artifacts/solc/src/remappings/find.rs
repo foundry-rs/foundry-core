@@ -265,12 +265,15 @@ impl Candidate {
         window_start: PathBuf,
         is_inside_node_modules: bool,
     ) {
-        // if there's only a single source dir candidate then we use this
+        // if there's only a single source dir candidate on the current level then we use this.
+        // Candidates from nested library windows (deeper levels) are neither counted nor dropped.
         if let Some(pos) = candidates
             .iter()
             .enumerate()
             .fold((0, None), |(mut contracts_dir_count, mut pos), (idx, c)| {
-                if c.source_dir.ends_with(DAPPTOOLS_CONTRACTS_DIR) {
+                if c.window_level == current_level
+                    && c.source_dir.ends_with(DAPPTOOLS_CONTRACTS_DIR)
+                {
                     contracts_dir_count += 1;
                     if contracts_dir_count == 1 {
                         pos = Some(idx)
@@ -284,7 +287,8 @@ impl Candidate {
             .1
         {
             let c = candidates.remove(pos);
-            *candidates = vec![c];
+            candidates.retain(|c| c.window_level != current_level);
+            candidates.push(c);
         } else {
             // merge all candidates on the current level if the current dir is itself a candidate or
             // there are multiple nested candidates on the current level like `current/{auth,
@@ -1287,6 +1291,138 @@ mod tests {
                 context: None,
                 name: "forge-std/".to_string(),
                 path: to_str(tmp_dir_path.join("lib/forge-std/src")),
+            },
+        ];
+        expected.sort_unstable();
+        assert_eq!(remappings, expected);
+    }
+
+    // <https://github.com/foundry-rs/foundry/issues/4717>
+    #[test]
+    fn nested_lib_src_dirs_do_not_hide_single_src_dir() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let root = tmp_dir.path();
+        mkdir_or_touch(
+            root,
+            &["dep/src/A.sol", "dep/certora/B.sol", "dep/lib/inner/src/C.sol", "other/src/D.sol"],
+        );
+
+        let mut remappings = Remapping::find_many(root);
+        remappings.sort_unstable();
+        let mut expected = vec![
+            Remapping {
+                context: None,
+                name: "dep/".to_string(),
+                path: to_str(root.join("dep/src")),
+            },
+            Remapping {
+                context: None,
+                name: "inner/".to_string(),
+                path: to_str(root.join("dep/lib/inner/src")),
+            },
+            Remapping {
+                context: None,
+                name: "other/".to_string(),
+                path: to_str(root.join("other/src")),
+            },
+        ];
+        expected.sort_unstable();
+        assert_eq!(remappings, expected);
+
+        let discovery = Remapping::find_many_with_context(root);
+        assert_eq!(discovery.global, Remapping::find_many(root));
+        assert_eq!(
+            discovery.contextual,
+            vec![Remapping {
+                context: Some(to_str(root.join("dep"))),
+                name: "inner/".to_string(),
+                path: to_str(root.join("dep/lib/inner/src")),
+            }]
+        );
+    }
+
+    // <https://github.com/foundry-rs/foundry/issues/4717>
+    #[test]
+    fn nested_lib_src_dirs_do_not_hide_single_src_dir_in_nested_window() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let root = tmp_dir.path();
+        mkdir_or_touch(
+            root,
+            &[
+                "outer/src/O.sol",
+                "outer/lib/dep/src/A.sol",
+                "outer/lib/dep/script/S.sol",
+                "outer/lib/dep/lib/inner/src/C.sol",
+            ],
+        );
+
+        let mut remappings = Remapping::find_many(root);
+        remappings.sort_unstable();
+        let mut expected = vec![
+            Remapping {
+                context: None,
+                name: "dep/".to_string(),
+                path: to_str(root.join("outer/lib/dep/src")),
+            },
+            Remapping {
+                context: None,
+                name: "inner/".to_string(),
+                path: to_str(root.join("outer/lib/dep/lib/inner/src")),
+            },
+            Remapping {
+                context: None,
+                name: "outer/".to_string(),
+                path: to_str(root.join("outer/src")),
+            },
+        ];
+        expected.sort_unstable();
+        assert_eq!(remappings, expected);
+    }
+
+    #[test]
+    fn single_src_dir_keeps_nested_lib_remappings() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let root = tmp_dir.path();
+        mkdir_or_touch(
+            root,
+            &["dep/src/A.sol", "dep/certora/B.sol", "dep/lib/inner/contracts/C.sol"],
+        );
+
+        let mut remappings = Remapping::find_many(root);
+        remappings.sort_unstable();
+        let mut expected = vec![
+            Remapping {
+                context: None,
+                name: "dep/".to_string(),
+                path: to_str(root.join("dep/src")),
+            },
+            Remapping {
+                context: None,
+                name: "inner/".to_string(),
+                path: to_str(root.join("dep/lib/inner/contracts")),
+            },
+        ];
+        expected.sort_unstable();
+        assert_eq!(remappings, expected);
+    }
+
+    #[test]
+    fn single_nested_lib_src_dir_does_not_replace_dependency() {
+        let tmp_dir = tempdir("lib").unwrap();
+        let root = tmp_dir.path();
+        mkdir_or_touch(
+            root,
+            &["dep/contracts/A.sol", "dep/certora/B.sol", "dep/lib/forge-std/src/Test.sol"],
+        );
+
+        let mut remappings = Remapping::find_many(root);
+        remappings.sort_unstable();
+        let mut expected = vec![
+            Remapping { context: None, name: "dep/".to_string(), path: to_str(root.join("dep")) },
+            Remapping {
+                context: None,
+                name: "forge-std/".to_string(),
+                path: to_str(root.join("dep/lib/forge-std/src")),
             },
         ];
         expected.sort_unstable();
