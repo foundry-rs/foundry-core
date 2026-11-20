@@ -1,12 +1,16 @@
 //! User-directed source exports.
 
-use super::{SourceTree, destination_metadata, destination_type, validate_destination};
+use super::{SourceTree, destination_metadata, validate_destination};
 use crate::{EtherscanError, Result};
 use std::{
     collections::{HashMap, hash_map::Entry},
     fs,
     hash::Hash,
-    io::{self, Write},
+    io::{
+        self,
+        ErrorKind::{AlreadyExists, IsADirectory, NotADirectory},
+        Write,
+    },
     path::{Path, PathBuf},
 };
 use tempfile::{Builder, NamedTempFile, TempDir};
@@ -49,7 +53,7 @@ pub enum ExportError {
 impl ExportError {
     fn at_destination(error: EtherscanError, path: &Path) -> Self {
         match error {
-            EtherscanError::IO(err) if err.kind() == io::ErrorKind::NotADirectory => {
+            EtherscanError::IO(err) if err.kind() == NotADirectory => {
                 Self::Conflict(path.to_owned())
             }
             EtherscanError::IO(source) => Self::Io { path: path.to_owned(), source },
@@ -88,29 +92,23 @@ impl SourceTree {
         for (path, entry) in paths.iter().zip(&self.entries) {
             let destination = dir.join(path);
             let io_error = |source| ExportError::Io { path: destination.clone(), source };
-            if let Some(parent) = destination.parent() {
-                validate_destination(dir, path)
-                    .map_err(|err| ExportError::at_destination(err, &destination))?;
-                fs::create_dir_all(parent).map_err(io_error)?;
-                #[cfg(unix)]
-                let parent = if mode == ExportMode::Overwrite {
-                    // Keep replacements private until persist sets each file's permissions.
-                    let relative_parent = path.parent();
-                    let temp = match &staging {
-                        Some((previous, temp)) if *previous == relative_parent => temp,
-                        _ => {
-                            let temp = private_tempdir_in(parent).map_err(io_error)?;
-                            &staging.insert((relative_parent, temp)).1
-                        }
-                    };
-                    temp.path()
-                } else {
-                    parent
-                };
-                let mut file = files.tempfile_in(parent).map_err(io_error)?;
-                file.write_all(entry.contents.as_bytes()).map_err(io_error)?;
-                mode.persist(file, &destination)?;
+            let Some(parent) = destination.parent() else { continue };
+            validate_destination(dir, path)
+                .map_err(|err| ExportError::at_destination(err, &destination))?;
+            fs::create_dir_all(parent).map_err(io_error)?;
+            #[cfg(unix)]
+            if mode == ExportMode::Overwrite
+                && let Some(key) = path.parent()
+                && staging.as_ref().map(|(previous, _)| *previous) != Some(key)
+            {
+                // Keep replacements private until persist sets each file's permissions.
+                staging = Some((key, private_tempdir_in(parent).map_err(io_error)?));
             }
+            #[cfg(unix)]
+            let parent = staging.as_ref().map_or(parent, |(_, temp)| temp.path());
+            let mut file = files.tempfile_in(parent).map_err(io_error)?;
+            file.write_all(entry.contents.as_bytes()).map_err(io_error)?;
+            mode.persist(file, &destination)?;
         }
         Ok(())
     }
@@ -122,9 +120,9 @@ impl ExportMode {
         if let Some(parent) = dir.ancestors().find(|p| p.ends_with("..")) {
             fs::metadata(parent).map_err(|err| ExportError::at_destination(err.into(), dir))?;
         }
-        if let Some(file_type) =
-            destination_type(dir).map_err(|err| ExportError::at_destination(err, dir))?
-            && !file_type.is_dir()
+        if let Some(metadata) =
+            destination_metadata(dir).map_err(|err| ExportError::at_destination(err, dir))?
+            && !metadata.is_dir()
         {
             return Err(ExportError::Conflict(dir.to_owned()));
         }
@@ -132,26 +130,25 @@ impl ExportMode {
         let mut staging = HashMap::new();
         for path in paths {
             let destination = dir.join(path);
-            let target = validate_destination(dir, path)
+            let (directory, file_type) = validate_destination(dir, path)
                 .map_err(|err| ExportError::at_destination(err, &destination))?;
-            self.check_file(&destination, target.file_type)?;
+            self.check_file(&destination, file_type)?;
 
             // Reserve names in a scratch directory on the target filesystem so case and Unicode
             // aliases follow its rules. Multiple spellings of one directory share a scratch tree.
             let io_error = |source| ExportError::Io { path: destination.clone(), source };
-            let (anchor, id) = existing_directory(&target.directory).map_err(io_error)?;
+            let (anchor, id) = existing_directory(&directory).map_err(io_error)?;
             let temp = match staging.entry(id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => entry.insert(private_tempdir_in(anchor).map_err(io_error)?),
             };
-            let staged = temp.path().join(target.suffix);
+            let suffix = destination
+                .strip_prefix(&directory)
+                .map_err(|_| EtherscanError::InvalidSourcePath(path.clone()))?;
+            let staged = temp.path().join(suffix);
             let staging_error = |source: io::Error| {
-                if matches!(
-                    source.kind(),
-                    io::ErrorKind::AlreadyExists
-                        | io::ErrorKind::NotADirectory
-                        | io::ErrorKind::IsADirectory
-                ) || staged.is_dir()
+                if matches!(source.kind(), AlreadyExists | NotADirectory | IsADirectory)
+                    || staged.is_dir()
                 {
                     ExportError::Conflict(destination.clone())
                 } else {
@@ -181,7 +178,7 @@ impl ExportMode {
             file.persist_noclobber(path)
         };
         result.map(|_| ()).map_err(|err| {
-            if err.error.kind() == io::ErrorKind::AlreadyExists {
+            if err.error.kind() == AlreadyExists {
                 ExportError::AlreadyExists(path.into())
             } else {
                 ExportError::Io { path: path.into(), source: err.error }
@@ -227,11 +224,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_only_persist_preserves_a_file_created_after_preflight() {
+    fn create_only_persist_preserves_the_winning_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("A.sol");
         let mode = ExportMode::CreateNew;
-        mode.preflight(dir.path(), &["A.sol".into()]).unwrap();
         let mut pending = NamedTempFile::new_in(dir.path()).unwrap();
         pending.write_all(b"pending").unwrap();
         fs::write(&path, b"winner").unwrap();
@@ -244,13 +240,10 @@ mod tests {
     }
 
     #[test]
-    fn overwrite_persist_rechecks_the_destination_type() {
+    fn overwrite_persist_rejects_a_directory() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("A.sol");
         let mode = ExportMode::Overwrite;
-        fs::write(&path, b"original").unwrap();
-        mode.preflight(dir.path(), &["A.sol".into()]).unwrap();
-        fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
 
         let pending = NamedTempFile::new_in(dir.path()).unwrap();

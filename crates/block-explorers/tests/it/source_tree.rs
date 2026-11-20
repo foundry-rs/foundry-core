@@ -242,39 +242,36 @@ fn metadata(name: &str, sources: &[(&str, &str)]) -> Metadata {
 }
 
 #[test]
-fn export_preserves_existing_files_before_writing_any_sources() {
+fn export_creates_sources_and_only_overwrites_on_request() {
     let temp = tempfile::tempdir().unwrap();
-    let existing = temp.path().join("Existing.sol");
+    let dir = temp.path();
     let original = [0xff, 0, 1];
-    fs::write(&existing, original).unwrap();
-    let tree = source_tree(&[("New/First.sol", "new"), ("Existing", "replacement")]);
-
-    let error = tree.export_to(temp.path(), ExportMode::default()).unwrap_err();
-    assert_eq!(error.to_string(), format!("source file already exists: {existing:?}"));
-    assert_eq!(fs::read(existing).unwrap(), original);
-    assert!(!temp.path().join("New").exists());
-}
-
-#[test]
-fn export_creates_sources_and_explicitly_replaces_regular_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path();
-    let contents = [0, 0xff, 1];
+    fs::write(dir.join("notes"), original).unwrap();
     let tree = metadata("C", &[("A", "first"), ("Pair", "raw"), ("Pair.sol", "companion")])
         .source_tree()
         .unwrap();
+    tree.export_to(dir, ExportMode::CreateNew).unwrap();
+    assert_eq!(fs::read(dir.join("C/A.sol")).unwrap(), b"first");
+    assert_eq!(fs::read(dir.join("C/Pair")).unwrap(), b"raw");
+    assert_eq!(fs::read(dir.join("C/Pair.sol")).unwrap(), b"companion");
 
-    fs::write(project.join("notes"), contents).unwrap();
-    tree.export_to(project, ExportMode::CreateNew).unwrap();
-    assert_eq!(fs::read(project.join("C/A.sol")).unwrap(), b"first");
-    assert_eq!(fs::read(project.join("C/Pair")).unwrap(), b"raw");
-    assert_eq!(fs::read(project.join("C/Pair.sol")).unwrap(), b"companion");
-    source_tree(&[("C/A.sol", "replacement"), ("D/B.sol", "created")])
-        .export_to(project, ExportMode::Overwrite)
-        .unwrap();
-    assert_eq!(fs::read(project.join("C/A.sol")).unwrap(), b"replacement");
-    assert_eq!(fs::read(project.join("D/B.sol")).unwrap(), b"created");
-    assert_eq!(fs::read(project.join("notes")).unwrap(), contents);
+    let update = source_tree([("New/B.sol", "new"), ("C/A", "replacement")]);
+    let existing = dir.join("C/A.sol");
+    fs::write(&existing, original).unwrap();
+    let error = update.export_to(dir, ExportMode::default()).unwrap_err();
+    assert_eq!(error.to_string(), format!("source file already exists: {existing:?}"));
+    assert_eq!(fs::read(&existing).unwrap(), original);
+    assert!(!dir.join("New").exists());
+
+    update.export_to(dir, ExportMode::Overwrite).unwrap();
+    assert_eq!(fs::read(existing).unwrap(), b"replacement");
+    assert_eq!(fs::read(dir.join("New/B.sol")).unwrap(), b"new");
+    let notes = dir.join("notes");
+    assert_eq!(fs::read(&notes).unwrap(), original);
+    #[cfg(unix)]
+    for new_file in ["C/Pair.sol", "New/B.sol"] {
+        assert_eq!(access_mode(&dir.join(new_file)), access_mode(&notes));
+    }
 }
 
 #[test]
@@ -286,7 +283,7 @@ fn export_preflights_duplicate_names_and_file_directory_conflicts() {
     ] {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("new/project");
-        let error = source_tree(&[("First.sol", "first"), (first, "one"), (last, "two")])
+        let error = source_tree([("First.sol", "first"), (first, "one"), (last, "two")])
             .export_to(&dir, mode)
             .unwrap_err();
         assert!(matches!(error, ExportError::Conflict(path) if path == dir.join(conflict)));
@@ -299,7 +296,7 @@ fn export_respects_the_destination_filesystems_case_sensitivity() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     fs::create_dir(dir.join("Sources")).unwrap();
-    let tree = source_tree(&[
+    let tree = source_tree([
         ("First.sol", "first"),
         ("Sources/New/A.sol", "one"),
         ("sources/new/a.sol", "two"),
@@ -380,7 +377,7 @@ fn concurrent_create_only_exports_publish_one_complete_source() {
     let results = thread::scope(|scope| {
         let writers = contents.each_ref().map(|contents| {
             scope.spawn(|| {
-                let tree = source_tree(&[("C/A.sol", contents)]);
+                let tree = source_tree([("C/A.sol", contents)]);
                 start.wait();
                 tree.export_to(&dir, ExportMode::CreateNew)
             })
@@ -397,32 +394,10 @@ fn concurrent_create_only_exports_publish_one_complete_source() {
     assert_eq!(&fs::read_to_string(path).unwrap(), winner);
 }
 
-fn source_tree(entries: &[(&str, &str)]) -> SourceTree {
-    SourceTree {
-        entries: entries
-            .iter()
-            .map(|&(path, contents)| SourceTreeEntry {
-                path: path.into(),
-                contents: contents.into(),
-            })
-            .collect(),
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn export_creates_files_with_normal_permissions() {
-    let dir = tempfile::tempdir().unwrap();
-    let reference = dir.path().join("reference");
-    fs::write(&reference, "").unwrap();
-    let expected = fs::metadata(reference).unwrap().permissions().mode() & 0o777;
-    for policy in [ExportMode::CreateNew, ExportMode::Overwrite] {
-        let name = "New.sol";
-        source_tree(&[(name, "new")]).export_to(dir.path(), policy).unwrap();
-        let path = dir.path().join(name);
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, expected);
-        fs::remove_file(path).unwrap();
-    }
+fn source_tree<const N: usize>(sources: [(&str, &str); N]) -> SourceTree {
+    let entries = sources
+        .map(|(path, contents)| SourceTreeEntry { path: path.into(), contents: contents.into() });
+    SourceTree { entries: entries.into() }
 }
 
 #[cfg(unix)]
@@ -442,11 +417,11 @@ fn overwrite_preserves_existing_access_permissions() {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    let tree = source_tree(&files.map(|(name, _)| (name, name)));
+    let tree = source_tree(files.map(|(name, _)| (name, name)));
     tree.export_to(dir.path(), ExportMode::Overwrite).unwrap();
     for (name, mode) in files {
         let path = dir.path().join(name);
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode);
+        assert_eq!(access_mode(&path), mode);
         assert_eq!(fs::read_to_string(path).unwrap(), name);
     }
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 4);
@@ -456,7 +431,7 @@ fn overwrite_preserves_existing_access_permissions() {
 #[test]
 fn export_preflights_roots_with_parent_components() {
     let tree =
-        source_tree(&[("New.sol", "new"), ("First.sol", "replacement"), ("Later.sol", "last")]);
+        source_tree([("New.sol", "new"), ("First.sol", "replacement"), ("Later.sol", "last")]);
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     fs::create_dir_all(project.join("Later.sol")).unwrap();
@@ -484,8 +459,13 @@ fn export_metadata_errors_report_the_destination() {
 }
 
 fn preflight_error(dir: &Path, path: &str, mode: ExportMode) -> ExportError {
-    let tree = source_tree(&[("First.sol", "first"), (path, "source")]);
+    let tree = source_tree([("First.sol", "first"), (path, "source")]);
     let error = tree.export_to(dir, mode).unwrap_err();
     assert!(!dir.join("First.sol").exists());
     error
+}
+
+#[cfg(unix)]
+fn access_mode(path: &Path) -> u32 {
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
 }

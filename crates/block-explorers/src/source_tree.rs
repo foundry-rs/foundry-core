@@ -89,14 +89,8 @@ pub(crate) fn validate_contract_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-struct Destination<'a> {
-    directory: PathBuf,
-    // Starts at the first missing component or the existing leaf.
-    suffix: &'a Path,
-    file_type: Option<fs::FileType>,
-}
-
-fn validate_destination<'a>(dir: &Path, path: &'a Path) -> Result<Destination<'a>> {
+/// Returns the last validated parent and the file type of an existing leaf.
+fn validate_destination(dir: &Path, path: &Path) -> Result<(PathBuf, Option<fs::FileType>)> {
     if !is_safe_source_path(path) {
         return Err(EtherscanError::InvalidSourcePath(path.to_path_buf()));
     }
@@ -107,32 +101,24 @@ fn validate_destination<'a>(dir: &Path, path: &'a Path) -> Result<Destination<'a
         validate_contract_name(&root.to_string_lossy())?;
     }
     // A cloned repository can contain a committed symlink such as Token -> .git.
-    let mut directory = dir.to_path_buf();
-    let mut suffix = path;
-    loop {
-        let mut components = suffix.components();
-        let Some(Component::Normal(name)) = components.next() else {
-            return Err(EtherscanError::InvalidSourcePath(path.to_path_buf()));
-        };
-        directory.push(name);
-        let file_type = destination_type(&directory)?;
-        if file_type.is_none() || components.as_path().as_os_str().is_empty() {
-            directory.pop();
-            return Ok(Destination { directory, suffix, file_type });
+    let mut current = dir.to_path_buf();
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        current.push(component);
+        let metadata = destination_metadata(&current)?;
+        if metadata.is_none() || components.as_path().as_os_str().is_empty() {
+            current.pop();
+            return Ok((current, metadata.map(|m| m.file_type())));
         }
-        if file_type.is_some_and(|ty| !ty.is_dir()) {
+        if metadata.is_some_and(|m| !m.is_dir()) {
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
-                format!("source destination is not a directory: {directory:?}"),
+                format!("source destination is not a directory: {current:?}"),
             )
             .into());
         }
-        suffix = components.as_path();
     }
-}
-
-fn destination_type(path: &Path) -> Result<Option<fs::FileType>> {
-    Ok(destination_metadata(path)?.map(|metadata| metadata.file_type()))
+    Err(EtherscanError::InvalidSourcePath(path.to_owned()))
 }
 
 fn destination_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
