@@ -16,18 +16,18 @@
   },
   "dependencies": {
     "accounts": "^0.21.1",
-    "ox": "^0.14.30",
+    "ox": "^1.8.16",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "viem": "^2.57.14"
+    "viem": "^2.57.20"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.6.4",
+    "@biomejs/biome": "^2.6.8",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.2.1",
+    "@vitejs/plugin-react": "^6.3.0",
     "typescript": "~7.0.2",
-    "vite": "^8.3.5"
+    "vite": "^8.3.8"
   }
 }
