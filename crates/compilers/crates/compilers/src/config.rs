@@ -566,11 +566,7 @@ impl<L> ProjectPathsConfig<L> {
             candidates.into_iter().next()
         };
         if let Some(path) = best.map(|(r, _, stripped_import)| {
-            let lib_path = if stripped_import.as_os_str().is_empty() && r.path.ends_with(".sol") {
-                r.path.clone().into()
-            } else {
-                Path::new(&r.path).join(stripped_import)
-            };
+            let lib_path = remapped_path(r, stripped_import);
 
             // we handle the edge case where the path of a remapping ends with "contracts"
             // (`<name>/=.../contracts`) and the stripped import also starts with
@@ -625,7 +621,7 @@ impl<L> ProjectPathsConfig<L> {
 
             // Check if the relative path starts with the remapping name
             if let Ok(stripped) = relative_path.strip_prefix(&r.name) {
-                let remapped_relative = Path::new(&r.path).join(stripped);
+                let remapped_relative = remapped_path(r, stripped);
                 let remapped_absolute = self.root.join(&remapped_relative);
 
                 // Only use remapped path if the target file exists
@@ -1147,6 +1143,15 @@ fn path_starts_with(path: &Path, base: &Path) -> bool {
     path.starts_with(base)
 }
 
+/// Joins the part of a path after a remapping's name onto the remapping's target.
+fn remapped_path(remapping: &Remapping, stripped: &Path) -> PathBuf {
+    if stripped.as_os_str().is_empty() && remapping.path.ends_with(".sol") {
+        remapping.path.clone().into()
+    } else {
+        Path::new(&remapping.path).join(stripped)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1517,6 +1522,31 @@ mod tests {
 
         // The resolved path should be the local override, not the external file
         assert_eq!(resolved, local_dir.join("LibMem.sol"));
+    }
+
+    #[test]
+    fn can_apply_file_remapping_to_relative_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = ProjectPathsConfig::builder().root(dir.path()).build::<()>().unwrap();
+        config.create_all().unwrap();
+
+        let lib_dir = config.root.join("lib/external/utils");
+        fs::create_dir_all(&lib_dir).unwrap();
+        fs::write(lib_dir.join("LibMem.sol"), r"pragma solidity ^0.8.0; library LibMem {}")
+            .unwrap();
+        fs::write(config.tests.join("LibMem.sol"), r"pragma solidity ^0.8.0; library LibMem {}")
+            .unwrap();
+
+        config.remappings.push("lib/external/utils/LibMem.sol=test/LibMem.sol".parse().unwrap());
+
+        let resolved = config
+            .resolve_import_and_include_paths(
+                &lib_dir,
+                Path::new("./LibMem.sol"),
+                &mut Default::default(),
+            )
+            .unwrap();
+        assert_eq!(resolved, config.tests.join("LibMem.sol"));
     }
 
     #[test]

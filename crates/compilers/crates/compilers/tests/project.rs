@@ -2010,6 +2010,40 @@ fn can_compile_dapp_invalidate_changed_cached_imports() {
 }
 
 #[test]
+fn can_compile_dapp_detect_changes_in_file_remapped_imports() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project
+        .paths_mut()
+        .remappings
+        .push(Remapping::from_str("lib/dep/Math.sol=src/Math.sol").unwrap());
+
+    project.add_lib("dep/Math", "pragma solidity ^0.8.10; contract Math {}").unwrap();
+    project
+        .add_lib("dep/Lib", "pragma solidity ^0.8.10; import './Math.sol'; contract Lib is Math {}")
+        .unwrap();
+    project
+        .add_source(
+            "UsesLib",
+            "pragma solidity ^0.8.10; import '../lib/dep/Lib.sol'; contract UsesLib is Lib {}",
+        )
+        .unwrap();
+    project.add_source("Math", "pragma solidity ^0.8.10; contract Math {}").unwrap();
+    project.compile().unwrap().assert_success();
+    assert!(project.compile().unwrap().is_unchanged());
+
+    project.add_source("Math", "pragma solidity ^0.8.10; contract Math { uint256 x; }").unwrap();
+    let compiled = project.compile().unwrap();
+    compiled.assert_success();
+    assert!(compiled.compiled_artifacts().find_first("UsesLib").is_some());
+
+    let cache = CompilerCache::<MultiCompilerSettings>::read(project.cache_path()).unwrap();
+    assert_eq!(
+        cache.files[Path::new("lib/dep/Lib.sol")].imports,
+        BTreeSet::from([PathBuf::from("src/Math.sol")])
+    );
+}
+
+#[test]
 fn can_compile_dapp_detect_swapped_remapping_bindings() {
     let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
     let lib = project.paths().libraries[0].clone();
