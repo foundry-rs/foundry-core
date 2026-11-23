@@ -53,11 +53,6 @@ use tower::Service;
 #[derive(Clone, Copy, Debug)]
 pub struct StateBlockId(pub BlockId);
 
-/// Largest number of new keys, accounts plus slots that were neither cached nor requested, in an
-/// access list for which the call is not simulated again: reading them directly takes no more
-/// round trips than the simulation and the prefetch together.
-const CHEAP_ACCESS_LIST: usize = 2;
-
 /// Reads since the last simulation before the cache can count as warm.
 const WARM_CACHE_READS: u64 = 32;
 
@@ -258,10 +253,6 @@ struct AccessListGate {
     hits: AtomicU64,
     /// Cache misses when the last simulation was requested.
     misses: AtomicU64,
-    /// Whether the cache was warm at the last check.
-    was_warm: AtomicBool,
-    /// Calls whose last access list held at most [`CHEAP_ACCESS_LIST`] new keys.
-    cheap: parking_lot::Mutex<HashSet<AccessListKey>>,
     /// Calls simulated at the pinned block.
     requested: parking_lot::Mutex<HashSet<AccessListKey>>,
 }
@@ -273,8 +264,6 @@ impl Default for AccessListGate {
             overrides_supported: AtomicBool::new(true),
             hits: AtomicU64::new(u64::MAX),
             misses: AtomicU64::new(0),
-            was_warm: AtomicBool::new(false),
-            cheap: Default::default(),
             requested: Default::default(),
         }
     }
@@ -282,34 +271,31 @@ impl Default for AccessListGate {
 
 impl AccessListGate {
     /// Returns whether a call, with or without `overrides`, is simulated now: the endpoint
-    /// supports it, the call is not cheap, and the cache is not warm. Suites on one fork share
-    /// the counts, so a call into a target the fork has not loaded, such as a new suite's test
-    /// contract, is simulated once whatever the other reads hit.
+    /// supports it, the call was not simulated at the pinned block, and the cache is not warm.
+    /// Suites on one fork share the counts, so a call into a target the fork has not loaded, such
+    /// as a new suite's test contract, is simulated whatever the other reads hit.
+    ///
+    /// A call is simulated once per pinned block, whatever its arguments. A repeated call mostly
+    /// lists keys that its first simulation or the EVM already read, and then costs a heavy
+    /// request, with its overrides, for few or no new keys.
     fn wanted<B>(&self, key: &AccessListKey, overrides: bool, cache: &JsonBlockCacheDB<B>) -> bool {
         self.supported.load(Ordering::Relaxed)
             && (!overrides || self.overrides_supported.load(Ordering::Relaxed))
-            // The warm check runs first, so it rolls the window and clears cheap calls.
-            && (!self.warm(cache)
-                || (!cache.db().accounts.read().contains_key(&key.0)
-                    && !self.requested.lock().contains(key)))
-            && !self.cheap.lock().contains(key)
+            && !self.requested.lock().contains(key)
+            && (!self.warm(cache) || !cache.db().accounts.read().contains_key(&key.0))
     }
 
     /// Returns whether the cache is warm: [`WARM_CACHE_READS`] reads since the last simulation,
     /// with at most one miss per [`WARM_HITS_PER_MISS`] hits.
     ///
     /// After [`WARM_WINDOW`] warm reads the counts restart from the last [`WARM_CACHE_READS`]
-    /// hits, so the hits of a long warm run do not hide new cold state. When the cache turns
-    /// cold, the cheap calls are cleared, since their arguments can now reach cold state.
+    /// hits, so the hits of a long warm run do not hide new cold state.
     fn warm<B>(&self, cache: &JsonBlockCacheDB<B>) -> bool {
         let Some((hits, misses)) = self.reads_since_simulation(cache) else { return false };
         let warm = hits >= WARM_CACHE_READS && misses.saturating_mul(WARM_HITS_PER_MISS) <= hits;
         if warm && hits + misses >= WARM_WINDOW {
             self.misses.store(cache.cache_misses(), Ordering::Relaxed);
             self.hits.store(cache.cache_hits() - WARM_CACHE_READS, Ordering::Relaxed);
-        }
-        if self.was_warm.swap(warm, Ordering::Relaxed) && !warm {
-            self.cheap.lock().clear();
         }
         warm
     }
@@ -460,8 +446,6 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = serde_json::Value> {
     prefetched_accounts: AddressHashMap<AccountInfo>,
     /// Prefetched storage slots that no read has requested yet, see `prefetched_accounts`.
     prefetched_storage: HashMap<(Address, U256), U256>,
-    /// Access list simulations in flight, keyed by state generation, target and selector.
-    access_list_requests: HashSet<(u64, AccessListKey)>,
     /// Whether simulations are wanted, shared with the [`SharedBackend`]s.
     access_list_gate: Arc<AccessListGate>,
     /// Accounts of access lists waiting for a request, keyed by state generation.
@@ -510,7 +494,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             account_fetch_mode: Arc::new(SharedAccountFetchMode::new(AccountFetchMode::Unchecked)),
             prefetched_accounts: Default::default(),
             prefetched_storage: Default::default(),
-            access_list_requests: Default::default(),
             access_list_gate,
             account_queue: Default::default(),
             prefetch_queue: Default::default(),
@@ -594,7 +577,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             BackendRequest::SetPinnedBlock(block_id) => {
                 self.drop_prefetched();
                 // Calls of the old block can reach cold state at the new one.
-                self.access_list_gate.cheap.lock().clear();
                 self.access_list_gate.requested.lock().clear();
                 self.block_id = Some(block_id);
                 self.block_anchor = None;
@@ -640,8 +622,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
     /// Simulates a call with `eth_createAccessList` at the pinned block and prefetches the
     /// accounts and slots in the result.
     ///
-    /// The simulation is skipped while it is not wanted, see [`AccessListGate::wanted`]. One
-    /// simulation per call is in flight at a time.
+    /// The simulation is skipped while it is not wanted, see [`AccessListGate::wanted`].
     fn request_access_list(
         &mut self,
         tx: TransactionRequest,
@@ -656,9 +637,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             return;
         }
         let generation = self.state_generation;
-        if !self.access_list_requests.insert((generation, key)) {
-            return;
-        }
         self.access_list_gate.requested.lock().insert(key);
         self.access_list_gate.record(cache);
         let with_overrides = overrides.is_some();
@@ -695,34 +673,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         }
         self.drain_account_queue();
         self.drain_prefetch_queue();
-    }
-
-    /// Returns the number of accounts and slots of an access list that are neither cached nor
-    /// requested.
-    fn new_keys(&self, result: &AccessListResult) -> usize {
-        let generation = self.state_generation;
-        let accounts = self.db.accounts().read();
-        let storage = self.db.storage().read();
-        let mut new_keys = 0;
-        for item in &result.access_list.0 {
-            let address = item.address;
-            if !accounts.contains_key(&address)
-                && !self.prefetched_accounts.contains_key(&address)
-                && !self.account_requests.contains_key(&(generation, address))
-            {
-                new_keys += 1;
-            }
-            for slot in &item.storage_keys {
-                let idx = U256::from_be_bytes(slot.0);
-                if !storage.get(&address).is_some_and(|slots| slots.contains_key(&idx))
-                    && !self.prefetched_storage.contains_key(&(address, idx))
-                    && !self.storage_requests.contains_key(&(generation, address, idx))
-                {
-                    new_keys += 1;
-                }
-            }
-        }
-        new_keys
     }
 
     /// Drops prefetched values and queued prefetches, and starts a new state generation so that
@@ -1511,16 +1461,9 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                         if let Poll::Ready((resp, key, generation, with_overrides)) =
                             fut.poll_unpin(cx)
                         {
-                            pin.access_list_requests.remove(&(generation, key));
                             match resp {
                                 Ok(result) if generation == pin.state_generation => {
-                                    let new_keys = pin.new_keys(&result);
-                                    trace!(target: "backendhandler", to = %key.0, new_keys, error = ?result.error, "received access list");
-                                    // A failed simulation may have stopped early; its short list
-                                    // says nothing about the call.
-                                    if result.error.is_none() && new_keys <= CHEAP_ACCESS_LIST {
-                                        pin.access_list_gate.cheap.lock().insert(key);
-                                    }
+                                    trace!(target: "backendhandler", to = %key.0, accounts = result.access_list.0.len(), error = ?result.error, "received access list");
                                     // A failed batch in the meantime stopped prefetching.
                                     if pin.access_list_gate.supported.load(Ordering::Relaxed) {
                                         pin.prefetch_access_list(&result);
@@ -3017,7 +2960,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn access_list_prefetch_serves_reads_and_skips_cheap_calls() {
+    async fn access_list_prefetch_serves_reads_and_skips_repeated_calls() {
         let target = Address::with_last_byte(1);
         let other = Address::with_last_byte(2);
         let rpc = access_list_rpc(listed(target, other), None);
@@ -3033,8 +2976,7 @@ mod tests {
         assert!(!backend.storage().contains_key(&other));
         assert_eq!(backend.storage_at(other, U256::from(2)).unwrap(), U256::from(42));
 
-        // The same target and selector is simulated again, since its list held four keys and the
-        // cache missed since, but a simulation in flight is not repeated unless the target's
+        // The same target and selector is not simulated again at this block, unless the target's
         // override code differs.
         let overrides = StateOverride::default();
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
@@ -3066,7 +3008,8 @@ mod tests {
             assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
         }
         assert!(!backend.wants_access_list(&unloaded, B256::ZERO, false));
-        // After a long warm run, a few new slots turn simulations back on, cheap calls included.
+        // After a long warm run, a few new slots turn simulations back on for calls not simulated
+        // at this block.
         for _ in 0..WARM_WINDOW {
             assert!(!backend.wants_access_list(&access_list_call(target, 0xcc), B256::ZERO, false));
             assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
@@ -3074,11 +3017,12 @@ mod tests {
         for slot in 8..12 {
             assert_eq!(backend.storage_at(target, U256::from(slot)).unwrap(), U256::from(42));
         }
-        assert!(backend.wants_access_list(&access_list_call(target, 0xaa), B256::ZERO, false));
+        assert!(backend.wants_access_list(&access_list_call(target, 0xcc), B256::ZERO, false));
+        assert!(!backend.wants_access_list(&access_list_call(target, 0xaa), B256::ZERO, false));
 
         assert_eq!(
             rpc.counts(),
-            json!({"eth_createAccessList": 4, "eth_getStorageAt": 7, "eth_getAccountInfo": 2})
+            json!({"eth_createAccessList": 3, "eth_getStorageAt": 7, "eth_getAccountInfo": 2})
         );
         let simulation = rpc.calls().into_iter().find(|call| call[0] == "eth_createAccessList");
         assert_eq!(simulation.unwrap()[1], json!([access_list_call(target, 0xaa), "0x7b"]));
@@ -3116,24 +3060,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn access_list_prefetch_repeats_failed_simulations() {
+    async fn access_list_prefetch_simulates_each_call_once_per_block() {
         let target = Address::with_last_byte(1);
         let reverted = json!({"accessList": [], "gasUsed": "0x5208", "error": "out of gas"});
         let rpc = access_list_rpc(Ok(reverted), None);
         let mut backend = access_list_backend(&rpc, None).await;
 
-        // An empty list of a reverted simulation does not mark the call as cheap, so a later
-        // call with other gas or arguments is simulated again.
+        // A later call with other arguments is not simulated again, whatever the first
+        // simulation returned.
         for slot in 1..=2 {
             backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
             backend.do_any_request(async { Ok(()) }).unwrap();
             assert_eq!(backend.storage_at(target, U256::from(slot)).unwrap(), U256::from(42));
-            // Waits for the simulation, so the next call does not find it in flight.
-            assert_eq!(
-                rpc.counts(),
-                json!({"eth_createAccessList": slot, "eth_getStorageAt": slot})
-            );
         }
+        wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 1);
+        assert_eq!(rpc.counts(), json!({"eth_createAccessList": 1, "eth_getStorageAt": 2}));
+
+        // A new pinned block can reach other state, so the call is simulated again.
+        backend.set_pinned_block(BlockId::number(7)).unwrap();
+        backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
+        wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
