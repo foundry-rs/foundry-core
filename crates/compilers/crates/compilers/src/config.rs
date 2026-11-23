@@ -610,28 +610,18 @@ impl<L> ProjectPathsConfig<L> {
 
         let cwd_relative = cwd.strip_prefix(&self.root).unwrap_or(cwd);
 
-        // Check if any remapping matches this path
-        for r in &self.remappings {
-            // Check context
-            if let Some(ctx) = r.context.as_ref()
-                && !cwd_relative.starts_with(ctx)
-            {
-                continue;
-            }
-
-            // Check if the relative path starts with the remapping name
-            if let Ok(stripped) = relative_path.strip_prefix(&r.name) {
-                let remapped_relative = remapped_path(r, stripped);
-                let remapped_absolute = self.root.join(&remapped_relative);
-
-                // Only use remapped path if the target file exists
-                if remapped_absolute.exists() {
-                    return remapped_absolute;
-                }
-            }
-        }
-
-        resolved_path.to_path_buf()
+        // Like solc, pick the matching remapping with the longest context, then the longest name,
+        // then the last one listed. Only use a remapping whose target file exists.
+        self.remappings
+            .iter()
+            .filter(|r| r.context.as_ref().is_none_or(|ctx| cwd_relative.starts_with(ctx)))
+            .filter_map(|r| {
+                let stripped = relative_path.strip_prefix(&r.name).ok()?;
+                let remapped = self.root.join(remapped_path(r, stripped));
+                remapped.exists().then_some((r, remapped))
+            })
+            .max_by_key(|(r, _)| (r.context.as_ref().map_or(0, |ctx| ctx.len()), r.name.len()))
+            .map_or_else(|| resolved_path.to_path_buf(), |(_, remapped)| remapped)
     }
 
     pub fn with_language_ref<Lang>(&self) -> &ProjectPathsConfig<Lang> {
@@ -1527,7 +1517,7 @@ mod tests {
     #[test]
     fn can_apply_file_remapping_to_relative_import() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = ProjectPathsConfig::builder().root(dir.path()).build::<()>().unwrap();
+        let config = ProjectPathsConfig::builder().root(dir.path()).build::<()>().unwrap();
         config.create_all().unwrap();
 
         let lib_dir = config.root.join("lib/external/utils");
@@ -1537,16 +1527,35 @@ mod tests {
         fs::write(config.tests.join("LibMem.sol"), r"pragma solidity ^0.8.0; library LibMem {}")
             .unwrap();
 
-        config.remappings.push("lib/external/utils/LibMem.sol=test/LibMem.sol".parse().unwrap());
-
-        let resolved = config
-            .resolve_import_and_include_paths(
-                &lib_dir,
-                Path::new("./LibMem.sol"),
-                &mut Default::default(),
-            )
+        let fork_dir = config.root.join("lib/fork");
+        fs::create_dir_all(&fork_dir).unwrap();
+        fs::write(fork_dir.join("LibMem.sol"), r"pragma solidity ^0.8.0; library LibMem {}")
             .unwrap();
-        assert_eq!(resolved, config.tests.join("LibMem.sol"));
+
+        let resolve = |remappings: &[&str]| {
+            let mut config = config.clone();
+            config.remappings = remappings.iter().map(|r| r.parse().unwrap()).collect();
+            config
+                .resolve_import_and_include_paths(
+                    &lib_dir,
+                    Path::new("./LibMem.sol"),
+                    &mut Default::default(),
+                )
+                .unwrap()
+        };
+
+        let file = "lib/external/utils/LibMem.sol=test/LibMem.sol";
+        let dir_remap = "lib/external/utils/=lib/fork/";
+        let ctx = "lib/external/:lib/external/utils/=lib/fork/";
+        assert_eq!(resolve(&[file]), config.tests.join("LibMem.sol"));
+        // As in solc, the longest name wins regardless of order.
+        assert_eq!(resolve(&[dir_remap, file]), config.tests.join("LibMem.sol"));
+        assert_eq!(resolve(&[file, dir_remap]), config.tests.join("LibMem.sol"));
+        // As in solc, the last listed wins a tie.
+        let same_name = "lib/external/utils/LibMem.sol=lib/fork/LibMem.sol";
+        assert_eq!(resolve(&[file, same_name]), fork_dir.join("LibMem.sol"));
+        // As in solc, the longest context wins over the longest name.
+        assert_eq!(resolve(&[file, ctx]), fork_dir.join("LibMem.sol"));
     }
 
     #[test]
