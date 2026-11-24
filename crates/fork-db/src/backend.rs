@@ -174,8 +174,11 @@ fn access_list_key(tx: &TransactionRequest, code_hash: B256) -> Option<AccessLis
     Some((to, selector, code_hash))
 }
 
-type AccessListFuture<Err> =
-    Pin<Box<dyn Future<Output = (Result<AccessListResult, Err>, AccessListKey, u64, bool)> + Send>>;
+/// A simulation result with its key, state generation, block generation and whether it sent
+/// state overrides.
+type AccessListFuture<Err> = Pin<
+    Box<dyn Future<Output = (Result<AccessListResult, Err>, AccessListKey, u64, u64, bool)> + Send>,
+>;
 
 /// One batch of prefetched slot reads: the value or error of each slot, with the state generation
 /// and the block the batch read at.
@@ -637,7 +640,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             trace!(target: "backendhandler", %to, %selector, "skipping access list request");
             return;
         }
-        let generation = self.state_generation;
+        let (generation, block_generation) = (self.state_generation, self.block_generation);
         self.access_list_gate.requested.lock().insert(key);
         self.access_list_gate.record(cache);
         let with_overrides = overrides.is_some();
@@ -653,7 +656,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 .raw_request::<_, AccessListResult>("eth_createAccessList".into(), params)
                 .await
                 .map_err(Into::into);
-            (result, key, generation, with_overrides)
+            (result, key, generation, block_generation, with_overrides)
         });
         self.pending_requests.push(ProviderRequest::AccessList(fut));
     }
@@ -1459,8 +1462,13 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                         }
                     }
                     ProviderRequest::AccessList(fut) => {
-                        if let Poll::Ready((resp, key, generation, with_overrides)) =
-                            fut.poll_unpin(cx)
+                        if let Poll::Ready((
+                            resp,
+                            key,
+                            generation,
+                            block_generation,
+                            with_overrides,
+                        )) = fut.poll_unpin(cx)
                         {
                             match resp {
                                 Ok(result) if generation == pin.state_generation => {
@@ -1484,8 +1492,11 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                             .overrides_supported
                                             .store(false, Ordering::Relaxed);
                                         // The call was not simulated, so it stays eligible
-                                        // without overrides.
-                                        pin.access_list_gate.requested.lock().remove(&key);
+                                        // without overrides. A new pin cleared the entry, which
+                                        // can now belong to a simulation at the new block.
+                                        if block_generation == pin.block_generation {
+                                            pin.access_list_gate.requested.lock().remove(&key);
+                                        }
                                     } else {
                                         trace!(target: "backendhandler", %err, "access list request failed");
                                     }
@@ -3067,18 +3078,21 @@ mod tests {
     async fn access_list_prefetch_simulates_each_call_once_per_block() {
         let target = Address::with_last_byte(1);
         let reverted = json!({"accessList": [], "gasUsed": "0x5208", "error": "out of gas"});
+        // Holds back override rejections while set.
+        let hold = Arc::new(AtomicBool::new(false));
+        let hold2 = Arc::clone(&hold);
         // Rejects state overrides, like an endpoint without the three-argument form.
-        let rpc = MockRpc::serve(
-            Box::new(move |method, params, _| match method {
-                "eth_createAccessList" if params.as_array().unwrap().len() > 2 => {
-                    Err(json!({"code": -32602, "message": "too many arguments"}))
+        let rpc = MockRpc::concurrent(move |method, params| match method {
+            "eth_createAccessList" if params.as_array().unwrap().len() > 2 => {
+                while hold2.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-                "eth_createAccessList" => Ok(reverted.clone()),
-                "eth_getStorageAt" => Ok(json!("0x2a")),
-                _ => Err(unsupported(method)),
-            }),
-            false,
-        );
+                Err(json!({"code": -32602, "message": "too many arguments"}))
+            }
+            "eth_createAccessList" => Ok(reverted.clone()),
+            "eth_getStorageAt" => Ok(json!("0x2a")),
+            _ => Err(unsupported(method)),
+        });
         let mut backend = access_list_backend(&rpc, None).await;
 
         // A later call with other arguments is not simulated again, whatever the first
@@ -3105,6 +3119,20 @@ mod tests {
         assert!(!backend.wants_access_list(&call, B256::ZERO, true));
         backend.prefetch_access_list(call, None, B256::ZERO);
         wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 4);
+
+        // A rejection from an old pin keeps the new block's simulation of the same call.
+        hold.store(true, Ordering::Relaxed);
+        let backend = access_list_backend(&rpc, None).await;
+        let call = access_list_call(target, 0xcc);
+        backend.prefetch_access_list(call.clone(), Some(StateOverride::default()), B256::ZERO);
+        wait_until("request", &|| rpc.counts()["eth_createAccessList"] == 5);
+        backend.set_pinned_block(BlockId::number(8)).unwrap();
+        backend.prefetch_access_list(call.clone(), None, B256::ZERO);
+        wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 6);
+        hold.store(false, Ordering::Relaxed);
+        let other = access_list_call(target, 0xdd);
+        wait_until("rejection", &|| !backend.wants_access_list(&other, B256::ZERO, true));
+        assert!(!backend.wants_access_list(&call, B256::ZERO, false));
     }
 
     #[tokio::test(flavor = "multi_thread")]
