@@ -562,22 +562,25 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 context.push_str(&utils::unique_hash(identity));
             }
             let directory = project.abi_cache_path().join(context);
-            let store =
-                match AbiCache::open(project.abi_cache_path(), directory, !project.no_artifacts) {
-                    Ok(store) => store,
-                    Err(err) => {
-                        debug!(%err, "ABI cache unavailable; compiling without persistence");
-                        let mut output =
-                            PreprocessedState { sources, cache, primary_profiles, preprocessor }
-                                .compile()?
-                                .write_artifacts_if(false)?
-                                .write_cache()?;
-                        if slash_paths {
-                            output.slash_paths();
-                        }
-                        return Ok(output);
+            let store = match AbiCache::open(
+                project.abi_cache_path(),
+                directory,
+                !project.no_artifacts && !project.no_compile,
+            ) {
+                Ok(store) => store,
+                Err(err) => {
+                    debug!(%err, "ABI cache unavailable; compiling without persistence");
+                    let mut output =
+                        PreprocessedState { sources, cache, primary_profiles, preprocessor }
+                            .compile()?
+                            .write_artifacts_if(false)?
+                            .write_cache()?;
+                    if slash_paths {
+                        output.slash_paths();
                     }
-                };
+                    return Ok(output);
+                }
+            };
             let (normal_artifacts, normal_builds, edges) =
                 cache.consume(&Artifacts::default(), &Vec::new(), false)?;
             let mut cache = ArtifactsCache::with_storage(
@@ -632,6 +635,7 @@ impl<'a, C: Compiler<CompilerContract = Contract>> ProjectCompiler<'a, Configura
                 cache.update_native_dependency_contexts(normal_native_dependencies);
             }
             let generation = if !project.no_artifacts
+                && !project.no_compile
                 && sources.sources.values().flatten().any(|(_, sources, _)| !sources.is_empty())
             {
                 match store.stage(&mut cache) {
@@ -836,8 +840,8 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
 /// [`ArtifactsState::write_cache`] so both stages act on the same decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiskOutput {
-    /// Writing is disabled, by `no_artifacts` or by a caller compiling without persistence:
-    /// nothing is written.
+    /// Writing is disabled, by `no_artifacts`, by `no_compile`, or by a caller compiling without
+    /// persistence: nothing is written.
     Disabled,
     /// The compiler reported errors that are not ignored: nothing is written.
     SkipOnErrors,
@@ -854,7 +858,7 @@ impl DiskOutput {
         project: &Project<C, T>,
         output: &AggregatedCompilerOutput<C>,
     ) -> Self {
-        if !write {
+        if !write || project.no_compile {
             Self::Disabled
         } else if output.has_error(
             &project.ignored_error_codes,
@@ -901,7 +905,9 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let (cached_artifacts, cached_builds, edges) =
             cache.consume(&compiled_artifacts, &output.build_infos, disk_output.is_write())?;
 
-        project.artifacts_handler().handle_cached_artifacts(&cached_artifacts)?;
+        if !project.no_compile {
+            project.artifacts_handler().handle_cached_artifacts(&cached_artifacts)?;
+        }
 
         let builds = Builds(
             output
@@ -1037,6 +1043,8 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
             if !stale.is_empty() {
                 return Err(SolcError::StaleSources(stale.into_iter().collect()));
             }
+            // Never build jobs, even if a stateful sparse filter would select sources on a rerun.
+            return Ok(AggregatedCompilerOutput::default());
         }
 
         let mut jobs = Vec::new();
@@ -1623,7 +1631,12 @@ mod tests {
         tmp.project_mut().no_compile = false;
         tmp.compile().unwrap().assert_success();
         tmp.project_mut().no_compile = true;
+        // A trailing newline that a rewrite of the cache would drop.
+        let cache = tmp.project().cache_path().to_path_buf();
+        let contents = std::fs::read_to_string(&cache).unwrap() + "\n";
+        std::fs::write(&cache, &contents).unwrap();
         assert!(tmp.compile().unwrap().is_unchanged());
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), contents);
 
         let a = tmp
             .add_source("A", "pragma solidity ^0.8.10; import \"./B.sol\"; contract A { uint x; }")

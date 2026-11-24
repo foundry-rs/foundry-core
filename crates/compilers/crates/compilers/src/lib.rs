@@ -118,7 +118,7 @@ pub struct Project<
     /// Offline mode, if set, network access (download solc) is disallowed
     pub offline: bool,
     /// If set, compiling fails with [`SolcError::StaleSources`] instead of invoking a compiler
-    /// when any source needs compiling.
+    /// when any source needs compiling, and nothing is written to the cache or artifacts.
     pub no_compile: bool,
     /// Windows only config value to ensure the all paths use `/` instead of `\\`, same as `solc`
     ///
