@@ -1631,12 +1631,15 @@ mod tests {
         tmp.project_mut().no_compile = false;
         tmp.compile().unwrap().assert_success();
         tmp.project_mut().no_compile = true;
+        tmp.project_mut().artifacts.additional_files.abi = true;
         // A trailing newline that a rewrite of the cache would drop.
         let cache = tmp.project().cache_path().to_path_buf();
         let contents = std::fs::read_to_string(&cache).unwrap() + "\n";
         std::fs::write(&cache, &contents).unwrap();
         assert!(tmp.compile().unwrap().is_unchanged());
         assert_eq!(std::fs::read_to_string(&cache).unwrap(), contents);
+        // Nor does it write extra files for cached artifacts.
+        assert!(!tmp.project().paths.artifacts.join("A.sol/A.abi.json").exists());
 
         let a = tmp
             .add_source("A", "pragma solidity ^0.8.10; import \"./B.sol\"; contract A { uint x; }")
