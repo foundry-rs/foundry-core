@@ -281,8 +281,9 @@ impl AccessListGate {
     fn wanted<B>(&self, key: &AccessListKey, overrides: bool, cache: &JsonBlockCacheDB<B>) -> bool {
         self.supported.load(Ordering::Relaxed)
             && (!overrides || self.overrides_supported.load(Ordering::Relaxed))
-            && !self.requested.lock().contains(key)
+            // The warm check runs first, so repeated calls also roll the window.
             && (!self.warm(cache) || !cache.db().accounts.read().contains_key(&key.0))
+            && !self.requested.lock().contains(key)
     }
 
     /// Returns whether the cache is warm: [`WARM_CACHE_READS`] reads since the last simulation,
@@ -1482,6 +1483,9 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                         pin.access_list_gate
                                             .overrides_supported
                                             .store(false, Ordering::Relaxed);
+                                        // The call was not simulated, so it stays eligible
+                                        // without overrides.
+                                        pin.access_list_gate.requested.lock().remove(&key);
                                     } else {
                                         trace!(target: "backendhandler", %err, "access list request failed");
                                     }
@@ -3008,10 +3012,10 @@ mod tests {
             assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
         }
         assert!(!backend.wants_access_list(&unloaded, B256::ZERO, false));
-        // After a long warm run, a few new slots turn simulations back on for calls not simulated
-        // at this block.
+        // After a long warm run, also of calls simulated at this block, a few new slots turn
+        // simulations back on for calls not simulated at this block.
         for _ in 0..WARM_WINDOW {
-            assert!(!backend.wants_access_list(&access_list_call(target, 0xcc), B256::ZERO, false));
+            assert!(!backend.wants_access_list(&access_list_call(target, 0xaa), B256::ZERO, false));
             assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
         }
         for slot in 8..12 {
@@ -3063,7 +3067,18 @@ mod tests {
     async fn access_list_prefetch_simulates_each_call_once_per_block() {
         let target = Address::with_last_byte(1);
         let reverted = json!({"accessList": [], "gasUsed": "0x5208", "error": "out of gas"});
-        let rpc = access_list_rpc(Ok(reverted), None);
+        // Rejects state overrides, like an endpoint without the three-argument form.
+        let rpc = MockRpc::serve(
+            Box::new(move |method, params, _| match method {
+                "eth_createAccessList" if params.as_array().unwrap().len() > 2 => {
+                    Err(json!({"code": -32602, "message": "too many arguments"}))
+                }
+                "eth_createAccessList" => Ok(reverted.clone()),
+                "eth_getStorageAt" => Ok(json!("0x2a")),
+                _ => Err(unsupported(method)),
+            }),
+            false,
+        );
         let mut backend = access_list_backend(&rpc, None).await;
 
         // A later call with other arguments is not simulated again, whatever the first
@@ -3080,6 +3095,16 @@ mod tests {
         backend.set_pinned_block(BlockId::number(7)).unwrap();
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
         wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 2);
+
+        // A call whose overrides the endpoint rejected was not simulated, so it is simulated
+        // without them.
+        let call = access_list_call(target, 0xbb);
+        backend.prefetch_access_list(call.clone(), Some(StateOverride::default()), B256::ZERO);
+        wait_until("request", &|| rpc.counts()["eth_createAccessList"] == 3);
+        wait_until("rejection", &|| backend.wants_access_list(&call, B256::ZERO, false));
+        assert!(!backend.wants_access_list(&call, B256::ZERO, true));
+        backend.prefetch_access_list(call, None, B256::ZERO);
+        wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 4);
     }
 
     #[tokio::test(flavor = "multi_thread")]
