@@ -1025,6 +1025,20 @@ impl<L: Language, S: CompilerSettings> CompilerSources<'_, L, S> {
                 .collect::<Vec<_>>()
         };
 
+        if project.no_compile {
+            let stale = self
+                .sources
+                .values()
+                .flatten()
+                .flat_map(|(_, sources, (_, settings))| {
+                    sparse_output.sparse_sources(sources, &mut (*settings).clone(), graph)
+                })
+                .collect::<BTreeSet<_>>();
+            if !stale.is_empty() {
+                return Err(SolcError::StaleSources(stale.into_iter().collect()));
+            }
+        }
+
         let mut jobs = Vec::new();
         let mut jobs_source_edits = Vec::new();
         for (language, versioned_sources) in self.sources {
@@ -1592,6 +1606,30 @@ mod tests {
         let project = Project::builder().paths(paths).build(Default::default()).unwrap();
         let compiler = ProjectCompiler::new(&project).unwrap();
         let _out = compiler.compile().unwrap();
+    }
+
+    #[test]
+    #[cfg(all(feature = "project-util", feature = "svm-solc"))]
+    fn no_compile_rejects_stale_sources() {
+        let mut tmp = TempProject::<MultiCompiler, ConfigurableArtifacts>::dapptools().unwrap();
+        tmp.add_source("A", "pragma solidity ^0.8.10; import \"./B.sol\"; contract A {}").unwrap();
+        tmp.add_source("B", "pragma solidity ^0.8.10; contract B {}").unwrap();
+        tmp.project_mut().no_compile = true;
+
+        // Without a cache, every source is stale.
+        let Err(SolcError::StaleSources(stale)) = tmp.compile() else { panic!() };
+        assert_eq!(stale.len(), 2);
+
+        tmp.project_mut().no_compile = false;
+        tmp.compile().unwrap().assert_success();
+        tmp.project_mut().no_compile = true;
+        assert!(tmp.compile().unwrap().is_unchanged());
+
+        let a = tmp
+            .add_source("A", "pragma solidity ^0.8.10; import \"./B.sol\"; contract A { uint x; }")
+            .unwrap();
+        let Err(SolcError::StaleSources(stale)) = tmp.compile() else { panic!() };
+        assert_eq!(stale, [a]);
     }
 
     #[test]

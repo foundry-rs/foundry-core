@@ -117,6 +117,9 @@ pub struct Project<
     solc_jobs: usize,
     /// Offline mode, if set, network access (download solc) is disallowed
     pub offline: bool,
+    /// If set, compiling fails with [`SolcError::StaleSources`] instead of invoking a compiler
+    /// when any source needs compiling.
+    pub no_compile: bool,
     /// Windows only config value to ensure the all paths use `/` instead of `\\`, same as `solc`
     ///
     /// This is a noop on other platforms
@@ -477,6 +480,8 @@ pub struct ProjectBuilder<
     no_artifacts: bool,
     /// Use offline mode
     offline: bool,
+    /// Fail instead of compiling stale sources.
+    no_compile: bool,
     /// Whether to slash paths of the `ProjectCompilerOutput`
     slash_paths: bool,
     /// handles all artifacts related tasks
@@ -503,6 +508,7 @@ impl<C: Compiler, T: ArtifactOutput<CompilerContract = C::CompilerContract>> Pro
             build_info: false,
             no_artifacts: false,
             offline: false,
+            no_compile: false,
             slash_paths: true,
             artifacts,
             ignored_error_codes: Vec::new(),
@@ -601,6 +607,14 @@ impl<C: Compiler, T: ArtifactOutput<CompilerContract = C::CompilerContract>> Pro
         self
     }
 
+    /// Sets whether compiling fails with [`SolcError::StaleSources`] instead of invoking a
+    /// compiler when any source needs compiling.
+    #[must_use]
+    pub const fn set_no_compile(mut self, no_compile: bool) -> Self {
+        self.no_compile = no_compile;
+        self
+    }
+
     /// Sets whether to slash all paths on windows
     ///
     /// If set to `true` all `\\` separators are replaced with `/`, same as solc
@@ -682,6 +696,7 @@ impl<C: Compiler, T: ArtifactOutput<CompilerContract = C::CompilerContract>> Pro
             compiler_severity_filter,
             solc_jobs,
             offline,
+            no_compile,
             build_info,
             slash_paths,
             ignored_file_paths,
@@ -698,6 +713,7 @@ impl<C: Compiler, T: ArtifactOutput<CompilerContract = C::CompilerContract>> Pro
             additional_settings,
             restrictions,
             offline,
+            no_compile,
             slash_paths,
             artifacts,
             ignored_error_codes,
@@ -723,6 +739,7 @@ impl<C: Compiler, T: ArtifactOutput<CompilerContract = C::CompilerContract>> Pro
             compiler_severity_filter,
             solc_jobs,
             offline,
+            no_compile,
             build_info,
             slash_paths,
             settings,
@@ -753,6 +770,7 @@ impl<C: Compiler, T: ArtifactOutput<CompilerContract = C::CompilerContract>> Pro
                 .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
                 .unwrap_or(1),
             offline,
+            no_compile,
             slash_paths,
             settings: settings.unwrap_or_default(),
             sparse_output,
