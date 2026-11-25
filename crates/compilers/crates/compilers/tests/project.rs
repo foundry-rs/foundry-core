@@ -303,7 +303,7 @@ fn abi_cache_no_compile_shares_lock() {
     abi_project.no_compile = true;
     let lock = project.paths().cache.with_file_name("solidity-files-cache.json.abi.lock");
     let reader = fs::File::open(lock).unwrap();
-    reader.try_lock_shared().unwrap();
+    reader.lock_shared().unwrap();
     let output = ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap();
     output.assert_success();
     assert!(output.find_first("Built").unwrap().abi.is_some());
