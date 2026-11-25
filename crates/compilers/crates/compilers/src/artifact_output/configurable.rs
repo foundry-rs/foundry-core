@@ -411,8 +411,9 @@ impl ArtifactOutput for ConfigurableArtifacts {
         }
         // The compiler settings do not change when the output selection already holds the table,
         // so a cached artifact may predate the flag. A file without code has no function table.
-        let has_code =
-            |code: Option<&CompactBytecode>| code.is_some_and(|code| code.object.bytes_len() > 0);
+        let has_code = |code: Option<&CompactBytecode>| {
+            code.is_some_and(|code| code.object.is_unlinked() || code.object.bytes_len() > 0)
+        };
         if self.additional_values.function_debug_data
             && artifact.function_debug_data.is_none()
             && has_code(artifact.bytecode.as_ref())
@@ -891,11 +892,11 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     fn artifact_file(
-        bytecode: &[u8],
+        object: BytecodeObject,
         function_debug_data: bool,
     ) -> ArtifactFile<ConfigurableContractArtifact> {
         let code = || CompactBytecode {
-            object: BytecodeObject::Bytecode(Bytes::copy_from_slice(bytecode)),
+            object: object.clone(),
             source_map: None,
             link_references: Default::default(),
         };
@@ -928,14 +929,18 @@ mod tests {
             },
             ..Default::default()
         };
-        let without = artifact_file(&[0x60], false);
-        let with = artifact_file(&[0x60], true);
-        let no_code = artifact_file(&[], false);
+        let bytecode = |bytes: &[u8]| BytecodeObject::Bytecode(Bytes::copy_from_slice(bytes));
+        let without = artifact_file(bytecode(&[0x60]), false);
+        let with = artifact_file(bytecode(&[0x60]), true);
+        let no_code = artifact_file(bytecode(&[]), false);
+        let unlinked = artifact_file(BytecodeObject::Unlinked("__$a$__".into()), false);
 
         assert!(!handler(false, false).is_dirty(&without).unwrap());
         assert!(handler(true, false).is_dirty(&without).unwrap());
         assert!(handler(false, true).is_dirty(&without).unwrap());
         assert!(!handler(true, true).is_dirty(&with).unwrap());
+        // A contract that links a library has code too.
+        assert!(handler(true, true).is_dirty(&unlinked).unwrap());
         // Files without code, such as interfaces and files without contracts, have no tables.
         assert!(!handler(true, true).is_dirty(&no_code).unwrap());
     }
