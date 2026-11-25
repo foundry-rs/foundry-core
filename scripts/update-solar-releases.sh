@@ -23,6 +23,11 @@ versions=$(
         }'
 )
 
+# Writes to a temporary file next to the table and moves it into place only after generation and
+# formatting succeed, so a failed download leaves the checked-in table untouched.
+tmp=$(mktemp "$(dirname "$out")/.solar_releases.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+
 {
     echo "//! Solar releases with the SHA-256 checksum of each release archive."
     echo "//!"
@@ -51,6 +56,8 @@ versions=$(
         echo "    },"
     done
     echo "];"
-} >"$out"
-rustfmt +nightly --edition 2024 "$out"
+} >"$tmp"
+rustfmt +nightly --edition 2024 "$tmp"
+chmod 644 "$tmp"
+mv "$tmp" "$out"
 echo "wrote $out"
