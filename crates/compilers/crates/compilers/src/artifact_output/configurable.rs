@@ -105,6 +105,7 @@ impl ConfigurableArtifacts {
             ir_optimized_ast,
             ewasm,
             function_debug_data,
+            deployed_function_debug_data,
             generated_sources,
             source_map,
             opcodes,
@@ -143,6 +144,9 @@ impl ConfigurableArtifacts {
         }
         if function_debug_data {
             selection.push(BytecodeOutputSelection::FunctionDebugData.into());
+        }
+        if deployed_function_debug_data {
+            selection.push(DeployedBytecodeOutputSelection::FunctionDebugData.into());
         }
         if method_identifiers {
             selection.push(EvmOutputSelection::MethodIdentifiers.into());
@@ -220,6 +224,7 @@ impl ArtifactOutput for ConfigurableArtifacts {
         let mut artifact_deployed_bytecode = None;
         let mut artifact_gas_estimates = None;
         let mut artifact_function_debug_data = None;
+        let mut artifact_deployed_function_debug_data = None;
         let mut artifact_method_identifiers = None;
         let mut artifact_assembly = None;
         let mut artifact_legacy_assembly = None;
@@ -277,7 +282,7 @@ impl ArtifactOutput for ConfigurableArtifacts {
             let Evm {
                 assembly,
                 mut bytecode,
-                deployed_bytecode,
+                mut deployed_bytecode,
                 method_identifiers,
                 gas_estimates,
                 legacy_assembly,
@@ -286,6 +291,12 @@ impl ArtifactOutput for ConfigurableArtifacts {
             if self.additional_values.function_debug_data {
                 artifact_function_debug_data =
                     bytecode.as_mut().map(|code| std::mem::take(&mut code.function_debug_data));
+            }
+            if self.additional_values.deployed_function_debug_data {
+                artifact_deployed_function_debug_data = deployed_bytecode
+                    .as_mut()
+                    .and_then(|code| code.bytecode.as_mut())
+                    .map(|code| std::mem::take(&mut code.function_debug_data));
             }
             if self.additional_values.generated_sources {
                 generated_sources =
@@ -320,6 +331,7 @@ impl ArtifactOutput for ConfigurableArtifacts {
             legacy_assembly: artifact_legacy_assembly,
             opcodes,
             function_debug_data: artifact_function_debug_data,
+            deployed_function_debug_data: artifact_deployed_function_debug_data,
             method_identifiers: artifact_method_identifiers,
             gas_estimates: artifact_gas_estimates,
             raw_metadata: artifact_raw_metadata,
@@ -459,6 +471,7 @@ pub struct ExtraOutputValues {
     pub ir_optimized_ast: bool,
     pub ewasm: bool,
     pub function_debug_data: bool,
+    pub deployed_function_debug_data: bool,
     pub generated_sources: bool,
     pub source_map: bool,
     pub opcodes: bool,
@@ -494,6 +507,7 @@ impl ExtraOutputValues {
             ir_optimized_ast: true,
             ewasm: true,
             function_debug_data: true,
+            deployed_function_debug_data: true,
             generated_sources: true,
             source_map: true,
             opcodes: true,
@@ -550,6 +564,11 @@ impl ExtraOutputValues {
                     }
                     EvmOutputSelection::ByteCode(BytecodeOutputSelection::FunctionDebugData) => {
                         config.function_debug_data = true;
+                    }
+                    EvmOutputSelection::DeployedByteCode(
+                        DeployedBytecodeOutputSelection::FunctionDebugData,
+                    ) => {
+                        config.deployed_function_debug_data = true;
                     }
                     EvmOutputSelection::ByteCode(BytecodeOutputSelection::Opcodes) => {
                         config.opcodes = true;
