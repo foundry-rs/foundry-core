@@ -1794,6 +1794,9 @@ name = "boxcar"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
+dependencies = [
+ "loom",
+]
 
 [[package]]
 name = "bs58"
@@ -1911,7 +1914,7 @@ dependencies = [
  "iana-time-zone",
  "num-traits",
  "serde",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -2602,7 +2605,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2717,7 +2720,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3223,6 +3226,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "generator"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea6c6a73cd1aa4f4f00c02b109fa55d3a9d6ecc2fc4f53177b74ed6ee23b0c53"
+dependencies = [
+ "cc",
+ "libc",
+ "log",
+ "rustversion",
+ "windows-core 0.100.0",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3577,7 +3594,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -3686,14 +3703,14 @@ dependencies = [
 
 [[package]]
 name = "inturn"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "630b41dcc27d131bc9b501515a2cb3dfde2b0de4d8b53bd9c97180fb87696aa2"
+checksum = "92ce18a9b021f3375200c0c0bde1af8625cb52f427bed04e44187e429235c7d4"
 dependencies = [
  "boxcar",
  "bumpalo",
- "dashmap",
  "hashbrown 0.14.5",
+ "loom",
  "thread_local",
 ]
 
@@ -3765,7 +3782,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -3819,7 +3836,7 @@ dependencies = [
  "simd_cesu8",
  "thiserror 2.0.21",
  "walkdir",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -4022,6 +4039,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "loom"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1611ddbf89dc6ae42cfbd51fc207836140130257646eab8d6d2fb16577db2d2"
+dependencies = [
+ "cfg-if",
+ "generator",
+ "scoped-tls",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lru"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4173,6 +4203,15 @@ name = "normalize-line-endings"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "num-bigint"
@@ -4490,7 +4529,7 @@ dependencies = [
  "libc",
  "redox_syscall 0.5.18",
  "smallvec",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -4502,7 +4541,7 @@ dependencies = [
  "libc",
  "redox_syscall 0.9.5",
  "smallvec",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -4794,7 +4833,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4902,7 +4941,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5390,7 +5429,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5449,7 +5488,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6006,8 +6045,8 @@ dependencies = [
 
 [[package]]
 name = "solar-ast"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "alloy-primitives",
  "bumpalo",
@@ -6021,8 +6060,8 @@ dependencies = [
 
 [[package]]
 name = "solar-compiler"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "alloy-primitives",
  "idna_adapter",
@@ -6039,8 +6078,8 @@ dependencies = [
 
 [[package]]
 name = "solar-config"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "alloy-primitives",
  "colorchoice",
@@ -6050,8 +6089,8 @@ dependencies = [
 
 [[package]]
 name = "solar-data-structures"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "bumpalo",
  "diff",
@@ -6065,8 +6104,8 @@ dependencies = [
 
 [[package]]
 name = "solar-evmir"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "alloy-primitives",
  "smallvec",
@@ -6080,8 +6119,8 @@ dependencies = [
 
 [[package]]
 name = "solar-interface"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "annotate-snippets",
  "anstream",
@@ -6090,7 +6129,7 @@ dependencies = [
  "derive_more",
  "dunce",
  "inturn",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "once_map",
  "rayon",
  "scoped-tls",
@@ -6100,15 +6139,15 @@ dependencies = [
  "solar-config",
  "solar-data-structures",
  "solar-macros",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "tracing",
  "unicode-width",
 ]
 
 [[package]]
 name = "solar-ir"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "alloy-primitives",
  "smallvec",
@@ -6120,8 +6159,8 @@ dependencies = [
 
 [[package]]
 name = "solar-lint"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "rayon",
  "solar-ast",
@@ -6131,8 +6170,8 @@ dependencies = [
 
 [[package]]
 name = "solar-macros"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6141,13 +6180,13 @@ dependencies = [
 
 [[package]]
 name = "solar-parse"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "alloy-primitives",
  "bitflags 2.13.2",
  "bumpalo",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "memchr",
  "num-bigint 0.5.1",
  "num-rational",
@@ -6162,8 +6201,8 @@ dependencies = [
 
 [[package]]
 name = "solar-sema"
-version = "0.3.0"
-source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.0#e7a91fc70f29dc8d0c236d56a2aa7706dc2555cf"
+version = "0.3.1"
+source = "git+https://github.com/paradigmxyz/solar?tag=v0.3.1#a849fe3d14dd46c133efeba197b4838f07c107b5"
 dependencies = [
  "alloy-json-abi",
  "alloy-primitives",
@@ -6181,6 +6220,7 @@ dependencies = [
  "rayon",
  "ripemd 0.2.0",
  "serde",
+ "serde_json",
  "sha2 0.11.1",
  "solar-ast",
  "solar-data-structures",
@@ -6296,7 +6336,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
  "url",
  "zip",
 ]
@@ -6390,10 +6430,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6403,7 +6443,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6756,6 +6796,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+ "valuable",
+]
+
+[[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
 ]
 
 [[package]]
@@ -6765,12 +6817,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
  "matchers",
+ "nu-ansi-term",
  "once_cell",
  "regex-automata",
  "sharded-slab",
+ "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
+ "tracing-log",
 ]
 
 [[package]]
@@ -7183,7 +7238,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7192,11 +7247,24 @@ version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
 dependencies = [
- "windows-implement",
- "windows-interface",
- "windows-link",
- "windows-result",
- "windows-strings",
+ "windows-implement 0.60.2",
+ "windows-interface 0.59.3",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
+ "windows-strings 0.5.1",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "803590c6856f51d15fa2e9fabe4f4703122c8737f72ef2741b4ac09d4c2192f5"
+dependencies = [
+ "windows-implement 0.100.0",
+ "windows-interface 0.100.0",
+ "windows-link 0.100.0",
+ "windows-result 0.100.0",
+ "windows-strings 0.100.0",
 ]
 
 [[package]]
@@ -7204,6 +7272,17 @@ name = "windows-implement"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "windows-implement"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bc1bc82e5a1b1a4d7255861b07881a0407b552f50a4d8543c0c7276fa96f6e8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7222,10 +7301,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-interface"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3f7005c3b757b9b82c2f40c0e71094ff1080adddaf3e8b6ce99b545d3c48796"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-link"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b39de7c7fe78858b0144c50c3fc000bab3be17d5e9b85b1053871693c7f7415"
 
 [[package]]
 name = "windows-result"
@@ -7233,7 +7329,16 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44873a1ef61c85d5e2991db91fe656cfcf0731097e00dff1ac860f1cb3b752a0"
+dependencies = [
+ "windows-link 0.100.0",
 ]
 
 [[package]]
@@ -7242,7 +7347,16 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a70b590c684f1d2854f74999896f7c0558f1bdde62f599088599e20ea1d2f60"
+dependencies = [
+ "windows-link 0.100.0",
 ]
 
 [[package]]
@@ -7269,7 +7383,7 @@ version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
