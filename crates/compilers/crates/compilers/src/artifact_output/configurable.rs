@@ -887,7 +887,6 @@ impl ExtraOutputFiles {
 mod tests {
     use super::*;
     use alloy_primitives::Bytes;
-    use foundry_compilers_artifacts::BytecodeObject;
     use semver::Version;
     use std::{collections::BTreeMap, path::PathBuf};
 
