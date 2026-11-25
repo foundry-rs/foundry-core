@@ -1827,14 +1827,11 @@ fn can_compile_configured() {
 
 #[test]
 fn can_compile_function_debug_data() {
-    let handler = ConfigurableArtifacts {
-        additional_values: ExtraOutputValues {
-            function_debug_data: true,
-            deployed_function_debug_data: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let handler = ConfigurableArtifacts::new(
+        ["evm.bytecode.functionDebugData", "evm.deployedBytecode.functionDebugData"]
+            .map(|selection| selection.parse().unwrap()),
+        [],
+    );
     let settings = handler.solc_settings();
     let mut project = TempProject::<MultiCompiler, ConfigurableArtifacts>::prefixed_with_artifacts(
         "function-debug-data",
