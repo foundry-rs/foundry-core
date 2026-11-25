@@ -1866,6 +1866,7 @@ fn can_compile_function_debug_data() {
     };
     assert!(has_twice(&artifact.function_debug_data));
     assert!(has_twice(&artifact.deployed_function_debug_data));
+    assert_ne!(artifact.function_debug_data, artifact.deployed_function_debug_data);
 }
 
 #[test]
