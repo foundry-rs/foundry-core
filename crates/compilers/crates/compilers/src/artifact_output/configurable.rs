@@ -409,6 +409,22 @@ impl ArtifactOutput for ConfigurableArtifacts {
             // We can't check if generated sources are missing or just empty.
             return Ok(true);
         }
+        // The compiler settings do not change when the output selection already holds the table,
+        // so a cached artifact may predate the flag. A file without code has no function table.
+        let has_code =
+            |code: Option<&CompactBytecode>| code.is_some_and(|code| code.object.bytes_len() > 0);
+        if self.additional_values.function_debug_data
+            && artifact.function_debug_data.is_none()
+            && has_code(artifact.bytecode.as_ref())
+        {
+            return Ok(true);
+        }
+        if self.additional_values.deployed_function_debug_data
+            && artifact.deployed_function_debug_data.is_none()
+            && has_code(artifact.deployed_bytecode.as_ref().and_then(|code| code.bytecode.as_ref()))
+        {
+            return Ok(true);
+        }
         Ok(false)
     }
 
@@ -864,5 +880,64 @@ impl ExtraOutputFiles {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::Bytes;
+    use foundry_compilers_artifacts::BytecodeObject;
+    use semver::Version;
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    fn artifact_file(
+        bytecode: &[u8],
+        function_debug_data: bool,
+    ) -> ArtifactFile<ConfigurableContractArtifact> {
+        let code = || CompactBytecode {
+            object: BytecodeObject::Bytecode(Bytes::copy_from_slice(bytecode)),
+            source_map: None,
+            link_references: Default::default(),
+        };
+        let table = function_debug_data.then(BTreeMap::new);
+        ArtifactFile {
+            artifact: ConfigurableContractArtifact {
+                bytecode: Some(code()),
+                deployed_bytecode: Some(CompactDeployedBytecode {
+                    bytecode: Some(code()),
+                    immutable_references: Default::default(),
+                }),
+                function_debug_data: table.clone(),
+                deployed_function_debug_data: table,
+                ..Default::default()
+            },
+            file: PathBuf::new(),
+            version: Version::new(0, 8, 10),
+            build_id: String::new(),
+            profile: String::new(),
+        }
+    }
+
+    #[test]
+    fn function_debug_data_flags_dirty_artifacts_without_the_tables() {
+        let handler = |function_debug_data, deployed_function_debug_data| ConfigurableArtifacts {
+            additional_values: ExtraOutputValues {
+                function_debug_data,
+                deployed_function_debug_data,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let without = artifact_file(&[0x60], false);
+        let with = artifact_file(&[0x60], true);
+        let no_code = artifact_file(&[], false);
+
+        assert!(!handler(false, false).is_dirty(&without).unwrap());
+        assert!(handler(true, false).is_dirty(&without).unwrap());
+        assert!(handler(false, true).is_dirty(&without).unwrap());
+        assert!(!handler(true, true).is_dirty(&with).unwrap());
+        // Files without code, such as interfaces and files without contracts, have no tables.
+        assert!(!handler(true, true).is_dirty(&no_code).unwrap());
     }
 }
