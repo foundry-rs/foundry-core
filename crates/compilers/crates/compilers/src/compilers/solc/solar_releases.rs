@@ -66,4 +66,33 @@ pub(super) const SOLAR_RELEASES: &[SolarRelease] = &[
             ),
         ],
     },
+    SolarRelease {
+        version: Version::new(0, 3, 1),
+        archives: &[
+            (
+                "solar-aarch64-apple-darwin.tar.gz",
+                hex!("820a253db5d65b873bce89191c57f44fcdbfca254c9510e293c14505925db678"),
+            ),
+            (
+                "solar-aarch64-unknown-linux-gnu.tar.gz",
+                hex!("e4c86ecc9ad5f27540835ac7ac70a32372fa7d91bfaedb3d6e71470ec2de5f67"),
+            ),
+            (
+                "solar-x86_64-apple-darwin.tar.gz",
+                hex!("da8273c3a220599b574b2344d32f3343d30432bea038e7928819da3e62f1a292"),
+            ),
+            (
+                "solar-x86_64-pc-windows-msvc.zip",
+                hex!("e83a1143e2a42f4da48a947eac155076797b732f822a039ec631167d129933ed"),
+            ),
+            (
+                "solar-x86_64-unknown-linux-gnu.tar.gz",
+                hex!("0a620c9da5918c773a8630a8a25da83ee2b6101dcf53b7eea304af96b41e8b4a"),
+            ),
+            (
+                "solar-x86_64-unknown-linux-musl.tar.gz",
+                hex!("7de1b3c9fd7e20b8b2383bc5f4f369a262f09a74164c9698f45c28b397ff2bb2"),
+            ),
+        ],
+    },
 ];
