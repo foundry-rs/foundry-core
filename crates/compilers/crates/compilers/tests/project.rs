@@ -285,6 +285,31 @@ fn abi_cache_no_compile_writes_nothing() {
 }
 
 #[test]
+fn abi_cache_no_compile_shares_lock() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Built", "pragma solidity ^0.8.0; contract Built {}").unwrap();
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["evm.bytecode".to_string()]);
+    });
+    project.compile().unwrap().assert_success();
+    let mut abi_project = project.project().clone();
+    abi_project.update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap().assert_success();
+
+    // A concurrent reader holding the lock does not turn a cached ABI into `StaleSources`.
+    abi_project.no_compile = true;
+    let lock = project.paths().cache.with_file_name("solidity-files-cache.json.abi.lock");
+    let reader = fs::File::open(lock).unwrap();
+    reader.try_lock_shared().unwrap();
+    let output = ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap();
+    output.assert_success();
+    assert!(output.find_first("Built").unwrap().abi.is_some());
+}
+
+#[test]
 fn abi_cache_rejects_normal_artifacts_without_abi() {
     for named in [false, true] {
         let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();

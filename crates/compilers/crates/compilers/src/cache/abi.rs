@@ -41,7 +41,8 @@ impl AbiCache {
             fs::File::open(lock_path)?
         };
         // Contention is a cache miss, not a reason to stall a compiler invocation.
-        lock.try_lock().map_err(io::Error::other)?;
+        // Readers share the lock so overlapping read-only runs still hit the cache.
+        if write { lock.try_lock() } else { lock.try_lock_shared() }.map_err(io::Error::other)?;
         Ok(Self { _lock: lock, root, directory })
     }
 
