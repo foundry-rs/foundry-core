@@ -22,9 +22,10 @@ use foundry_compilers::{
     take_solc_installer_lock,
 };
 use foundry_compilers_artifacts::{
-    BytecodeHash, Contract, DevDoc, Error, ErrorDoc, EventDoc, EvmVersion, Libraries, MethodDoc,
-    ModelCheckerEngine::CHC, ModelCheckerSettings, Settings, Severity, SolcInput, Source, Sources,
-    UserDoc, UserDocNotice, output_selection::OutputSelection, remappings::Remapping,
+    BytecodeHash, Contract, DevDoc, Error, ErrorDoc, EventDoc, EvmVersion, FunctionDebugData,
+    Libraries, MethodDoc, ModelCheckerEngine::CHC, ModelCheckerSettings, Settings, Severity,
+    SolcInput, Source, Sources, UserDoc, UserDocNotice, output_selection::OutputSelection,
+    remappings::Remapping,
 };
 use foundry_compilers_core::{
     error::{Result, SolcError},
@@ -255,6 +256,58 @@ fn abi_cache_reuses_normal_and_missing_artifacts() {
     fs::remove_file(project.cache_path()).unwrap();
     project.project().cleanup().unwrap();
     assert!(!abi_cache.exists());
+}
+
+#[test]
+fn abi_cache_no_compile_writes_nothing() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Built", "pragma solidity ^0.8.0; contract Built {}").unwrap();
+    project.compile().unwrap().assert_success();
+    let mut abi_project = project.project().clone();
+    abi_project.update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    abi_project.no_compile = true;
+    project.add_source("Stale", "pragma solidity ^0.8.0; contract Stale {}").unwrap();
+    let compile = || ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached();
+    let abi_cache = project.paths().cache.with_file_name("solidity-files-cache.json.abi");
+    let lock = abi_cache.with_extension("abi.lock");
+
+    // A stale request creates neither the lock nor the ABI cache.
+    assert!(matches!(compile(), Err(SolcError::StaleSources(_))));
+    assert!(!lock.exists());
+    assert!(!abi_cache.exists());
+
+    // With an existing lock, it stages no ABI cache context.
+    fs::write(&lock, "").unwrap();
+    assert!(matches!(compile(), Err(SolcError::StaleSources(_))));
+    assert!(!abi_cache.exists());
+}
+
+#[test]
+fn abi_cache_no_compile_shares_lock() {
+    let mut project = TempProject::<MultiCompiler>::dapptools().unwrap();
+    project.set_solc("0.8.30");
+    project.add_source("Built", "pragma solidity ^0.8.0; contract Built {}").unwrap();
+    project.project_mut().update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["evm.bytecode".to_string()]);
+    });
+    project.compile().unwrap().assert_success();
+    let mut abi_project = project.project().clone();
+    abi_project.update_output_selection(|selection| {
+        *selection = OutputSelection::common_output_selection(["abi".to_string()]);
+    });
+    ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap().assert_success();
+
+    // A concurrent reader holding the lock does not turn a cached ABI into `StaleSources`.
+    abi_project.no_compile = true;
+    let lock = project.paths().cache.with_file_name("solidity-files-cache.json.abi.lock");
+    let reader = fs::File::open(lock).unwrap();
+    reader.lock_shared().unwrap();
+    let output = ProjectCompiler::new(&abi_project).unwrap().compile_abi_cached().unwrap();
+    output.assert_success();
+    assert!(output.find_first("Built").unwrap().abi.is_some());
 }
 
 #[test]
@@ -1822,6 +1875,50 @@ fn can_compile_configured() {
     assert!(artifact.opcodes.is_some());
     assert!(artifact.opcodes.is_some());
     assert!(artifact.legacy_assembly.is_some());
+}
+
+#[test]
+fn can_compile_function_debug_data() {
+    let handler = ConfigurableArtifacts::new(
+        ["evm.bytecode.functionDebugData", "evm.deployedBytecode.functionDebugData"]
+            .map(|selection| selection.parse().unwrap()),
+        [],
+    );
+    let settings = handler.solc_settings();
+    let mut project = TempProject::<MultiCompiler, ConfigurableArtifacts>::prefixed_with_artifacts(
+        "function-debug-data",
+        ProjectPathsConfig::builder(),
+        handler,
+    )
+    .unwrap()
+    .with_solc_settings(settings);
+    project.set_solc("0.8.10");
+    project
+        .add_source(
+            "Foo",
+            r"
+    pragma solidity ^0.8.10;
+
+    contract Foo {
+        constructor() { run(1); }
+        function twice(uint256 x) internal pure returns (uint256) { return x * 2; }
+        function run(uint256 x) public pure returns (uint256) { return twice(x); }
+    }
+    ",
+        )
+        .unwrap();
+
+    let compiled = project.compile().unwrap();
+    compiled.assert_success();
+    let artifact = compiled.find_first("Foo").unwrap();
+    let has_twice = |data: &Option<BTreeMap<String, FunctionDebugData>>| {
+        data.as_ref().unwrap().values().any(|f| {
+            f.parameter_slots == Some(1) && f.return_slots == Some(1) && f.entry_point.is_some()
+        })
+    };
+    assert!(has_twice(&artifact.function_debug_data));
+    assert!(has_twice(&artifact.deployed_function_debug_data));
+    assert_ne!(artifact.function_debug_data, artifact.deployed_function_debug_data);
 }
 
 #[test]

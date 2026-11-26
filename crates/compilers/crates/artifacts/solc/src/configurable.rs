@@ -33,6 +33,8 @@ pub struct ConfigurableContractArtifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub function_debug_data: Option<BTreeMap<String, FunctionDebugData>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployed_function_debug_data: Option<BTreeMap<String, FunctionDebugData>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gas_estimates: Option<GasEstimates>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_metadata: Option<String>,
@@ -139,6 +141,7 @@ struct DirectArtifact {
     #[serde(default)]
     generated_sources: Vec<GeneratedSource>,
     function_debug_data: Option<BTreeMap<String, FunctionDebugData>>,
+    deployed_function_debug_data: Option<BTreeMap<String, FunctionDebugData>>,
     gas_estimates: Option<GasEstimates>,
     raw_metadata: Option<String>,
     metadata: Option<Metadata>,
