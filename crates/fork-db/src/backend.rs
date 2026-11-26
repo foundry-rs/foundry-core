@@ -53,11 +53,6 @@ use tower::Service;
 #[derive(Clone, Copy, Debug)]
 pub struct StateBlockId(pub BlockId);
 
-/// Largest number of new keys, accounts plus slots that were neither cached nor requested, in an
-/// access list for which the call is not simulated again: reading them directly takes no more
-/// round trips than the simulation and the prefetch together.
-const CHEAP_ACCESS_LIST: usize = 2;
-
 /// Reads since the last simulation before the cache can count as warm.
 const WARM_CACHE_READS: u64 = 32;
 
@@ -179,8 +174,11 @@ fn access_list_key(tx: &TransactionRequest, code_hash: B256) -> Option<AccessLis
     Some((to, selector, code_hash))
 }
 
-type AccessListFuture<Err> =
-    Pin<Box<dyn Future<Output = (Result<AccessListResult, Err>, AccessListKey, u64, bool)> + Send>>;
+/// A simulation result with its key, state generation, block generation and whether it sent
+/// state overrides.
+type AccessListFuture<Err> = Pin<
+    Box<dyn Future<Output = (Result<AccessListResult, Err>, AccessListKey, u64, u64, bool)> + Send>,
+>;
 
 /// One batch of prefetched slot reads: the value or error of each slot, with the state generation
 /// and the block the batch read at.
@@ -258,10 +256,6 @@ struct AccessListGate {
     hits: AtomicU64,
     /// Cache misses when the last simulation was requested.
     misses: AtomicU64,
-    /// Whether the cache was warm at the last check.
-    was_warm: AtomicBool,
-    /// Calls whose last access list held at most [`CHEAP_ACCESS_LIST`] new keys.
-    cheap: parking_lot::Mutex<HashSet<AccessListKey>>,
     /// Calls simulated at the pinned block.
     requested: parking_lot::Mutex<HashSet<AccessListKey>>,
 }
@@ -273,8 +267,6 @@ impl Default for AccessListGate {
             overrides_supported: AtomicBool::new(true),
             hits: AtomicU64::new(u64::MAX),
             misses: AtomicU64::new(0),
-            was_warm: AtomicBool::new(false),
-            cheap: Default::default(),
             requested: Default::default(),
         }
     }
@@ -282,34 +274,32 @@ impl Default for AccessListGate {
 
 impl AccessListGate {
     /// Returns whether a call, with or without `overrides`, is simulated now: the endpoint
-    /// supports it, the call is not cheap, and the cache is not warm. Suites on one fork share
-    /// the counts, so a call into a target the fork has not loaded, such as a new suite's test
-    /// contract, is simulated once whatever the other reads hit.
+    /// supports it, the call was not simulated at the pinned block, and the cache is not warm.
+    /// Suites on one fork share the counts, so a call into a target the fork has not loaded, such
+    /// as a new suite's test contract, is simulated whatever the other reads hit.
+    ///
+    /// A call is simulated once per pinned block, whatever its arguments. A repeated call mostly
+    /// lists keys that its first simulation or the EVM already read, and then costs a heavy
+    /// request, with its overrides, for few or no new keys.
     fn wanted<B>(&self, key: &AccessListKey, overrides: bool, cache: &JsonBlockCacheDB<B>) -> bool {
         self.supported.load(Ordering::Relaxed)
             && (!overrides || self.overrides_supported.load(Ordering::Relaxed))
-            // The warm check runs first, so it rolls the window and clears cheap calls.
-            && (!self.warm(cache)
-                || (!cache.db().accounts.read().contains_key(&key.0)
-                    && !self.requested.lock().contains(key)))
-            && !self.cheap.lock().contains(key)
+            // The warm check runs first, so repeated calls also roll the window.
+            && (!self.warm(cache) || !cache.db().accounts.read().contains_key(&key.0))
+            && !self.requested.lock().contains(key)
     }
 
     /// Returns whether the cache is warm: [`WARM_CACHE_READS`] reads since the last simulation,
     /// with at most one miss per [`WARM_HITS_PER_MISS`] hits.
     ///
     /// After [`WARM_WINDOW`] warm reads the counts restart from the last [`WARM_CACHE_READS`]
-    /// hits, so the hits of a long warm run do not hide new cold state. When the cache turns
-    /// cold, the cheap calls are cleared, since their arguments can now reach cold state.
+    /// hits, so the hits of a long warm run do not hide new cold state.
     fn warm<B>(&self, cache: &JsonBlockCacheDB<B>) -> bool {
         let Some((hits, misses)) = self.reads_since_simulation(cache) else { return false };
         let warm = hits >= WARM_CACHE_READS && misses.saturating_mul(WARM_HITS_PER_MISS) <= hits;
         if warm && hits + misses >= WARM_WINDOW {
             self.misses.store(cache.cache_misses(), Ordering::Relaxed);
             self.hits.store(cache.cache_hits() - WARM_CACHE_READS, Ordering::Relaxed);
-        }
-        if self.was_warm.swap(warm, Ordering::Relaxed) && !warm {
-            self.cheap.lock().clear();
         }
         warm
     }
@@ -460,8 +450,6 @@ pub struct BackendHandler<N: Network = AnyNetwork, B = serde_json::Value> {
     prefetched_accounts: AddressHashMap<AccountInfo>,
     /// Prefetched storage slots that no read has requested yet, see `prefetched_accounts`.
     prefetched_storage: HashMap<(Address, U256), U256>,
-    /// Access list simulations in flight, keyed by state generation, target and selector.
-    access_list_requests: HashSet<(u64, AccessListKey)>,
     /// Whether simulations are wanted, shared with the [`SharedBackend`]s.
     access_list_gate: Arc<AccessListGate>,
     /// Accounts of access lists waiting for a request, keyed by state generation.
@@ -510,7 +498,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             account_fetch_mode: Arc::new(SharedAccountFetchMode::new(AccountFetchMode::Unchecked)),
             prefetched_accounts: Default::default(),
             prefetched_storage: Default::default(),
-            access_list_requests: Default::default(),
             access_list_gate,
             account_queue: Default::default(),
             prefetch_queue: Default::default(),
@@ -594,7 +581,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             BackendRequest::SetPinnedBlock(block_id) => {
                 self.drop_prefetched();
                 // Calls of the old block can reach cold state at the new one.
-                self.access_list_gate.cheap.lock().clear();
                 self.access_list_gate.requested.lock().clear();
                 self.block_id = Some(block_id);
                 self.block_anchor = None;
@@ -640,8 +626,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
     /// Simulates a call with `eth_createAccessList` at the pinned block and prefetches the
     /// accounts and slots in the result.
     ///
-    /// The simulation is skipped while it is not wanted, see [`AccessListGate::wanted`]. One
-    /// simulation per call is in flight at a time.
+    /// The simulation is skipped while it is not wanted, see [`AccessListGate::wanted`].
     fn request_access_list(
         &mut self,
         tx: TransactionRequest,
@@ -655,10 +640,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
             trace!(target: "backendhandler", %to, %selector, "skipping access list request");
             return;
         }
-        let generation = self.state_generation;
-        if !self.access_list_requests.insert((generation, key)) {
-            return;
-        }
+        let (generation, block_generation) = (self.state_generation, self.block_generation);
         self.access_list_gate.requested.lock().insert(key);
         self.access_list_gate.record(cache);
         let with_overrides = overrides.is_some();
@@ -674,7 +656,7 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
                 .raw_request::<_, AccessListResult>("eth_createAccessList".into(), params)
                 .await
                 .map_err(Into::into);
-            (result, key, generation, with_overrides)
+            (result, key, generation, block_generation, with_overrides)
         });
         self.pending_requests.push(ProviderRequest::AccessList(fut));
     }
@@ -695,34 +677,6 @@ impl<N: Network, B: ForkBlockEnv> BackendHandler<N, B> {
         }
         self.drain_account_queue();
         self.drain_prefetch_queue();
-    }
-
-    /// Returns the number of accounts and slots of an access list that are neither cached nor
-    /// requested.
-    fn new_keys(&self, result: &AccessListResult) -> usize {
-        let generation = self.state_generation;
-        let accounts = self.db.accounts().read();
-        let storage = self.db.storage().read();
-        let mut new_keys = 0;
-        for item in &result.access_list.0 {
-            let address = item.address;
-            if !accounts.contains_key(&address)
-                && !self.prefetched_accounts.contains_key(&address)
-                && !self.account_requests.contains_key(&(generation, address))
-            {
-                new_keys += 1;
-            }
-            for slot in &item.storage_keys {
-                let idx = U256::from_be_bytes(slot.0);
-                if !storage.get(&address).is_some_and(|slots| slots.contains_key(&idx))
-                    && !self.prefetched_storage.contains_key(&(address, idx))
-                    && !self.storage_requests.contains_key(&(generation, address, idx))
-                {
-                    new_keys += 1;
-                }
-            }
-        }
-        new_keys
     }
 
     /// Drops prefetched values and queued prefetches, and starts a new state generation so that
@@ -1508,19 +1462,17 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                         }
                     }
                     ProviderRequest::AccessList(fut) => {
-                        if let Poll::Ready((resp, key, generation, with_overrides)) =
-                            fut.poll_unpin(cx)
+                        if let Poll::Ready((
+                            resp,
+                            key,
+                            generation,
+                            block_generation,
+                            with_overrides,
+                        )) = fut.poll_unpin(cx)
                         {
-                            pin.access_list_requests.remove(&(generation, key));
                             match resp {
                                 Ok(result) if generation == pin.state_generation => {
-                                    let new_keys = pin.new_keys(&result);
-                                    trace!(target: "backendhandler", to = %key.0, new_keys, error = ?result.error, "received access list");
-                                    // A failed simulation may have stopped early; its short list
-                                    // says nothing about the call.
-                                    if result.error.is_none() && new_keys <= CHEAP_ACCESS_LIST {
-                                        pin.access_list_gate.cheap.lock().insert(key);
-                                    }
+                                    trace!(target: "backendhandler", to = %key.0, accounts = result.access_list.0.len(), error = ?result.error, "received access list");
                                     // A failed batch in the meantime stopped prefetching.
                                     if pin.access_list_gate.supported.load(Ordering::Relaxed) {
                                         pin.prefetch_access_list(&result);
@@ -1539,6 +1491,12 @@ impl<N: Network, B: ForkBlockEnv> Future for BackendHandler<N, B> {
                                         pin.access_list_gate
                                             .overrides_supported
                                             .store(false, Ordering::Relaxed);
+                                        // The call was not simulated, so it stays eligible
+                                        // without overrides. A new pin cleared the entry, which
+                                        // can now belong to a simulation at the new block.
+                                        if block_generation == pin.block_generation {
+                                            pin.access_list_gate.requested.lock().remove(&key);
+                                        }
                                     } else {
                                         trace!(target: "backendhandler", %err, "access list request failed");
                                     }
@@ -2074,19 +2032,204 @@ mod tests {
     use alloy_primitives::hex;
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_client::ClientBuilder;
-    use serde::Deserialize;
-    use std::{fs, path::PathBuf};
+    use parking_lot::Mutex;
+    use serde_json::{Value, json};
+    use std::{path::PathBuf, sync::mpsc::channel};
     use tiny_http::{Response, Server};
 
-    pub fn get_http_provider(endpoint: &str) -> impl Provider<AnyNetwork> + Clone + use<> {
-        ProviderBuilder::new()
-            .network::<AnyNetwork>()
-            .connect_client(ClientBuilder::default().http(endpoint.parse().unwrap()))
+    type Backend = SharedBackend<AnyNetwork, BlockEnv>;
+
+    /// Answers a call from its method, its params, and whether it is a member of a batch.
+    type Handler = dyn Fn(&str, &Value, bool) -> Result<Value, Value> + Send + Sync;
+
+    const ANCHOR: B256 = B256::with_last_byte(0xaa);
+
+    /// In-process JSON-RPC server that records every call, including each member of a batch, as
+    /// `[method, params]`.
+    struct MockRpc {
+        server: Arc<Server>,
+        calls: Arc<Mutex<Vec<Value>>>,
     }
 
-    fn exact_meta(endpoint: &str, anchor_hash: B256) -> BlockchainDbMeta<BlockEnv> {
-        BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string())
-            .with_fork_identity(anchor_hash, B256::with_last_byte(1))
+    impl MockRpc {
+        /// Answers each call in order with `handler(method, params)`: `Ok` is the result, `Err`
+        /// the error.
+        fn new(
+            handler: impl Fn(&str, &Value) -> Result<Value, Value> + Send + Sync + 'static,
+        ) -> Self {
+            Self::serve(Box::new(move |method, params, _| handler(method, params)), false)
+        }
+
+        /// Like [`Self::new`], but answers each request on its own thread, so a handler can delay
+        /// its reply without holding back the others.
+        fn concurrent(
+            handler: impl Fn(&str, &Value) -> Result<Value, Value> + Send + Sync + 'static,
+        ) -> Self {
+            Self::serve(Box::new(move |method, params, _| handler(method, params)), true)
+        }
+
+        /// Answers each call with `handler(method, params, in_batch)`, where `in_batch` tells
+        /// whether the call is a member of a batch request.
+        fn serve(handler: Box<Handler>, concurrent: bool) -> Self {
+            let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
+            let calls = Arc::<Mutex<Vec<Value>>>::default();
+            let handler = Arc::<Handler>::from(handler);
+            let (server2, calls2) = (Arc::clone(&server), Arc::clone(&calls));
+            std::thread::spawn(move || {
+                for mut request in server2.incoming_requests() {
+                    let body: Value = serde_json::from_reader(request.as_reader()).unwrap();
+                    let batch = body.as_array().cloned().unwrap_or_else(|| vec![body.clone()]);
+                    calls2
+                        .lock()
+                        .extend(batch.iter().map(|rpc| json!([rpc["method"], rpc["params"]])));
+                    let handler = Arc::clone(&handler);
+                    let respond = move || {
+                        let answer = |rpc: &Value| {
+                            let mut response = json!({"jsonrpc": "2.0", "id": rpc["id"]});
+                            let (method, params) =
+                                (rpc["method"].as_str().unwrap(), &rpc["params"]);
+                            match handler(method, params, body.is_array()) {
+                                Ok(result) => response["result"] = result,
+                                Err(error) => response["error"] = error,
+                            }
+                            response
+                        };
+                        let response = match body {
+                            Value::Array(_) => Value::Array(batch.iter().map(answer).collect()),
+                            _ => answer(&body),
+                        };
+                        // The client may drop a raced request before reading its response.
+                        let _ = request.respond(Response::from_string(response.to_string()));
+                    };
+                    if concurrent {
+                        std::thread::spawn(respond);
+                    } else {
+                        respond();
+                    }
+                }
+            });
+            Self { server, calls }
+        }
+
+        /// A server for backends that must not make any RPC calls.
+        fn rejecting() -> Self {
+            Self::new(|method, _| Err(unsupported(method)))
+        }
+
+        fn endpoint(&self) -> String {
+            format!("http://{}", self.server.server_addr())
+        }
+
+        fn provider(&self) -> impl Provider<AnyNetwork> + Clone + use<> {
+            ProviderBuilder::new()
+                .network::<AnyNetwork>()
+                .connect_client(ClientBuilder::default().http(self.endpoint().parse().unwrap()))
+        }
+
+        fn meta(&self) -> BlockchainDbMeta<BlockEnv> {
+            BlockchainDbMeta::new(BlockEnv::default(), self.endpoint())
+        }
+
+        /// Mainnet metadata for an exact fork anchored at `hash`. Setting the chain skips chain ID
+        /// detection.
+        fn exact_meta(&self, hash: B256) -> BlockchainDbMeta<BlockEnv> {
+            self.meta()
+                .set_chain(Chain::mainnet())
+                .with_fork_identity(hash, B256::with_last_byte(1))
+        }
+
+        async fn backend(&self, meta: BlockchainDbMeta<BlockEnv>, pin: Option<BlockId>) -> Backend {
+            SharedBackend::spawn_backend(self.provider(), BlockchainDb::new(meta, None), pin).await
+        }
+
+        fn anchored(&self, meta: BlockchainDbMeta<BlockEnv>, anchor: ForkBlock) -> Backend {
+            let db = BlockchainDb::new(meta, None);
+            let (backend, handler) =
+                SharedBackend::new_with_anchor(self.provider(), db, anchor).unwrap();
+            tokio::spawn(handler);
+            backend
+        }
+
+        /// Returns the calls once no call arrived for 50ms, so that requests the backend sent
+        /// without waiting for them are included.
+        fn calls(&self) -> Vec<Value> {
+            let mut calls = self.calls.lock().clone();
+            loop {
+                std::thread::sleep(Duration::from_millis(50));
+                let settled = self.calls.lock().clone();
+                if settled.len() == calls.len() {
+                    return calls;
+                }
+                calls = settled;
+            }
+        }
+
+        /// Returns how often each method was called, as a JSON object.
+        fn counts(&self) -> Value {
+            let mut counts = json!({});
+            for call in self.calls() {
+                let count = &mut counts[call[0].as_str().unwrap()];
+                *count = json!(count.as_u64().unwrap_or(0) + 1);
+            }
+            counts
+        }
+    }
+
+    impl Drop for MockRpc {
+        fn drop(&mut self) {
+            self.server.unblock();
+        }
+    }
+
+    /// The error of an RPC that does not support `method`.
+    fn unsupported(method: &str) -> Value {
+        json!({"code": -32601, "message": format!("the method {method} does not exist/is not available")})
+    }
+
+    /// Serves deliberately inconsistent balances: 42 and an extension from `eth_getAccountInfo`,
+    /// which can be rejected, and 65535 from `eth_getBalance`.
+    fn account_rpc(reject_account_info: bool) -> MockRpc {
+        MockRpc::new(move |method, _| match method {
+            "eth_getAccountInfo" if !reject_account_info => Ok(json!({
+                "balance": "0x2a", "nonce": "0x7", "code": "0x6000", "extension": "0x01aa",
+            })),
+            "eth_getBalance" => Ok(json!("0xffff")),
+            "eth_getTransactionCount" => Ok(json!("0x7")),
+            "eth_getCode" => Ok(json!("0x6000")),
+            _ => Err(unsupported(method)),
+        })
+    }
+
+    /// An RPC block header with no transactions.
+    fn block(number: u64, hash: B256, parent_hash: B256) -> Value {
+        json!({
+            "hash": hash,
+            "parentHash": parent_hash,
+            "sha3Uncles": B256::ZERO,
+            "miner": Address::ZERO,
+            "stateRoot": B256::ZERO,
+            "transactionsRoot": B256::ZERO,
+            "receiptsRoot": B256::ZERO,
+            "logsBloom": format!("0x{}", "00".repeat(256)),
+            "difficulty": "0x0",
+            "number": format!("{number:#x}"),
+            "gasLimit": "0x1c9c380",
+            "gasUsed": "0x0",
+            "timestamp": "0x1",
+            "extraData": "0x",
+            "mixHash": B256::ZERO,
+            "nonce": "0x0000000000000000",
+            "baseFeePerGas": "0x1",
+            "transactions": [],
+            "uncles": [],
+        })
+    }
+
+    /// The `eth_call` that runs `BLOCKHASH(number)` in the remote EVM at `block`.
+    fn arbitrum_block_hash_call(number: u64, block: Value) -> Value {
+        let address = Address::with_last_byte(0xde);
+        let code = format!("0x7f{number:064x}4060005260206000f3");
+        json!(["eth_call", [{"to": address, "data": code}, block, {address.to_string(): {"code": code}}]])
     }
 
     #[test]
@@ -2094,7 +2237,7 @@ mod tests {
         let hash = B256::with_last_byte(1);
         assert_eq!(
             serde_json::to_value(StateBlockId(hash.into())).unwrap(),
-            serde_json::json!({"blockHash": hash})
+            json!({"blockHash": hash})
         );
         for block in [
             BlockId::number(123),
@@ -2128,17 +2271,15 @@ mod tests {
             (AccountFetchPolicy::Auto, AccountFetchMode::SupportsAccountInfo, true),
             (AccountFetchPolicy::Auto, AccountFetchMode::SeparateRequests, true),
         ] {
-            let (endpoint, stop, server) = account_policy_server(reject_account_info);
-            let hash = B256::with_last_byte(1);
-            let provider = get_http_provider(&endpoint);
-            let db = BlockchainDb::new(
-                exact_meta(&endpoint, hash).with_account_fetch_policy(policy),
-                None,
-            );
+            let rpc = account_rpc(reject_account_info);
+            let db =
+                BlockchainDb::new(rpc.exact_meta(ANCHOR).with_account_fetch_policy(policy), None);
             let (backend, handler) =
-                SharedBackend::new_with_anchor(provider, db, ForkBlock::new(123, hash)).unwrap();
+                SharedBackend::new_with_anchor(rpc.provider(), db, ForkBlock::new(123, ANCHOR))
+                    .unwrap();
             handler.account_fetch_mode.store(mode);
             tokio::spawn(handler);
+
             for address in [Address::with_last_byte(1), Address::with_last_byte(2)] {
                 let account = backend.account(address).unwrap().unwrap();
                 assert_eq!(account.nonce, 7);
@@ -2156,171 +2297,98 @@ mod tests {
                 };
                 assert_eq!(account.extension, extension);
             }
-            stop.store(true, Ordering::Relaxed);
-            let requests = server.join().unwrap();
-            assert!(!requests.is_empty());
-            for request in requests {
+            let calls = rpc.calls();
+            assert!(!calls.is_empty());
+            for call in calls {
                 // Exact equality rejects both Moonbeam's ambiguous bare-hash form and
                 // Rootstock's unsupported boolean (or null) requireCanonical field.
-                assert_eq!(request["params"][1], serde_json::json!({"blockHash": hash}));
+                assert_eq!(call[1][1], json!({"blockHash": ANCHOR}));
             }
         }
-    }
-
-    /// Serves deliberately inconsistent balances from the two account RPC paths.
-    fn account_policy_server(
-        reject_account_info: bool,
-    ) -> (String, Arc<AtomicBool>, std::thread::JoinHandle<Vec<serde_json::Value>>) {
-        let server = Server::http("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", server.server_addr());
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
-        let handle = std::thread::spawn(move || {
-            let mut requests = Vec::new();
-            while !stopped.load(Ordering::Relaxed) {
-                if let Some(mut request) = server.recv_timeout(Duration::from_millis(20)).unwrap() {
-                    let rpc: serde_json::Value =
-                        serde_json::from_reader(request.as_reader()).unwrap();
-                    let mut response = serde_json::json!({"jsonrpc": "2.0", "id": rpc["id"]});
-                    if rpc["method"] == "eth_getAccountInfo" && reject_account_info {
-                        response["error"] =
-                            serde_json::json!({"code": -32601, "message": "unsupported"});
-                    } else {
-                        response["result"] = match rpc["method"].as_str().unwrap() {
-                            "eth_getAccountInfo" => serde_json::json!({
-                                "balance": "0x2a", "nonce": "0x7", "code": "0x6000",
-                                "extension": "0x01aa",
-                            }),
-                            "eth_getBalance" => serde_json::json!("0xffff"),
-                            "eth_getTransactionCount" => serde_json::json!("0x7"),
-                            "eth_getCode" => serde_json::json!("0x6000"),
-                            method => panic!("unexpected method {method}"),
-                        };
-                    }
-                    requests.push(rpc);
-                    request.respond(Response::from_string(response.to_string())).unwrap();
-                }
-            }
-            requests
-        });
-        (endpoint, stop, handle)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn required_account_info_uses_authoritative_balance_and_pinned_block() {
-        let (endpoint, stop, server) = account_policy_server(false);
-        let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint)
-            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
-        let db = BlockchainDb::new(meta, None);
-        let hash = B256::with_last_byte(1);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db, Some(hash.into())).await;
-        let address = Address::with_last_byte(1);
-        let account = backend.account(address).unwrap().unwrap();
+        let rpc = account_rpc(false);
+        let meta = rpc.meta().with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let backend = rpc.backend(meta, Some(ANCHOR.into())).await;
+        let (first, second) = (Address::with_last_byte(1), Address::with_last_byte(2));
+
+        let account = backend.account(first).unwrap().unwrap();
         assert_eq!(account.balance, U256::from(42));
         assert_eq!(account.nonce, 7);
         assert_eq!(account.code.unwrap(), Bytes::from_static(&[0x60, 0]));
 
+        // Repinning affects clones and keeps cached accounts.
         backend.set_pinned_block(123).unwrap();
         let clone = backend.clone();
+        assert_eq!(clone.account(second).unwrap().unwrap().balance, U256::from(42));
+        assert_eq!(backend.account(first).unwrap().unwrap().balance, U256::from(42));
         assert_eq!(
-            clone.account(Address::with_last_byte(2)).unwrap().unwrap().balance,
-            U256::from(42)
+            rpc.calls(),
+            [
+                json!(["eth_getAccountInfo", [first, {"blockHash": ANCHOR}]]),
+                json!(["eth_getAccountInfo", [second, "0x7b"]]),
+            ]
         );
-        assert_eq!(backend.account(address).unwrap().unwrap().balance, U256::from(42));
-        stop.store(true, Ordering::Relaxed);
-        let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(requests.iter().all(|r| r["method"] == "eth_getAccountInfo"));
-        assert_eq!(requests[0]["params"], serde_json::json!([address, {"blockHash": hash}]));
-        assert_eq!(requests[1]["params"][1], "0x7b");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn required_account_info_never_falls_back_after_rpc_errors() {
-        let (endpoint, stop, server) = account_policy_server(true);
-        let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint)
-            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
-        for address in [Address::with_last_byte(1), Address::with_last_byte(2)] {
-            assert!(backend.account(address).is_err());
-        }
-        assert!(db.accounts().read().is_empty());
-        stop.store(true, Ordering::Relaxed);
-        let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(requests.iter().all(|r| r["method"] == "eth_getAccountInfo"));
+        let rpc = account_rpc(true);
+        let meta = rpc.meta().with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let backend = rpc.backend(meta, None).await;
+
+        assert!(backend.account(Address::with_last_byte(1)).is_err());
+        assert!(backend.account(Address::with_last_byte(2)).is_err());
+        assert_eq!(backend.accounts_len(), 0);
+        assert_eq!(rpc.counts(), json!({"eth_getAccountInfo": 2}));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn auto_account_fetch_still_supports_separate_requests() {
-        let (endpoint, stop, server) = account_policy_server(true);
-        let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db, None).await;
-        assert_eq!(
-            backend.account(Address::with_last_byte(1)).unwrap().unwrap().balance,
-            U256::from(65535)
-        );
-        stop.store(true, Ordering::Relaxed);
-        let requests = server.join().unwrap();
-        assert!(requests.iter().any(|r| r["method"] == "eth_getBalance"));
-    }
+        let rpc = account_rpc(true);
+        let backend = rpc.backend(rpc.meta(), None).await;
 
-    /// Serves each state read with the block number it was made at as the value, holding the
-    /// first request until `release` fires.
-    fn held_first_read_server() -> (
-        String,
-        std::sync::mpsc::Receiver<()>,
-        std::sync::mpsc::Sender<()>,
-        std::thread::JoinHandle<Vec<serde_json::Value>>,
-    ) {
-        let server = Server::http("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", server.server_addr());
-        let (received_tx, received_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let handle = std::thread::spawn(move || {
-            let mut blocks = Vec::new();
-            while let Some(mut request) = server.recv_timeout(Duration::from_secs(1)).unwrap() {
-                let rpc: serde_json::Value = serde_json::from_reader(request.as_reader()).unwrap();
-                let (block, result) = match rpc["method"].as_str().unwrap() {
-                    "eth_getStorageAt" => (rpc["params"][2].clone(), rpc["params"][2].clone()),
-                    "eth_getAccountInfo" => (
-                        rpc["params"][1].clone(),
-                        serde_json::json!({"balance": rpc["params"][1], "nonce": "0x0", "code": "0x"}),
-                    ),
-                    method => panic!("unexpected method {method}"),
-                };
-                if blocks.is_empty() {
-                    received_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                }
-                blocks.push(block);
-                let response =
-                    serde_json::json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result});
-                request.respond(Response::from_string(response.to_string())).unwrap();
-            }
-            blocks
-        });
-        (endpoint, received_rx, release_tx, handle)
+        let account = backend.account(Address::with_last_byte(1)).unwrap().unwrap();
+        assert_eq!(account.balance, U256::from(65535));
+        assert_eq!(
+            rpc.counts(),
+            json!({
+                "eth_getAccountInfo": 1,
+                "eth_getBalance": 1,
+                "eth_getTransactionCount": 1,
+                "eth_getCode": 1,
+            })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn repinned_reads_neither_join_nor_cache_superseded_requests() {
         for storage in [true, false] {
-            let (endpoint, received, release, server) = held_first_read_server();
-            let provider = get_http_provider(&endpoint);
-            let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint)
-                .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
-            let db = BlockchainDb::new(meta, None);
+            let (received_tx, received) = channel();
+            let (release, release_rx) = channel::<()>();
+            let held = Mutex::new(Some((received_tx, release_rx)));
+            // Answers each state read with the block it was made at, holding the first one.
+            let rpc = MockRpc::new(move |method, params| {
+                let first = held.lock().take();
+                if let Some((received, release)) = first {
+                    received.send(()).unwrap();
+                    release.recv().unwrap();
+                }
+                let block = params.as_array().unwrap().last().unwrap();
+                match method {
+                    "eth_getStorageAt" => Ok(block.clone()),
+                    "eth_getAccountInfo" => {
+                        Ok(json!({"balance": block, "nonce": "0x0", "code": "0x"}))
+                    }
+                    _ => Err(unsupported(method)),
+                }
+            });
+            let meta = rpc.meta().with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
             let backend =
-                SharedBackend::spawn_backend(Arc::new(provider), db.clone(), Some(1.into()))
-                    .await
-                    .with_blocking_mode(BlockingMode::Block);
-            let read = move |backend: SharedBackend<AnyNetwork, BlockEnv>| {
+                rpc.backend(meta, Some(1.into())).await.with_blocking_mode(BlockingMode::Block);
+            let read = move |backend: Backend| {
                 std::thread::spawn(move || {
                     if storage {
                         backend.storage_at(Address::ZERO, U256::ZERO).unwrap()
@@ -2334,134 +2402,92 @@ mod tests {
             received.recv().unwrap();
             // Re-pin and wipe the cache the way a fork reset does, while the old read is in flight.
             backend.set_pinned_block(2).unwrap();
-            db.db().clear();
-            let fresh = read(backend);
+            backend.data().clear();
+            let fresh = read(backend.clone());
             std::thread::sleep(Duration::from_millis(200));
             release.send(()).unwrap();
 
             assert_eq!(stale.join().unwrap(), U256::from(1));
             assert_eq!(fresh.join().unwrap(), U256::from(2));
-            if storage {
-                assert_eq!(db.storage().read()[&Address::ZERO][&U256::ZERO], U256::from(2));
-            } else {
-                assert_eq!(db.accounts().read()[&Address::ZERO].balance, U256::from(2));
-            }
-            assert_eq!(
-                server.join().unwrap(),
-                [serde_json::json!("0x1"), serde_json::json!("0x2")]
-            );
+            let call = |block| {
+                if storage {
+                    assert_eq!(backend.storage()[&Address::ZERO][&U256::ZERO], U256::from(2));
+                    json!(["eth_getStorageAt", [Address::ZERO, "0x0", block]])
+                } else {
+                    assert_eq!(backend.accounts()[&Address::ZERO].balance, U256::from(2));
+                    json!(["eth_getAccountInfo", [Address::ZERO, block]])
+                }
+            };
+            assert_eq!(rpc.calls(), [call("0x1"), call("0x2")]);
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn unchecked_account_fetch_falls_back_to_account_info_when_separate_requests_fail() {
-        let server = Server::http("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", server.server_addr());
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
-        let server = std::thread::spawn(move || {
-            let mut responders = Vec::new();
-            while !stopped.load(Ordering::Relaxed) {
-                let Some(mut request) = server.recv_timeout(Duration::from_millis(20)).unwrap()
-                else {
-                    continue;
-                };
-                let rpc: serde_json::Value = serde_json::from_reader(request.as_reader()).unwrap();
-                let mut response = serde_json::json!({"jsonrpc": "2.0", "id": rpc["id"]});
-                let delay = match rpc["method"].as_str().unwrap() {
-                    // Answers slower than the separate requests fail, e.g. on a rate limit.
-                    "eth_getAccountInfo" => {
-                        response["result"] =
-                            serde_json::json!({"balance": "0x2a", "nonce": "0x7", "code": "0x"});
-                        Duration::from_millis(200)
-                    }
-                    "eth_getCode" => {
-                        response["error"] =
-                            serde_json::json!({"code": 429, "message": "rate limited"});
-                        Duration::ZERO
-                    }
-                    "eth_getBalance" | "eth_getTransactionCount" => {
-                        response["result"] = serde_json::json!("0x1");
-                        Duration::ZERO
-                    }
-                    method => panic!("unexpected method {method}"),
-                };
-                responders.push(std::thread::spawn(move || {
-                    std::thread::sleep(delay);
-                    request.respond(Response::from_string(response.to_string())).unwrap();
-                }));
+        let rpc = MockRpc::concurrent(|method, _| match method {
+            // Answers slower than the separate requests fail, e.g. on a rate limit.
+            "eth_getAccountInfo" => {
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(json!({"balance": "0x2a", "nonce": "0x7", "code": "0x"}))
             }
-            for responder in responders {
-                responder.join().unwrap();
-            }
+            "eth_getCode" => Err(json!({"code": 429, "message": "rate limited"})),
+            "eth_getBalance" | "eth_getTransactionCount" => Ok(json!("0x1")),
+            _ => Err(unsupported(method)),
         });
-
-        let provider = get_http_provider(&endpoint);
-        let db = BlockchainDb::new(BlockchainDbMeta::new(BlockEnv::default(), endpoint), None);
-        let (backend, handler) = SharedBackend::new(provider, db, None);
+        let db = BlockchainDb::new(rpc.meta(), None);
+        let (backend, handler) = SharedBackend::new(rpc.provider(), db, None);
         let mode = Arc::clone(&handler.account_fetch_mode);
         tokio::spawn(handler);
+
         let account = backend.account(Address::with_last_byte(1)).unwrap().unwrap();
         assert_eq!(account.balance, U256::from(42));
         assert_eq!(account.nonce, 7);
         assert_eq!(mode.load(), AccountFetchMode::SupportsAccountInfo);
-        stop.store(true, Ordering::Relaxed);
-        server.join().unwrap();
+        assert_eq!(
+            rpc.counts(),
+            json!({
+                "eth_getAccountInfo": 1,
+                "eth_getBalance": 1,
+                "eth_getTransactionCount": 1,
+                "eth_getCode": 1,
+            })
+        );
     }
 
-    const ENDPOINT: Option<&str> = option_env!("ETH_RPC_URL");
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_builder() {
-        let Some(endpoint) = ENDPOINT else { return };
-        let provider = get_http_provider(endpoint);
-
-        let any_rpc_block = provider.get_block(BlockId::latest()).hashes().await.unwrap().unwrap();
-        let block_env = BlockEnv { number: U256::from(any_rpc_block.header.number()) };
-        let meta = BlockchainDbMeta::default().set_block_env(block_env);
-
-        assert_eq!(meta.block_env.number, U256::from(any_rpc_block.header.number()));
-    }
-
+    /// Fetched values land in the shared database, where clones on other threads see them.
     #[tokio::test(flavor = "multi_thread")]
     async fn shared_backend() {
-        let Some(endpoint) = ENDPOINT else { return };
-
-        let provider = get_http_provider(endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string());
-
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
-
-        // some rng contract from etherscan
-        let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
-
-        let idx = U256::from(0u64);
-        let value = backend.storage_at(address, idx).unwrap();
-        let account = backend.account(address).unwrap().unwrap();
-
-        let mem_acc = db.accounts().read().get(&address).unwrap().clone();
-        assert_eq!(account.balance, mem_acc.balance);
-        assert_eq!(account.nonce, mem_acc.nonce);
-        let slots = db.storage().read().get(&address).unwrap().clone();
-        assert_eq!(slots.len(), 1);
-        assert_eq!(slots.get(&idx).copied().unwrap(), value);
-
-        let num = 10u64;
-        let hash = backend.block_hash(num).unwrap();
-        let mem_hash = *db.block_hashes().read().get(&U256::from(num)).unwrap();
-        assert_eq!(hash, mem_hash);
-
-        let max_slots = 5;
-        let handle = std::thread::spawn(move || {
-            for i in 1..max_slots {
-                let idx = U256::from(i);
-                let _ = backend.storage_at(address, idx);
-            }
+        let hash = B256::with_last_byte(10);
+        let rpc = MockRpc::new(move |method, _| match method {
+            "eth_chainId" => Ok(json!("0x1")),
+            "eth_getAccountInfo" => Ok(json!({"balance": "0x2a", "nonce": "0x7", "code": "0x"})),
+            "eth_getStorageAt" => Ok(json!("0x2a")),
+            "eth_getBlockByNumber" => Ok(block(10, hash, B256::ZERO)),
+            _ => Err(unsupported(method)),
         });
-        handle.join().unwrap();
-        let slots = db.storage().read().get(&address).unwrap().clone();
-        assert_eq!(slots.len() as u64, max_slots);
+        let meta = rpc.meta().with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let backend = rpc.backend(meta, None).await;
+        let address = Address::with_last_byte(1);
+
+        let account = backend.account(address).unwrap().unwrap();
+        assert_eq!(backend.storage_at(address, U256::ZERO).unwrap(), U256::from(42));
+        assert_eq!(backend.block_hash(10).unwrap(), hash);
+        assert_eq!(backend.accounts()[&address], account);
+        assert_eq!(
+            backend.storage()[&address],
+            StorageInfo::from_iter([(U256::ZERO, U256::from(42))])
+        );
+        assert_eq!(backend.block_hashes()[&U256::from(10)], hash);
+
+        let clone = backend.clone();
+        std::thread::spawn(move || {
+            for slot in 1..5 {
+                clone.storage_at(address, U256::from(slot)).unwrap();
+            }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(backend.storage()[&address].len(), 5);
     }
 
     #[test]
@@ -2473,15 +2499,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cache_metrics_record_hits_for_cached_database_reads() {
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-        let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
-
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
-
-        let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
+        let rpc = MockRpc::rejecting();
+        let backend = rpc.backend(rpc.meta(), None).await;
+        let (address, slot, value) = (Address::with_last_byte(1), U256::from(3), U256::from(4));
+        let (number, hash) = (5, B256::with_last_byte(6));
         let code = Bytes::from_static(&[0x60, 0x2a]);
         let account = AccountInfo {
             nonce: 1,
@@ -2490,135 +2511,76 @@ mod tests {
             code: Some(code.clone()),
             extension: Bytes::new(),
         };
-        let mut account_data = AddressData::default();
-        account_data.insert(address, account.clone());
-        backend.insert_or_update_address(account_data);
+        backend.insert_or_update_address(AddressData::from_iter([(address, account.clone())]));
+        backend.insert_or_update_storage(StorageData::from_iter([(
+            address,
+            StorageInfo::from_iter([(slot, value)]),
+        )]));
+        backend
+            .insert_or_update_block_hashes(BlockHashData::from_iter([(U256::from(number), hash)]));
 
-        let slot = U256::from(3);
-        let value = U256::from(4);
-        let mut storage = StorageInfo::default();
-        storage.insert(slot, value);
-        let mut storage_data = StorageData::default();
-        storage_data.insert(address, storage);
-        backend.insert_or_update_storage(storage_data);
-
-        let block_number = 5;
-        let block_hash = B256::from(U256::from(6));
-        let mut block_hash_data = BlockHashData::default();
-        block_hash_data.insert(U256::from(block_number), block_hash);
-        backend.insert_or_update_block_hashes(block_hash_data);
-
-        assert_eq!(backend.cache_hits(), 0);
-        assert_eq!(backend.cache_misses(), 0);
+        assert_eq!((backend.cache_hits(), backend.cache_misses()), (0, 0));
         assert_eq!(backend.account(address).unwrap(), Some(account));
         assert_eq!(backend.storage_at(address, slot).unwrap(), value);
-        assert_eq!(backend.block_hash(block_number).unwrap(), block_hash);
-        assert_eq!(backend.cache_hits(), 3);
-        assert_eq!(backend.cache_misses(), 0);
+        assert_eq!(backend.block_hash(number).unwrap(), hash);
+        assert_eq!((backend.cache_hits(), backend.cache_misses()), (3, 0));
 
         let clone = backend.with_blocking_mode(BlockingMode::Block);
-        assert_eq!(clone.cache_hits(), 3);
-        assert_eq!(clone.cache_misses(), 0);
+        assert_eq!((clone.cache_hits(), clone.cache_misses()), (3, 0));
         assert_eq!(clone.accounts()[&address].code.as_ref().unwrap(), &code);
         assert_eq!(clone.storage()[&address][&slot], value);
-        assert_eq!(clone.block_hashes()[&U256::from(block_number)], block_hash);
-        assert_eq!(clone.accounts_len(), 1);
-        assert_eq!(clone.storage_len(), 1);
-        assert_eq!(clone.block_hashes_len(), 1);
+        assert_eq!(clone.block_hashes()[&U256::from(number)], hash);
+        assert_eq!(
+            (clone.accounts_len(), clone.storage_len(), clone.block_hashes_len()),
+            (1, 1, 1)
+        );
+        assert!(rpc.calls().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cache_metrics_record_storage_miss_then_hit() {
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-
-        let server_handle = std::thread::spawn(move || {
-            #[derive(Debug, Deserialize)]
-            struct Request {
-                id: serde_json::Value,
-                method: String,
-            }
-
-            let mut request = server.recv().unwrap();
-            let rpc_request: Request =
-                serde_json::from_reader(request.as_reader()).expect("failed parsing request");
-            assert_eq!(rpc_request.method, "eth_getStorageAt");
-
-            request
-                .respond(Response::from_string(
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": rpc_request.id,
-                        "result": "0x2a",
-                    })
-                    .to_string(),
-                ))
-                .unwrap();
+        let rpc = MockRpc::new(|method, _| match method {
+            "eth_getStorageAt" => Ok(json!("0x2a")),
+            _ => Err(unsupported(method)),
         });
-
-        let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db, None).await;
-        let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
-        let slot = U256::from(1);
+        let backend = rpc.backend(rpc.meta(), None).await;
+        let (address, slot) = (Address::with_last_byte(1), U256::from(1));
 
         assert_eq!(backend.storage_at(address, slot).unwrap(), U256::from(42));
-        assert_eq!(backend.cache_hits(), 0);
-        assert_eq!(backend.cache_misses(), 1);
+        assert_eq!((backend.cache_hits(), backend.cache_misses()), (0, 1));
         assert_eq!(backend.storage_at(address, slot).unwrap(), U256::from(42));
-        assert_eq!(backend.cache_hits(), 1);
-        assert_eq!(backend.cache_misses(), 1);
-
-        server_handle.join().unwrap();
+        assert_eq!((backend.cache_hits(), backend.cache_misses()), (1, 1));
+        assert_eq!(rpc.counts(), json!({"eth_getStorageAt": 1}));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cache_file_keeps_only_read_prefetches() {
         let joined = Address::with_last_byte(1);
         let unread = Address::with_last_byte(2);
-        let server = Server::http("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", server.server_addr());
-        let (held_tx, held_rx) = oneshot_channel();
-        let (release_tx, release_rx) = oneshot_channel::<()>();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
-        let server = std::thread::spawn(move || {
-            let mut requests = Vec::new();
-            while !stopped.load(Ordering::Relaxed) {
-                if let Some(mut request) = server.recv_timeout(Duration::from_millis(20)).unwrap() {
-                    let rpc: serde_json::Value =
-                        serde_json::from_reader(request.as_reader()).unwrap();
-                    let account = rpc["method"] == "eth_getAccountInfo";
-                    // Hold only the requests used to test a read joining an in-flight prefetch.
-                    if rpc["params"][0] == serde_json::json!(joined)
-                        && (account || rpc["params"][1] == "0x2")
-                    {
-                        held_tx.send(()).unwrap();
-                        release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-                    }
-                    let result = if account {
-                        serde_json::json!({"balance": "0x2a", "nonce": "0x0", "code": "0x"})
-                    } else {
-                        assert_eq!(rpc["method"], "eth_getStorageAt");
-                        serde_json::json!("0x2a")
-                    };
-                    let response =
-                        serde_json::json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result});
-                    requests.push(rpc);
-                    request.respond(Response::from_string(response.to_string())).unwrap();
-                }
+        let (held_tx, held_rx) = channel();
+        let (release_tx, release_rx) = channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let rpc = MockRpc::new(move |method, params| {
+            let account = method == "eth_getAccountInfo";
+            // Hold only the requests used to test a read joining an in-flight prefetch.
+            if params[0] == json!(joined) && (account || params[1] == "0x2") {
+                held_tx.send(()).unwrap();
+                release_rx.lock().recv_timeout(Duration::from_secs(10)).unwrap();
             }
-            requests
+            match method {
+                "eth_getAccountInfo" => {
+                    Ok(json!({"balance": "0x2a", "nonce": "0x0", "code": "0x"}))
+                }
+                "eth_getStorageAt" => Ok(json!("0x2a")),
+                _ => Err(unsupported(method)),
+            }
         });
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache.json");
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone())
-            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let meta = rpc.meta().with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
         let db = BlockchainDb::new(meta, Some(path.clone()));
-        let provider = Arc::new(get_http_provider(&endpoint));
-        let mut backend = SharedBackend::spawn_backend(provider, db, None)
+        let mut backend = SharedBackend::spawn_backend(rpc.provider(), db, None)
             .await
             .with_blocking_mode(BlockingMode::Block);
 
@@ -2656,986 +2618,344 @@ mod tests {
         release_tx.send(()).unwrap();
         prefetch.join().unwrap();
         assert_eq!(read.recv().unwrap().unwrap(), U256::from(42));
-        stop.store(true, Ordering::Relaxed);
-        let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 5);
+        assert_eq!(rpc.calls().len(), 5);
         backend.flush_cache();
 
         let cache = JsonBlockCacheDB::<BlockEnv>::load(&path).unwrap();
         assert_eq!(cache.db().accounts.read().keys().collect::<Vec<_>>(), [&joined]);
         let storage = cache.db().storage.read();
-        assert_eq!(storage.keys().collect::<Vec<_>>(), [&joined]);
-        assert_eq!(storage[&joined].len(), 2);
-        assert_eq!(storage[&joined][&U256::from(1)], U256::from(42));
-        assert_eq!(storage[&joined][&U256::from(2)], U256::from(42));
+        let slots = StorageInfo::from_iter([
+            (U256::from(1), U256::from(42)),
+            (U256::from(2), U256::from(42)),
+        ]);
+        assert_eq!(*storage, AddressHashMap::from_iter([(joined, slots)]));
+    }
+
+    /// Serves storage value 42 and anchor block 10 with parent `parent_hash`.
+    fn anchor_rpc(parent_hash: B256) -> MockRpc {
+        MockRpc::new(move |method, _| match method {
+            "eth_getStorageAt" => Ok(json!("0x2a")),
+            "eth_getBlockByHash" => Ok(block(10, ANCHOR, parent_hash)),
+            _ => Err(unsupported(method)),
+        })
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn exact_anchor_pins_storage_and_block_ancestry() {
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-        let anchor_hash = B256::with_last_byte(0xaa);
         let parent_hash = B256::with_last_byte(0xbb);
-
-        let server_handle = std::thread::spawn(move || {
-            #[derive(Debug, Deserialize)]
-            struct Request {
-                id: serde_json::Value,
-                method: String,
-                params: serde_json::Value,
-            }
-
-            let mut storage_request = server.recv().unwrap();
-            let storage: Request = serde_json::from_reader(storage_request.as_reader()).unwrap();
-            assert_eq!(storage.method, "eth_getStorageAt");
-            assert_eq!(storage.params[2], serde_json::json!({"blockHash": anchor_hash}));
-            storage_request
-                .respond(Response::from_string(
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": storage.id,
-                        "result": "0x2a",
-                    })
-                    .to_string(),
-                ))
-                .unwrap();
-
-            let mut block_request = server.recv().unwrap();
-            let block: Request = serde_json::from_reader(block_request.as_reader()).unwrap();
-            assert_eq!(block.method, "eth_getBlockByHash");
-            assert_eq!(block.params[0], anchor_hash.to_string());
-            block_request
-                .respond(Response::from_string(
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": block.id,
-                        "result": {
-                            "hash": anchor_hash,
-                            "parentHash": parent_hash,
-                            "sha3Uncles": B256::ZERO,
-                            "miner": Address::ZERO,
-                            "stateRoot": B256::ZERO,
-                            "transactionsRoot": B256::ZERO,
-                            "receiptsRoot": B256::ZERO,
-                            "logsBloom": format!("0x{}", "00".repeat(256)),
-                            "difficulty": "0x0",
-                            "number": "0xa",
-                            "gasLimit": "0x1c9c380",
-                            "gasUsed": "0x0",
-                            "timestamp": "0x1",
-                            "extraData": "0x",
-                            "mixHash": B256::ZERO,
-                            "nonce": "0x0000000000000000",
-                            "baseFeePerGas": "0x1",
-                            "transactions": [],
-                            "uncles": [],
-                        },
-                    })
-                    .to_string(),
-                ))
-                .unwrap();
-        });
-
-        let provider = get_http_provider(&endpoint);
-        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::mainnet());
-        let db = BlockchainDb::new(meta, None);
-        let (backend, handler) =
-            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, anchor_hash)).unwrap();
-        tokio::spawn(handler);
+        let rpc = anchor_rpc(parent_hash);
+        let backend = rpc.anchored(rpc.exact_meta(ANCHOR), ForkBlock::new(10, ANCHOR));
 
         assert_eq!(backend.storage_at(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
         assert_eq!(backend.block_hash(9).unwrap(), parent_hash);
-        server_handle.join().unwrap();
+        assert_eq!(
+            rpc.calls(),
+            [
+                json!(["eth_getStorageAt", [Address::ZERO, "0x0", {"blockHash": ANCHOR}]]),
+                json!(["eth_getBlockByHash", [ANCHOR, false]]),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn exact_anchor_by_number_reads_state_by_number() {
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-        let anchor_hash = B256::with_last_byte(0xaa);
         let parent_hash = B256::with_last_byte(0xbb);
-
-        let server_handle = std::thread::spawn(move || {
-            #[derive(Debug, Deserialize)]
-            struct Request {
-                id: serde_json::Value,
-                method: String,
-                params: serde_json::Value,
-            }
-
-            let mut storage_request = server.recv().unwrap();
-            let storage: Request = serde_json::from_reader(storage_request.as_reader()).unwrap();
-            assert_eq!(storage.method, "eth_getStorageAt");
-            assert_eq!(storage.params[2], "0xa");
-            storage_request
-                .respond(Response::from_string(
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": storage.id,
-                        "result": "0x2a",
-                    })
-                    .to_string(),
-                ))
-                .unwrap();
-
-            let mut block_request = server.recv().unwrap();
-            let block: Request = serde_json::from_reader(block_request.as_reader()).unwrap();
-            assert_eq!(block.method, "eth_getBlockByHash");
-            assert_eq!(block.params[0], anchor_hash.to_string());
-            block_request
-                .respond(Response::from_string(
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": block.id,
-                        "result": {
-                            "hash": anchor_hash,
-                            "parentHash": parent_hash,
-                            "sha3Uncles": B256::ZERO,
-                            "miner": Address::ZERO,
-                            "stateRoot": B256::ZERO,
-                            "transactionsRoot": B256::ZERO,
-                            "receiptsRoot": B256::ZERO,
-                            "logsBloom": format!("0x{}", "00".repeat(256)),
-                            "difficulty": "0x0",
-                            "number": "0xa",
-                            "gasLimit": "0x1c9c380",
-                            "gasUsed": "0x0",
-                            "timestamp": "0x1",
-                            "extraData": "0x",
-                            "mixHash": B256::ZERO,
-                            "nonce": "0x0000000000000000",
-                            "baseFeePerGas": "0x1",
-                            "transactions": [],
-                            "uncles": [],
-                        },
-                    })
-                    .to_string(),
-                ))
-                .unwrap();
-        });
-
-        let provider = get_http_provider(&endpoint);
-        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::mainnet());
-        let db = BlockchainDb::new(meta, None);
-        let (backend, handler) =
-            SharedBackend::new_with_anchor_by_number(provider, db, ForkBlock::new(10, anchor_hash))
-                .unwrap();
+        let rpc = anchor_rpc(parent_hash);
+        let db = BlockchainDb::new(rpc.exact_meta(ANCHOR), None);
+        let (backend, handler) = SharedBackend::new_with_anchor_by_number(
+            rpc.provider(),
+            db,
+            ForkBlock::new(10, ANCHOR),
+        )
+        .unwrap();
         tokio::spawn(handler);
 
         assert_eq!(backend.storage_at(Address::ZERO, U256::ZERO).unwrap(), U256::from(42));
         assert_eq!(backend.block_hash(9).unwrap(), parent_hash);
-        server_handle.join().unwrap();
+        assert_eq!(
+            rpc.calls(),
+            [
+                json!(["eth_getStorageAt", [Address::ZERO, "0x0", "0xa"]]),
+                json!(["eth_getBlockByHash", [ANCHOR, false]]),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn exact_anchor_walks_beyond_256_blocks() {
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-        let block_hash = |number| B256::from(U256::from(number + 1));
-        let anchor_number = 300;
-        let requested_number = 43;
-        let anchor_hash = block_hash(anchor_number);
-        let expected_hash = block_hash(requested_number);
-
-        let server_handle = std::thread::spawn(move || {
-            #[derive(Debug, Deserialize)]
-            struct Request {
-                id: serde_json::Value,
-                method: String,
-                params: serde_json::Value,
-            }
-
-            for number in ((requested_number + 1)..=anchor_number).rev() {
-                let mut request = server.recv().unwrap();
-                let block: Request = serde_json::from_reader(request.as_reader()).unwrap();
-                assert_eq!(block.method, "eth_getBlockByHash");
-                assert_eq!(block.params[0], block_hash(number).to_string());
-                request
-                    .respond(Response::from_string(
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": block.id,
-                            "result": {
-                                "hash": block_hash(number),
-                                "parentHash": block_hash(number - 1),
-                                "sha3Uncles": B256::ZERO,
-                                "miner": Address::ZERO,
-                                "stateRoot": B256::ZERO,
-                                "transactionsRoot": B256::ZERO,
-                                "receiptsRoot": B256::ZERO,
-                                "logsBloom": format!("0x{}", "00".repeat(256)),
-                                "difficulty": "0x0",
-                                "number": format!("0x{number:x}"),
-                                "gasLimit": "0x1c9c380",
-                                "gasUsed": "0x0",
-                                "timestamp": "0x1",
-                                "extraData": "0x",
-                                "mixHash": B256::ZERO,
-                                "nonce": "0x0000000000000000",
-                                "baseFeePerGas": "0x1",
-                                "transactions": [],
-                                "uncles": [],
-                            },
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap();
+        let hash = |number: u64| B256::from(U256::from(number + 1));
+        let rpc = MockRpc::new(move |method, params| {
+            let requested: B256 = serde_json::from_value(params[0].clone()).unwrap();
+            let number = U256::from_be_bytes(requested.0).to::<u64>() - 1;
+            match method {
+                "eth_getBlockByHash" => Ok(block(number, hash(number), hash(number - 1))),
+                _ => Err(unsupported(method)),
             }
         });
+        let backend = rpc.anchored(rpc.exact_meta(hash(300)), ForkBlock::new(300, hash(300)));
 
-        let provider = get_http_provider(&endpoint);
-        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::mainnet());
-        let db = BlockchainDb::new(meta, None);
-        let (backend, handler) = SharedBackend::new_with_anchor(
-            provider,
-            db,
-            ForkBlock::new(anchor_number, anchor_hash),
-        )
-        .unwrap();
-        tokio::spawn(handler);
-
-        assert_eq!(backend.block_hash(requested_number).unwrap(), expected_hash);
-        server_handle.join().unwrap();
+        assert_eq!(backend.block_hash(43).unwrap(), hash(43));
+        let walked = (44..=300).rev().map(|n| json!(["eth_getBlockByHash", [hash(n), false]]));
+        assert_eq!(rpc.calls(), walked.collect::<Vec<_>>());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn remapped_exact_anchor_uses_numbered_block_hash_lookup() {
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-        let block_hash = B256::with_last_byte(2);
-
-        let server_handle = std::thread::spawn(move || {
-            #[derive(Debug, Deserialize)]
-            struct Request {
-                id: serde_json::Value,
-                method: String,
-                params: serde_json::Value,
-            }
-
-            let mut request = server.recv().unwrap();
-            let block: Request = serde_json::from_reader(request.as_reader()).unwrap();
-            assert_eq!(block.method, "eth_getBlockByNumber");
-            assert_eq!(block.params[0], "0x63");
-            request
-                .respond(Response::from_string(
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": block.id,
-                        "result": {
-                            "hash": block_hash,
-                            "parentHash": B256::ZERO,
-                            "sha3Uncles": B256::ZERO,
-                            "miner": Address::ZERO,
-                            "stateRoot": B256::ZERO,
-                            "transactionsRoot": B256::ZERO,
-                            "receiptsRoot": B256::ZERO,
-                            "logsBloom": format!("0x{}", "00".repeat(256)),
-                            "difficulty": "0x0",
-                            "number": "0x63",
-                            "gasLimit": "0x1c9c380",
-                            "gasUsed": "0x0",
-                            "timestamp": "0x1",
-                            "extraData": "0x",
-                            "mixHash": B256::ZERO,
-                            "nonce": "0x0000000000000000",
-                            "baseFeePerGas": "0x1",
-                            "transactions": [],
-                            "uncles": [],
-                        },
-                    })
-                    .to_string(),
-                ))
-                .unwrap();
+        let hash = B256::with_last_byte(2);
+        let rpc = MockRpc::new(move |method, _| match method {
+            "eth_getBlockByNumber" => Ok(block(99, hash, B256::ZERO)),
+            _ => Err(unsupported(method)),
         });
+        let backend =
+            rpc.anchored(rpc.exact_meta(ANCHOR), ForkBlock::with_rpc_number(100, 10, ANCHOR));
 
-        let provider = get_http_provider(&endpoint);
-        let anchor_hash = B256::with_last_byte(1);
-        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::mainnet());
-        let db = BlockchainDb::new(meta, None);
-        let (backend, handler) = SharedBackend::new_with_anchor(
-            provider,
-            db,
-            ForkBlock::with_rpc_number(100, 10, anchor_hash),
-        )
-        .unwrap();
-        tokio::spawn(handler);
-
-        assert_eq!(backend.block_hash(99).unwrap(), block_hash);
-        server_handle.join().unwrap();
+        assert_eq!(backend.block_hash(99).unwrap(), hash);
+        assert_eq!(rpc.calls(), [json!(["eth_getBlockByNumber", ["0x63", false]])]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn exact_anchor_returns_zero_for_post_anchor_block() {
-        let endpoint = "http://127.0.0.1:1";
-        let provider = get_http_provider(endpoint);
-        let anchor_hash = B256::with_last_byte(1);
-        let meta = exact_meta(endpoint, anchor_hash);
-        let db = BlockchainDb::new(meta, None);
-        let (backend, handler) =
-            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, anchor_hash)).unwrap();
-        tokio::spawn(handler);
+        let rpc = MockRpc::rejecting();
+        // Without a chain, any block hash lookup would first ask the rejecting server for it.
+        let meta = rpc.meta().with_fork_identity(ANCHOR, B256::with_last_byte(1));
+        let backend = rpc.anchored(meta, ForkBlock::new(10, ANCHOR));
 
         assert_eq!(backend.block_hash(11).unwrap(), B256::ZERO);
+        assert!(rpc.calls().is_empty());
     }
 
     #[test]
     fn exact_backend_cannot_be_repinned() {
-        let provider = get_http_provider("http://127.0.0.1:1");
-        let anchor_hash = B256::with_last_byte(1);
-        let meta = exact_meta("http://127.0.0.1:1", anchor_hash);
-        let db = BlockchainDb::new(meta, None);
+        let rpc = MockRpc::rejecting();
+        let db = BlockchainDb::new(rpc.exact_meta(ANCHOR), None);
         let (backend, _handler) =
-            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(1, anchor_hash)).unwrap();
+            SharedBackend::new_with_anchor(rpc.provider(), db, ForkBlock::new(1, ANCHOR)).unwrap();
 
-        let err = backend.set_pinned_block(2).unwrap_err().to_string();
-        assert_eq!(err, "exact fork backends must be replaced instead of re-pinned");
+        let err = backend.set_pinned_block(2).unwrap_err();
+        assert_eq!(err.to_string(), "exact fork backends must be replaced instead of re-pinned");
     }
 
     #[test]
     fn exact_backend_requires_matching_fork_identity() {
-        let anchor_hash = B256::with_last_byte(1);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), "http://127.0.0.1:1".to_string())
-            .with_fork_identity(B256::with_last_byte(2), B256::with_last_byte(3));
-        let db = BlockchainDb::new(meta, None);
+        let rpc = MockRpc::rejecting();
+        let db = BlockchainDb::new(rpc.exact_meta(B256::with_last_byte(2)), None);
 
-        let err = SharedBackend::new_with_anchor(
-            get_http_provider("http://127.0.0.1:1"),
-            db,
-            ForkBlock::new(1, anchor_hash),
-        )
-        .err()
-        .unwrap();
-        assert!(err.to_string().contains("not anchored"));
+        let err = SharedBackend::new_with_anchor(rpc.provider(), db, ForkBlock::new(1, ANCHOR))
+            .err()
+            .unwrap();
+        assert_eq!(err.to_string(), format!("exact fork database is not anchored at {ANCHOR}"));
     }
 
     #[test]
     fn exact_backend_requires_source_identity() {
-        let anchor_hash = B256::with_last_byte(1);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), "http://127.0.0.1:1".to_string())
-            .set_chain(Chain::mainnet());
-        let meta = BlockchainDbMeta { fork_hash: Some(anchor_hash), ..meta };
+        let rpc = MockRpc::rejecting();
+        let meta = BlockchainDbMeta { fork_hash: Some(ANCHOR), ..rpc.meta() };
         let db = BlockchainDb::new(meta, None);
 
-        let err = SharedBackend::new_with_anchor(
-            get_http_provider("http://127.0.0.1:1"),
-            db,
-            ForkBlock::new(1, anchor_hash),
-        )
-        .err()
-        .unwrap();
-        assert!(err.to_string().contains("no RPC source identity"));
+        let err = SharedBackend::new_with_anchor(rpc.provider(), db, ForkBlock::new(1, ANCHOR))
+            .err()
+            .unwrap();
+        assert_eq!(err.to_string(), "exact fork database has no RPC source identity");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn arbitrum_block_hash_uses_pinned_eth_call() {
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-        let first_hash = B256::with_last_byte(0x42);
-        let second_hash = B256::with_last_byte(0x43);
-
-        let server_handle = std::thread::spawn(move || {
-            #[derive(Debug, Deserialize)]
-            struct Request {
-                id: serde_json::Value,
-                method: String,
-                #[serde(default)]
-                params: serde_json::Value,
-            }
-
-            for (pin, hash) in [(100, first_hash), (200, second_hash)] {
-                let mut request = server.recv().unwrap();
-                let rpc_request: Request = serde_json::from_reader(request.as_reader()).unwrap();
-                assert_eq!(rpc_request.method, "eth_call");
-                assert_eq!(rpc_request.params[1], format!("0x{pin:x}"));
-                let address = Address::with_last_byte(0xde);
-                assert_eq!(
-                    rpc_request.params[0]["to"].as_str().unwrap().parse::<Address>().unwrap(),
-                    address
-                );
-                assert_eq!(
-                    rpc_request.params[0]["data"],
-                    rpc_request.params[2][address.to_string()]["code"]
-                );
-                request
-                    .respond(Response::from_string(
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": rpc_request.id,
-                            "result": hash,
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap();
-            }
+        let (first, second) = (B256::with_last_byte(0x42), B256::with_last_byte(0x43));
+        let rpc = MockRpc::new(move |method, params| match (method, params[1].as_str()) {
+            ("eth_call", Some("0x64")) => Ok(json!(first)),
+            ("eth_call", Some("0xc8")) => Ok(json!(second)),
+            _ => Err(unsupported(method)),
         });
+        let meta = rpc.meta().set_chain(Chain::arbitrum_mainnet());
+        let backend = rpc.backend(meta, Some(100.into())).await;
 
-        let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint)
-            .set_chain(Chain::arbitrum_mainnet());
-        let db = BlockchainDb::new(meta, None);
-        let backend =
-            SharedBackend::spawn_backend(Arc::new(provider), db, Some(BlockId::from(100))).await;
-        assert_eq!(backend.block_hash(99).unwrap(), first_hash);
+        assert_eq!(backend.block_hash(99).unwrap(), first);
         backend.evict(Address::ZERO, None);
-        assert_eq!(backend.block_hash(99).unwrap(), first_hash);
+        assert_eq!(backend.block_hash(99).unwrap(), first);
         backend.set_pinned_block(200).unwrap();
-        assert_eq!(backend.block_hash(99).unwrap(), second_hash);
-        server_handle.join().unwrap();
+        assert_eq!(backend.block_hash(99).unwrap(), second);
+        assert_eq!(
+            rpc.calls(),
+            [
+                arbitrum_block_hash_call(99, json!("0x64")),
+                arbitrum_block_hash_call(99, json!("0xc8"))
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn exact_arbitrum_anchor_uses_pinned_eth_call() {
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-        let anchor_hash = B256::with_last_byte(0x41);
-        let expected_hash = B256::with_last_byte(0x42);
-
-        let server_handle = std::thread::spawn(move || {
-            #[derive(Debug, Deserialize)]
-            struct Request {
-                id: serde_json::Value,
-                method: String,
-                params: serde_json::Value,
-            }
-
-            let mut request = server.recv().unwrap();
-            let rpc_request: Request = serde_json::from_reader(request.as_reader()).unwrap();
-            assert_eq!(rpc_request.method, "eth_call");
-            assert_eq!(rpc_request.params[1], serde_json::json!({"blockHash": anchor_hash}));
-            assert_eq!(
-                rpc_request.params[0]["data"],
-                format!("0x7f{:064x}4060005260206000f3", U256::from(99))
-            );
-            request
-                .respond(Response::from_string(
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": rpc_request.id,
-                        "result": expected_hash,
-                    })
-                    .to_string(),
-                ))
-                .unwrap();
+        let hash = B256::with_last_byte(0x42);
+        let rpc = MockRpc::new(move |method, _| match method {
+            "eth_call" => Ok(json!(hash)),
+            _ => Err(unsupported(method)),
         });
+        let meta = rpc.exact_meta(ANCHOR).set_chain(Chain::arbitrum_mainnet());
+        let backend = rpc.anchored(meta, ForkBlock::new(100, ANCHOR));
 
-        let provider = get_http_provider(&endpoint);
-        let meta = exact_meta(&endpoint, anchor_hash).set_chain(Chain::arbitrum_mainnet());
-        let db = BlockchainDb::new(meta, None);
-        let (backend, handler) =
-            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(100, anchor_hash)).unwrap();
-        tokio::spawn(handler);
-
-        assert_eq!(backend.block_hash(99).unwrap(), expected_hash);
-        server_handle.join().unwrap();
+        assert_eq!(backend.block_hash(99).unwrap(), hash);
+        assert_eq!(rpc.calls(), [arbitrum_block_hash_call(99, json!({"blockHash": ANCHOR}))]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn custom_orbit_chain_is_detected_through_arbsys() {
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-        let expected_hash = B256::with_last_byte(0x42);
-
-        let server_handle = std::thread::spawn(move || {
-            #[derive(Debug, Deserialize)]
-            struct Request {
-                id: serde_json::Value,
-                method: String,
-                #[serde(default)]
-                params: serde_json::Value,
-            }
-
-            for (method, result) in [
-                ("eth_chainId", serde_json::json!("0x123456")),
-                ("eth_call", serde_json::json!(format!("0x{:064x}", U256::from(56)))),
-                ("eth_call", serde_json::json!(expected_hash)),
-            ] {
-                let mut request = server.recv().unwrap();
-                let rpc_request: Request = serde_json::from_reader(request.as_reader()).unwrap();
-                assert_eq!(rpc_request.method, method);
-                if method == "eth_call"
-                    && rpc_request.params[0]["to"] == Address::with_last_byte(0x64).to_string()
-                {
-                    assert_eq!(rpc_request.params[0]["data"], "0x051038f2");
-                }
-                request
-                    .respond(Response::from_string(
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": rpc_request.id,
-                            "result": result,
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap();
-            }
+        let hash = B256::with_last_byte(0x42);
+        let arbsys = Address::with_last_byte(0x64);
+        let rpc = MockRpc::new(move |method, params| match method {
+            "eth_chainId" => Ok(json!("0x123456")),
+            "eth_call" if params[0]["to"] == json!(arbsys) => Ok(json!(format!("0x{:064x}", 56))),
+            "eth_call" => Ok(json!(hash)),
+            _ => Err(unsupported(method)),
         });
+        let backend = rpc.backend(rpc.meta(), Some(100.into())).await;
 
-        let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint);
-        let db = BlockchainDb::new(meta, None);
-        let backend =
-            SharedBackend::spawn_backend(Arc::new(provider), db, Some(BlockId::from(100))).await;
-        assert_eq!(backend.block_hash(99).unwrap(), expected_hash);
-        server_handle.join().unwrap();
+        assert_eq!(backend.block_hash(99).unwrap(), hash);
+        assert_eq!(
+            rpc.calls(),
+            [
+                json!(["eth_chainId", null]),
+                json!(["eth_call", [{"to": arbsys, "data": "0x051038f2"}, "0x64"]]),
+                arbitrum_block_hash_call(99, json!("0x64")),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn can_modify_address() {
-        let Some(endpoint) = ENDPOINT else { return };
+        let rpc = MockRpc::rejecting();
+        let backend = rpc.backend(rpc.meta(), None).await;
+        let address = Address::with_last_byte(1);
+        let account = AccountInfo { nonce: 1000, balance: U256::from(2000), ..Default::default() };
 
-        let provider = get_http_provider(endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string());
-
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
-
-        // some rng contract from etherscan
-        let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
-
-        let new_acc = AccountInfo {
-            nonce: 1000u64,
-            balance: U256::from(2000),
-            code: None,
-            code_hash: KECCAK_EMPTY,
-            extension: Bytes::new(),
-        };
-        let expected_nonce = new_acc.nonce;
-        let expected_balance = new_acc.balance;
-        let mut account_data = AddressData::default();
-        account_data.insert(address, new_acc);
-
-        backend.insert_or_update_address(account_data);
-
-        let max_slots = 5;
-        let handle = std::thread::spawn(move || {
-            for i in 1..max_slots {
-                let idx = U256::from(i);
-                let result_address = backend.account(address).unwrap();
-                match result_address {
-                    Some(acc) => {
-                        assert_eq!(
-                            acc.nonce, expected_nonce,
-                            "The nonce was not changed in instance of index {idx}"
-                        );
-                        assert_eq!(
-                            acc.balance, expected_balance,
-                            "The balance was not changed in instance of index {idx}"
-                        );
-
-                        // comparing with db
-                        let db_address = {
-                            let accounts = db.accounts().read();
-                            accounts.get(&address).unwrap().clone()
-                        };
-
-                        assert_eq!(
-                            db_address.nonce, expected_nonce,
-                            "The nonce was not changed in instance of index {idx}"
-                        );
-                        assert_eq!(
-                            db_address.balance, expected_balance,
-                            "The balance was not changed in instance of index {idx}"
-                        );
-                    }
-                    None => panic!("Account not found"),
-                }
-            }
-        });
-        handle.join().unwrap();
+        backend.insert_or_update_address(AddressData::from_iter([(address, account.clone())]));
+        assert_eq!(backend.account(address).unwrap(), Some(account.clone()));
+        assert_eq!(backend.accounts()[&address], account);
+        assert!(rpc.calls().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn can_modify_storage() {
-        let Some(endpoint) = ENDPOINT else { return };
+        let rpc = MockRpc::rejecting();
+        let backend = rpc.backend(rpc.meta(), None).await;
+        let address = Address::with_last_byte(1);
+        let storage = StorageInfo::from_iter(
+            [(20, 10), (30, 15), (40, 20)]
+                .map(|(slot, value)| (U256::from(slot), U256::from(value))),
+        );
 
-        let provider = get_http_provider(endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string());
-
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
-
-        // some rng contract from etherscan
-        let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
-
-        let mut storage_data = StorageData::default();
-        let mut storage_info = StorageInfo::default();
-        storage_info.insert(U256::from(20), U256::from(10));
-        storage_info.insert(U256::from(30), U256::from(15));
-        storage_info.insert(U256::from(40), U256::from(20));
-
-        storage_data.insert(address, storage_info);
-
-        backend.insert_or_update_storage(storage_data.clone());
-
-        let max_slots = 5;
-        let handle = std::thread::spawn(move || {
-            for _ in 1..max_slots {
-                for (address, info) in &storage_data {
-                    for (index, value) in info {
-                        let result_storage = backend.do_get_storage(*address, *index, false);
-                        match result_storage {
-                            Ok(stg_db) => {
-                                assert_eq!(
-                                    stg_db, *value,
-                                    "Storage in slot number {index} in address {address} do not have the same value"
-                                );
-
-                                let db_result = {
-                                    let storage = db.storage().read();
-                                    let address_storage = storage.get(address).unwrap();
-                                    *address_storage.get(index).unwrap()
-                                };
-
-                                assert_eq!(
-                                    stg_db, db_result,
-                                    "Storage in slot number {index} in address {address} do not have the same value"
-                                )
-                            }
-
-                            Err(err) => {
-                                panic!("There was a database error: {err}")
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        handle.join().unwrap();
+        backend.insert_or_update_storage(StorageData::from_iter([(address, storage.clone())]));
+        for (&slot, &value) in &storage {
+            assert_eq!(backend.storage_at(address, slot).unwrap(), value);
+        }
+        assert_eq!(backend.storage()[&address], storage);
+        assert!(rpc.calls().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn can_modify_block_hashes() {
-        let Some(endpoint) = ENDPOINT else { return };
+        let rpc = MockRpc::rejecting();
+        let backend = rpc.backend(rpc.meta(), None).await;
+        let hashes =
+            BlockHashData::from_iter((1..=5).map(|n| (U256::from(n), B256::with_last_byte(n))));
 
-        let provider = get_http_provider(endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string());
-
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
-
-        // some rng contract from etherscan
-        // let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
-
-        let mut block_hash_data = BlockHashData::default();
-        block_hash_data.insert(U256::from(1), B256::from(U256::from(1)));
-        block_hash_data.insert(U256::from(2), B256::from(U256::from(2)));
-        block_hash_data.insert(U256::from(3), B256::from(U256::from(3)));
-        block_hash_data.insert(U256::from(4), B256::from(U256::from(4)));
-        block_hash_data.insert(U256::from(5), B256::from(U256::from(5)));
-
-        backend.insert_or_update_block_hashes(block_hash_data.clone());
-
-        let max_slots: u64 = 5;
-        let handle = std::thread::spawn(move || {
-            for i in 1..max_slots {
-                let key = U256::from(i);
-                let result_hash = backend.do_get_block_hash(i);
-                match result_hash {
-                    Ok(hash) => {
-                        assert_eq!(
-                            hash,
-                            *block_hash_data.get(&key).unwrap(),
-                            "The hash in block {key} did not match"
-                        );
-
-                        let db_result = {
-                            let hashes = db.block_hashes().read();
-                            *hashes.get(&key).unwrap()
-                        };
-
-                        assert_eq!(hash, db_result, "The hash in block {key} did not match");
-                    }
-                    Err(err) => panic!("Hash not found, error: {err}"),
-                }
-            }
-        });
-        handle.join().unwrap();
+        backend.insert_or_update_block_hashes(hashes.clone());
+        for n in 1..=5 {
+            assert_eq!(backend.block_hash(n).unwrap(), B256::with_last_byte(n as u8));
+        }
+        assert_eq!(backend.block_hashes(), hashes);
+        assert!(rpc.calls().is_empty());
     }
 
+    /// Overridden accounts and storage are flushed to the disk cache and loaded back.
     #[tokio::test(flavor = "multi_thread")]
     async fn can_modify_storage_with_cache() {
-        let Some(endpoint) = ENDPOINT else { return };
+        let rpc = MockRpc::rejecting();
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("cache.json");
+        let db = BlockchainDb::new(rpc.meta(), Some(cache_path.clone()));
+        let backend = SharedBackend::spawn_backend(rpc.provider(), db, None).await;
+        let address = Address::with_last_byte(1);
+        let code = Bytes::from_static(&[10, 20, 30, 40]);
+        let account =
+            AccountInfo { code_hash: keccak256(&code), code: Some(code), ..Default::default() };
+        let storage =
+            StorageInfo::from_iter((1..=6).map(|slot| (U256::from(slot), U256::from(slot * 10))));
 
-        let provider = get_http_provider(endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string());
+        backend.insert_or_update_storage(StorageData::from_iter([(address, storage.clone())]));
+        backend.insert_or_update_address(AddressData::from_iter([(address, account.clone())]));
+        for (&slot, &value) in &storage {
+            assert_eq!(backend.storage_at(address, slot).unwrap(), value);
+        }
+        backend.flush_cache();
 
-        // create a temporary file
-        fs::copy("test-data/storage.json", "test-data/storage-tmp.json").unwrap();
-
-        let cache_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/storage-tmp.json");
-
-        let db = BlockchainDb::new(meta.clone(), Some(cache_path));
-        let backend =
-            SharedBackend::spawn_backend(Arc::new(provider.clone()), db.clone(), None).await;
-
-        // some rng contract from etherscan
-        let address: Address = "63091244180ae240c87d1f528f5f269134cb07b3".parse().unwrap();
-
-        let mut storage_data = StorageData::default();
-        let mut storage_info = StorageInfo::default();
-        storage_info.insert(U256::from(1), U256::from(10));
-        storage_info.insert(U256::from(2), U256::from(15));
-        storage_info.insert(U256::from(3), U256::from(20));
-        storage_info.insert(U256::from(4), U256::from(20));
-        storage_info.insert(U256::from(5), U256::from(15));
-        storage_info.insert(U256::from(6), U256::from(10));
-
-        let mut address_data = backend.account(address).unwrap().unwrap();
-        address_data.code = None;
-
-        storage_data.insert(address, storage_info);
-
-        backend.insert_or_update_storage(storage_data.clone());
-
-        let mut new_acc = backend.account(address).unwrap().unwrap();
-        // nullify the code
-        new_acc.code = Some(Bytes::from_static(&[10, 20, 30, 40]));
-
-        let mut account_data = AddressData::default();
-        account_data.insert(address, new_acc);
-
-        backend.insert_or_update_address(account_data);
-
-        let backend_clone = backend.clone();
-
-        let max_slots = 5;
-        let handle = std::thread::spawn(move || {
-            for _ in 1..max_slots {
-                for (address, info) in &storage_data {
-                    for (index, value) in info {
-                        let result_storage = backend.do_get_storage(*address, *index, false);
-                        match result_storage {
-                            Ok(stg_db) => {
-                                assert_eq!(
-                                    stg_db, *value,
-                                    "Storage in slot number {index} in address {address} doesn't have the same value"
-                                );
-
-                                let db_result = {
-                                    let storage = db.storage().read();
-                                    let address_storage = storage.get(address).unwrap();
-                                    *address_storage.get(index).unwrap()
-                                };
-
-                                assert_eq!(
-                                    stg_db, db_result,
-                                    "Storage in slot number {index} in address {address} doesn't have the same value"
-                                );
-                            }
-
-                            Err(err) => {
-                                panic!("There was a database error: {err}")
-                            }
-                        }
-                    }
-                }
-            }
-
-            backend_clone.flush_cache();
-        });
-        handle.join().unwrap();
-
-        // read json and confirm the changes to the data
-
-        let cache_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/storage-tmp.json");
-
-        let json_db = BlockchainDb::new(meta, Some(cache_path));
-
-        let mut storage_data = StorageData::default();
-        let mut storage_info = StorageInfo::default();
-        storage_info.insert(U256::from(1), U256::from(10));
-        storage_info.insert(U256::from(2), U256::from(15));
-        storage_info.insert(U256::from(3), U256::from(20));
-        storage_info.insert(U256::from(4), U256::from(20));
-        storage_info.insert(U256::from(5), U256::from(15));
-        storage_info.insert(U256::from(6), U256::from(10));
-
-        storage_data.insert(address, storage_info);
-
-        // redo the checks with the data extracted from the json file
-        let max_slots = 5;
-        let handle = std::thread::spawn(move || {
-            for _ in 1..max_slots {
-                for (address, info) in &storage_data {
-                    for (index, value) in info {
-                        let result_storage = {
-                            let storage = json_db.storage().read();
-                            let address_storage = storage.get(address).unwrap().clone();
-                            *address_storage.get(index).unwrap()
-                        };
-
-                        assert_eq!(
-                            result_storage, *value,
-                            "Storage in slot number {index} in address {address} doesn't have the same value"
-                        );
-                    }
-                }
-            }
-        });
-
-        handle.join().unwrap();
-
-        // erase the temporary file
-        fs::remove_file("test-data/storage-tmp.json").unwrap();
+        let reloaded = BlockchainDb::new(rpc.meta(), Some(cache_path));
+        assert_eq!(reloaded.accounts().read()[&address], account);
+        assert_eq!(reloaded.storage().read()[&address], storage);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn shared_backend_any_request() {
-        let expected_response_bytes: Bytes = vec![0xff, 0xee].into();
-        let server = Server::http("127.0.0.1:0").expect("failed starting in-memory http server");
-        let endpoint = format!("http://{}", server.server_addr());
-
-        // Spin an in-memory server that responds to "foo_callCustomMethod" rpc call.
-        let expected_bytes_inner = expected_response_bytes.clone();
-        let server_handle = std::thread::spawn(move || {
-            #[derive(Debug, Deserialize)]
-            struct Request {
-                method: String,
-            }
-            let mut request = server.recv().unwrap();
-            let rpc_request: Request =
-                serde_json::from_reader(request.as_reader()).expect("failed parsing request");
-
-            match rpc_request.method.as_str() {
-                "foo_callCustomMethod" => request
-                    .respond(Response::from_string(format!(
-                        r#"{{"result": "{}"}}"#,
-                        alloy_primitives::hex::encode_prefixed(expected_bytes_inner),
-                    )))
-                    .unwrap(),
-                _ => request
-                    .respond(Response::from_string(r#"{"error": "invalid request"}"#))
-                    .unwrap(),
-            };
+        let rpc = MockRpc::new(|method, _| match method {
+            "foo_callCustomMethod" => Ok(json!("0xffee")),
+            _ => Err(unsupported(method)),
         });
+        let provider = rpc.provider();
+        let mut backend = rpc.backend(rpc.meta(), None).await;
 
-        let provider = get_http_provider(&endpoint);
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone());
-
-        let db = BlockchainDb::new(meta, None);
-        let provider_inner = provider.clone();
-        let mut backend = SharedBackend::spawn_backend(Arc::new(provider), db.clone(), None).await;
-
-        let actual_response_bytes = backend
+        let bytes = backend
             .do_any_request(async move {
-                let bytes: alloy_primitives::Bytes =
-                    provider_inner.raw_request("foo_callCustomMethod".into(), vec!["0001"]).await?;
-                Ok(bytes)
+                Ok(provider
+                    .raw_request::<_, Bytes>("foo_callCustomMethod".into(), ["0001"])
+                    .await?)
             })
-            .expect("failed performing any request");
-
-        assert_eq!(actual_response_bytes, expected_response_bytes);
-
-        server_handle.join().unwrap();
+            .unwrap();
+        assert_eq!(bytes, Bytes::from_static(&[0xff, 0xee]));
+        assert_eq!(rpc.calls(), [json!(["foo_callCustomMethod", ["0001"]])]);
     }
 
-    /// Serves `eth_createAccessList` with one slot for the target and one for `other`, and answers
-    /// account and storage reads with fixed values.
-    /// Serves `eth_createAccessList` with one slot for `target` and one for `other`, and answers
-    /// account and storage reads with fixed values. `unsupported` rejects the method, `reverted`
-    /// answers it with an empty list and an execution error, and `failing_slot` answers that slot
-    /// with an error inside batch requests only, holding every batch until the returned release
-    /// flag is set so a read can join it first.
-    fn access_list_server(
-        target: Address,
-        other: Address,
-        unsupported: bool,
-        reverted: bool,
-        failing_slot: Option<U256>,
-    ) -> (String, Arc<AtomicBool>, Arc<AtomicBool>, std::thread::JoinHandle<Vec<serde_json::Value>>)
-    {
-        let server = Server::http("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", server.server_addr());
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = Arc::clone(&stop);
-        let release = Arc::new(AtomicBool::new(failing_slot.is_none()));
-        let released = Arc::clone(&release);
-        let handle = std::thread::spawn(move || {
-            let mut requests = Vec::new();
-            let answer = |rpc: &serde_json::Value, in_batch: bool| {
-                let mut response = serde_json::json!({"jsonrpc": "2.0", "id": rpc["id"]});
-                match rpc["method"].as_str().unwrap() {
-                    "eth_getStorageAt"
-                        if in_batch
-                            && failing_slot.is_some_and(|slot| {
-                                rpc["params"][1] == serde_json::json!(slot)
-                            }) =>
-                    {
-                        response["error"] =
-                            serde_json::json!({"code": -32005, "message": "rate limited"});
-                    }
-                    "eth_createAccessList" if unsupported => {
-                        response["error"] = serde_json::json!({
-                            "code": -32601, "message": "the method eth_createAccessList does not exist/is not available",
-                        });
-                    }
-                    "eth_createAccessList" if reverted => {
-                        response["result"] = serde_json::json!({
-                            "accessList": [], "gasUsed": "0x5208", "error": "out of gas",
-                        });
-                    }
-                    "eth_createAccessList" => {
-                        response["result"] = serde_json::json!({
-                            "accessList": [
-                                {"address": target, "storageKeys": [B256::with_last_byte(1)]},
-                                {"address": other, "storageKeys": [B256::with_last_byte(2)]},
-                            ],
-                            "gasUsed": "0x5208",
-                        });
-                    }
-                    "eth_getAccountInfo" => {
-                        response["result"] =
-                            serde_json::json!({"balance": "0x2a", "nonce": "0x0", "code": "0x"});
-                    }
-                    "eth_getStorageAt" => response["result"] = serde_json::json!("0x2a"),
-                    method => panic!("unexpected method {method}"),
+    /// Answers account and storage reads with 42 and `eth_createAccessList` with `access_list`.
+    /// With `failing_slot`, storage reads inside batch requests wait until its flag is set, and
+    /// the read of that slot fails, like a rate-limited member of a prefetch batch.
+    fn access_list_rpc(
+        access_list: Result<Value, Value>,
+        failing_slot: Option<(U256, Arc<AtomicBool>)>,
+    ) -> MockRpc {
+        MockRpc::serve(
+            Box::new(move |method, params, in_batch| match method {
+                "eth_createAccessList" => access_list.clone(),
+                "eth_getAccountInfo" => {
+                    Ok(json!({"balance": "0x2a", "nonce": "0x0", "code": "0x"}))
                 }
-                response
-            };
-            while !stopped.load(Ordering::Relaxed) {
-                if let Some(mut request) = server.recv_timeout(Duration::from_millis(20)).unwrap() {
-                    let rpc: serde_json::Value =
-                        serde_json::from_reader(request.as_reader()).unwrap();
-                    // Prefetched slots arrive as one batch request.
-                    let response = match rpc.as_array() {
-                        Some(batch) => {
-                            while !released.load(Ordering::Relaxed) {
-                                std::thread::sleep(Duration::from_millis(5));
-                            }
-                            let responses =
-                                batch.iter().map(|rpc| answer(rpc, true)).collect::<Vec<_>>();
-                            requests.extend(batch.iter().cloned());
-                            serde_json::Value::Array(responses)
+                "eth_getStorageAt" => {
+                    if in_batch && let Some((slot, released)) = &failing_slot {
+                        wait_until("batch release", &|| released.load(Ordering::Relaxed));
+                        if params[1] == json!(slot) {
+                            return Err(json!({"code": -32005, "message": "rate limited"}));
                         }
-                        None => {
-                            let response = answer(&rpc, false);
-                            requests.push(rpc);
-                            response
-                        }
-                    };
-                    request.respond(Response::from_string(response.to_string())).unwrap();
+                    }
+                    Ok(json!("0x2a"))
                 }
-            }
-            requests
-        });
-        (endpoint, stop, release, handle)
+                _ => Err(unsupported(method)),
+            }),
+            false,
+        )
     }
 
-    /// A blocking backend on `endpoint` whose account reads use `eth_getAccountInfo`.
-    async fn access_list_backend(
-        endpoint: &str,
-        pin: Option<BlockId>,
-    ) -> (SharedBackend<AnyNetwork, BlockEnv>, BlockchainDb<BlockEnv>) {
-        let meta = BlockchainDbMeta::new(BlockEnv::default(), endpoint.to_string())
-            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
-        let db = BlockchainDb::new(meta, None);
-        let provider = Arc::new(get_http_provider(endpoint));
-        let backend = SharedBackend::spawn_backend(provider, db.clone(), pin)
-            .await
-            .with_blocking_mode(BlockingMode::Block);
-        (backend, db)
+    /// An access list with one slot of `target` and one of `other`.
+    fn listed(target: Address, other: Address) -> Result<Value, Value> {
+        Ok(json!({
+            "accessList": [
+                {"address": target, "storageKeys": [B256::with_last_byte(1)]},
+                {"address": other, "storageKeys": [B256::with_last_byte(2)]},
+            ],
+            "gasUsed": "0x5208",
+        }))
+    }
+
+    /// A blocking backend whose account reads use `eth_getAccountInfo`.
+    async fn access_list_backend(rpc: &MockRpc, pin: Option<BlockId>) -> Backend {
+        let meta = rpc.meta().with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        rpc.backend(meta, pin).await.with_blocking_mode(BlockingMode::Block)
     }
 
     fn access_list_call(target: Address, selector: u8) -> TransactionRequest {
@@ -3645,38 +2965,33 @@ mod tests {
             .input(Bytes::from(vec![selector, 0, 0, 0, 1]).into())
     }
 
-    fn method_counts(requests: &[serde_json::Value]) -> (usize, usize, usize) {
-        let count = |method: &str| requests.iter().filter(|r| r["method"] == method).count();
-        (count("eth_createAccessList"), count("eth_getStorageAt"), count("eth_getAccountInfo"))
-    }
-
-    /// Waits until the two accounts and two slots of the access list have been requested.
-    fn wait_for_prefetch(backend: &SharedBackend<AnyNetwork, BlockEnv>) {
+    /// Waits until `done` returns true, failing after 10 seconds.
+    fn wait_until(what: &str, done: &dyn Fn() -> bool) {
         let started = std::time::Instant::now();
-        while backend.cache_misses() < 4 {
-            assert!(started.elapsed() < Duration::from_secs(10), "prefetch did not start");
+        while !done() {
+            assert!(started.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(5));
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn access_list_prefetch_serves_reads_and_skips_cheap_calls() {
+    async fn access_list_prefetch_serves_reads_and_skips_repeated_calls() {
         let target = Address::with_last_byte(1);
         let other = Address::with_last_byte(2);
-        let (endpoint, stop, _, server) = access_list_server(target, other, false, false, None);
-        let (mut backend, db) = access_list_backend(&endpoint, Some(123.into())).await;
+        let rpc = access_list_rpc(listed(target, other), None);
+        let mut backend = access_list_backend(&rpc, Some(123.into())).await;
 
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
-        wait_for_prefetch(&backend);
+        // Waits until the two accounts and two slots of the access list have been requested.
+        wait_until("prefetch", &|| backend.cache_misses() >= 4);
         // Reads of the listed keys are served from the prefetch; the slot of `other` stays out
         // of the cache until it is read.
         assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
         assert_eq!(backend.account(other).unwrap().unwrap().balance, U256::from(42));
-        assert!(!db.storage().read().contains_key(&other));
+        assert!(!backend.storage().contains_key(&other));
         assert_eq!(backend.storage_at(other, U256::from(2)).unwrap(), U256::from(42));
 
-        // The same target and selector is simulated again, since its list held four keys and the
-        // cache missed since, but a simulation in flight is not repeated unless the target's
+        // The same target and selector is not simulated again at this block, unless the target's
         // override code differs.
         let overrides = StateOverride::default();
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
@@ -3708,36 +3023,38 @@ mod tests {
             assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
         }
         assert!(!backend.wants_access_list(&unloaded, B256::ZERO, false));
-        // After a long warm run, a few new slots turn simulations back on, cheap calls included.
+        // After a long warm run, also of calls simulated at this block, a few new slots turn
+        // simulations back on for calls not simulated at this block.
         for _ in 0..WARM_WINDOW {
-            assert!(!backend.wants_access_list(&access_list_call(target, 0xcc), B256::ZERO, false));
+            assert!(!backend.wants_access_list(&access_list_call(target, 0xaa), B256::ZERO, false));
             assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
         }
         for slot in 8..12 {
             assert_eq!(backend.storage_at(target, U256::from(slot)).unwrap(), U256::from(42));
         }
-        assert!(backend.wants_access_list(&access_list_call(target, 0xaa), B256::ZERO, false));
+        assert!(backend.wants_access_list(&access_list_call(target, 0xcc), B256::ZERO, false));
+        assert!(!backend.wants_access_list(&access_list_call(target, 0xaa), B256::ZERO, false));
 
-        stop.store(true, Ordering::Relaxed);
-        let requests = server.join().unwrap();
-        assert_eq!(method_counts(&requests), (4, 7, 2));
-        let simulation = requests.iter().find(|r| r["method"] == "eth_createAccessList").unwrap();
         assert_eq!(
-            simulation["params"],
-            serde_json::json!([access_list_call(target, 0xaa), "0x7b"])
+            rpc.counts(),
+            json!({"eth_createAccessList": 3, "eth_getStorageAt": 7, "eth_getAccountInfo": 2})
         );
+        let simulation = rpc.calls().into_iter().find(|call| call[0] == "eth_createAccessList");
+        assert_eq!(simulation.unwrap()[1], json!([access_list_call(target, 0xaa), "0x7b"]));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn access_list_prefetch_retries_failed_batch_members() {
         let target = Address::with_last_byte(1);
         let other = Address::with_last_byte(2);
-        let (endpoint, stop, release, server) =
-            access_list_server(target, other, false, false, Some(U256::from(1)));
-        let (mut backend, _) = access_list_backend(&endpoint, None).await;
+        let release = Arc::new(AtomicBool::new(false));
+        let rpc =
+            access_list_rpc(listed(target, other), Some((U256::from(1), Arc::clone(&release))));
+        let mut backend = access_list_backend(&rpc, None).await;
 
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
-        wait_for_prefetch(&backend);
+        // Waits until the two accounts and two slots of the access list have been requested.
+        wait_until("prefetch", &|| backend.cache_misses() >= 4);
         // The read joins the held batch. Its member fails, so a read of its own answers it; the
         // other slot of the batch is served from the prefetch.
         let reader = backend.clone();
@@ -3751,107 +3068,134 @@ mod tests {
         backend.do_any_request(async { Ok(()) }).unwrap();
         assert_eq!(backend.storage_at(target, U256::from(3)).unwrap(), U256::from(42));
 
-        stop.store(true, Ordering::Relaxed);
-        let (simulations, reads, _) = method_counts(&server.join().unwrap());
-        assert_eq!((simulations, reads), (1, 4));
+        assert_eq!(
+            rpc.counts(),
+            json!({"eth_createAccessList": 1, "eth_getStorageAt": 4, "eth_getAccountInfo": 2})
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn access_list_prefetch_repeats_failed_simulations() {
+    async fn access_list_prefetch_simulates_each_call_once_per_block() {
         let target = Address::with_last_byte(1);
-        let (endpoint, stop, _, server) =
-            access_list_server(target, Address::with_last_byte(2), false, true, None);
-        let (mut backend, _) = access_list_backend(&endpoint, None).await;
+        let reverted = json!({"accessList": [], "gasUsed": "0x5208", "error": "out of gas"});
+        // Holds back override rejections while set.
+        let hold = Arc::new(AtomicBool::new(false));
+        let hold2 = Arc::clone(&hold);
+        // Rejects state overrides, like an endpoint without the three-argument form.
+        let rpc = MockRpc::concurrent(move |method, params| match method {
+            "eth_createAccessList" if params.as_array().unwrap().len() > 2 => {
+                while hold2.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(json!({"code": -32602, "message": "too many arguments"}))
+            }
+            "eth_createAccessList" => Ok(reverted.clone()),
+            "eth_getStorageAt" => Ok(json!("0x2a")),
+            _ => Err(unsupported(method)),
+        });
+        let mut backend = access_list_backend(&rpc, None).await;
 
-        // An empty list of a reverted simulation does not mark the call as cheap, so a later
-        // call with other gas or arguments is simulated again.
+        // A later call with other arguments is not simulated again, whatever the first
+        // simulation returned.
         for slot in 1..=2 {
             backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
             backend.do_any_request(async { Ok(()) }).unwrap();
             assert_eq!(backend.storage_at(target, U256::from(slot)).unwrap(), U256::from(42));
         }
+        wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 1);
+        assert_eq!(rpc.counts(), json!({"eth_createAccessList": 1, "eth_getStorageAt": 2}));
 
-        stop.store(true, Ordering::Relaxed);
-        assert_eq!(method_counts(&server.join().unwrap()).0, 2);
+        // A new pinned block can reach other state, so the call is simulated again.
+        backend.set_pinned_block(BlockId::number(7)).unwrap();
+        backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
+        wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 2);
+
+        // A call whose overrides the endpoint rejected was not simulated, so it is simulated
+        // without them.
+        let call = access_list_call(target, 0xbb);
+        backend.prefetch_access_list(call.clone(), Some(StateOverride::default()), B256::ZERO);
+        wait_until("request", &|| rpc.counts()["eth_createAccessList"] == 3);
+        wait_until("rejection", &|| backend.wants_access_list(&call, B256::ZERO, false));
+        assert!(!backend.wants_access_list(&call, B256::ZERO, true));
+        backend.prefetch_access_list(call, None, B256::ZERO);
+        wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 4);
+
+        // A rejection from an old pin keeps the new block's simulation of the same call.
+        hold.store(true, Ordering::Relaxed);
+        let backend = access_list_backend(&rpc, None).await;
+        let call = access_list_call(target, 0xcc);
+        backend.prefetch_access_list(call.clone(), Some(StateOverride::default()), B256::ZERO);
+        wait_until("request", &|| rpc.counts()["eth_createAccessList"] == 5);
+        backend.set_pinned_block(BlockId::number(8)).unwrap();
+        backend.prefetch_access_list(call.clone(), None, B256::ZERO);
+        wait_until("simulation", &|| rpc.counts()["eth_createAccessList"] == 6);
+        hold.store(false, Ordering::Relaxed);
+        let other = access_list_call(target, 0xdd);
+        wait_until("rejection", &|| !backend.wants_access_list(&other, B256::ZERO, true));
+        assert!(!backend.wants_access_list(&call, B256::ZERO, false));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn access_list_prefetch_stops_on_unsupported_method() {
         let target = Address::with_last_byte(1);
-        let (endpoint, stop, _, server) =
-            access_list_server(target, Address::with_last_byte(2), true, false, None);
-        let (mut backend, _) = access_list_backend(&endpoint, None).await;
+        let rpc = access_list_rpc(Err(unsupported("eth_createAccessList")), None);
+        let mut backend = access_list_backend(&rpc, None).await;
 
         backend.prefetch_access_list(access_list_call(target, 0xaa), None, B256::ZERO);
         // Waits for the rejection, which arrives after the simulation request.
-        let started = std::time::Instant::now();
-        while backend.wants_access_list(&access_list_call(target, 0xbb), B256::ZERO, false) {
-            assert!(started.elapsed() < Duration::from_secs(10), "simulation was not rejected");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("rejection", &|| {
+            !backend.wants_access_list(&access_list_call(target, 0xbb), B256::ZERO, false)
+        });
         assert_eq!(backend.storage_at(target, U256::from(1)).unwrap(), U256::from(42));
         backend.prefetch_access_list(access_list_call(target, 0xbb), None, B256::ZERO);
         backend.do_any_request(async { Ok(()) }).unwrap();
         assert_eq!(backend.storage_at(target, U256::from(2)).unwrap(), U256::from(42));
 
-        stop.store(true, Ordering::Relaxed);
-        let (simulations, reads, _) = method_counts(&server.join().unwrap());
-        assert_eq!((simulations, reads), (1, 2));
+        assert_eq!(rpc.counts(), json!({"eth_createAccessList": 1, "eth_getStorageAt": 2}));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rpc_accounts_preserve_empty_and_delegated_code() {
-        let server = Server::http("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", server.server_addr());
-        let hash = B256::with_last_byte(7);
-        let server_handle = std::thread::spawn(move || {
-            for (address, code) in [
-                (Address::with_last_byte(1), "0x"),
-                (Address::with_last_byte(2), "0xef01000000000000000000000000000000000000000042"),
-            ] {
-                let mut request = server.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
-                let rpc: serde_json::Value = serde_json::from_reader(request.as_reader()).unwrap();
-                assert_eq!(rpc["method"], "eth_getAccountInfo");
-                assert_eq!(rpc["params"], serde_json::json!([address, {"blockHash": hash}]));
-                request
-                    .respond(Response::from_string(
-                        serde_json::json!({
-                            "jsonrpc": "2.0", "id": rpc["id"],
-                            "result": {"balance": "0x0", "nonce": "0x0", "code": code}
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap();
+        let (empty, delegated) = (Address::with_last_byte(1), Address::with_last_byte(2));
+        let delegation =
+            Bytes::from_static(&hex!("ef01000000000000000000000000000000000000000042"));
+        let rpc = MockRpc::new({
+            let delegation = delegation.clone();
+            move |method, params| match method {
+                "eth_getAccountInfo" => {
+                    let code = if params[0] == json!(delegated) {
+                        delegation.clone()
+                    } else {
+                        Bytes::new()
+                    };
+                    Ok(json!({"balance": "0x0", "nonce": "0x0", "code": code}))
+                }
+                _ => Err(unsupported(method)),
             }
         });
-        let provider = get_http_provider(&endpoint);
-        let db = BlockchainDb::new(
-            exact_meta(&endpoint, hash)
-                .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo),
-            None,
-        );
-        let (backend, handler) =
-            SharedBackend::new_with_anchor(provider, db, ForkBlock::new(10, hash)).unwrap();
-        tokio::spawn(handler);
-        for (address, expected) in [
-            (Address::with_last_byte(1), Bytes::new()),
-            (
-                Address::with_last_byte(2),
-                Bytes::from_static(&hex!("ef01000000000000000000000000000000000000000042")),
-            ),
-        ] {
+        let meta = rpc
+            .exact_meta(ANCHOR)
+            .with_account_fetch_policy(AccountFetchPolicy::RequireAccountInfo);
+        let backend = rpc.anchored(meta, ForkBlock::new(10, ANCHOR));
+
+        for (address, code) in [(empty, Bytes::new()), (delegated, delegation)] {
             // RPCs cannot distinguish absent from empty accounts: retain Some(empty).
             let account = backend.account(address).unwrap().unwrap();
             assert_eq!(account.balance, U256::ZERO);
             assert_eq!(account.nonce, 0);
-            assert_eq!(account.code_hash, keccak256(&expected));
-            assert_eq!(account.code.as_ref().unwrap(), &expected);
+            assert_eq!(account.code_hash, keccak256(&code));
+            assert_eq!(account.code.as_ref().unwrap(), &code);
             let cached = backend.clone().account(address).unwrap().unwrap();
-            assert_eq!(cached.code.unwrap(), expected);
+            assert_eq!(cached.code.unwrap(), code);
         }
-        assert_eq!(backend.cache_misses(), 2);
-        assert_eq!(backend.cache_hits(), 2);
-        server_handle.join().unwrap();
+        assert_eq!((backend.cache_hits(), backend.cache_misses()), (2, 2));
+        assert_eq!(
+            rpc.calls(),
+            [
+                json!(["eth_getAccountInfo", [empty, {"blockHash": ANCHOR}]]),
+                json!(["eth_getAccountInfo", [delegated, {"blockHash": ANCHOR}]]),
+            ]
+        );
     }
 
     /// A storage response that the handler received for the old state before an eviction does
@@ -3859,28 +3203,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn evict_drops_a_response_received_before_it() {
         let target = Address::with_last_byte(1);
-        let server = Server::http("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", server.server_addr());
         let value = Arc::new(AtomicU64::new(1));
-        let answered = Arc::new(AtomicU64::new(0));
-        let (server_value, server_answered) = (Arc::clone(&value), Arc::clone(&answered));
-        std::thread::spawn(move || {
-            for mut request in server.incoming_requests() {
-                let rpc: serde_json::Value = serde_json::from_reader(request.as_reader()).unwrap();
-                assert_eq!(rpc["method"], "eth_getStorageAt");
-                let result = U256::from(server_value.load(Ordering::Relaxed));
-                let response =
-                    serde_json::json!({"jsonrpc": "2.0", "id": rpc["id"], "result": result});
-                // Counted first, so the handler is not polled again once the old value is sent.
-                server_answered.fetch_add(1, Ordering::Relaxed);
-                request.respond(Response::from_string(response.to_string())).unwrap();
+        let rpc = MockRpc::new({
+            let value = Arc::clone(&value);
+            move |method, _| match method {
+                "eth_getStorageAt" => Ok(json!(U256::from(value.load(Ordering::Relaxed)))),
+                _ => Err(unsupported(method)),
             }
         });
-        let db =
-            BlockchainDb::new(BlockchainDbMeta::new(BlockEnv::default(), endpoint.clone()), None);
-        let provider = Arc::new(get_http_provider(&endpoint));
-        let (backend, mut handler) =
-            SharedBackend::<AnyNetwork, BlockEnv>::new(provider, db, Some(123.into()));
+        let db = BlockchainDb::new(rpc.meta(), None);
+        let (backend, mut handler) = Backend::new(rpc.provider(), db, Some(123.into()));
         // Polls the handler by hand, so a received response waits until the next poll.
         let mut poll_until = async |done: &dyn Fn() -> bool| {
             let started = std::time::Instant::now();
@@ -3894,7 +3226,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         };
-        let read = |backend: &SharedBackend<AnyNetwork, BlockEnv>| {
+        let read = |backend: &Backend| {
             let (sender, rx) = oneshot_channel();
             backend
                 .backend
@@ -3904,7 +3236,9 @@ mod tests {
         };
 
         let old = read(&backend);
-        poll_until(&|| answered.load(Ordering::Relaxed) == 1).await;
+        // The server records a call before answering it, so the handler is not polled again once
+        // the old value is sent.
+        poll_until(&|| rpc.calls.lock().len() == 1).await;
         // Let the old value reach the transport before the endpoint changes.
         tokio::time::sleep(Duration::from_millis(100)).await;
         value.store(2, Ordering::Relaxed);
