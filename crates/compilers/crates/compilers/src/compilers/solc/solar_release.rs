@@ -1,6 +1,6 @@
 //! Installs Solar releases into `~/.foundry/solar`.
 
-use super::Solc;
+use super::{Solc, solar_releases::SOLAR_RELEASES};
 use alloy_primitives::hex;
 use foundry_compilers_core::{
     error::{Result, SolcError},
@@ -10,8 +10,8 @@ use semver::Version;
 use sha2::Digest;
 use std::{
     fs,
-    io::{Read, Write},
-    path::PathBuf,
+    io::{ErrorKind, Read, Write},
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -41,6 +41,14 @@ const RELEASE_TARGET: Option<&str> = if cfg!(all(target_os = "macos", target_arc
 /// The archive extension of Solar releases on this platform.
 const ARCHIVE_EXTENSION: &str = if cfg!(windows) { "zip" } else { "tar.gz" };
 
+/// A Solar release and the SHA-256 checksums of its archives.
+pub(super) struct SolarRelease {
+    /// The release version.
+    pub(super) version: Version,
+    /// The archive file names and their SHA-256 checksums.
+    pub(super) archives: &'static [(&'static str, [u8; 32])],
+}
+
 impl Solc {
     /// Returns the Solar `version` installed in `~/.foundry/solar`, if any.
     ///
@@ -55,8 +63,10 @@ impl Solc {
 
     /// Downloads the Solar `version` release from GitHub into `~/.foundry/solar`.
     ///
-    /// The archive is checked against the release's SHA-256 checksum file, which detects corrupted
-    /// downloads, and the binary must report the requested version.
+    /// If the release is in [`Self::released_solar_versions`], the archive must match the checksum
+    /// pinned in this crate. Otherwise, the archive is checked against the release's SHA-256
+    /// checksum file, which only detects corrupted downloads. The binary must report the requested
+    /// version.
     #[instrument(name = "Solc::blocking_install_solar", skip_all)]
     pub fn blocking_install_solar(version: &Version) -> Result<Self> {
         crate::report::solar_installation_start(version);
@@ -66,6 +76,43 @@ impl Solc {
             Err(err) => crate::report::solar_installation_error(version, &err.to_string()),
         }
         result
+    }
+
+    /// Returns the Solar releases known to this crate, oldest first.
+    ///
+    /// These releases have pinned checksums. Other releases can still be installed.
+    pub fn released_solar_versions() -> Vec<Version> {
+        SOLAR_RELEASES.iter().map(|release| release.version.clone()).collect()
+    }
+
+    /// Returns the Solar versions installed in `~/.foundry/solar`, oldest first.
+    pub fn installed_solar_versions() -> Vec<Version> {
+        let Ok(dir) = solar_home() else { return Vec::new() };
+        let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+        let mut versions = entries
+            .filter_map(|entry| Version::parse(entry.ok()?.file_name().to_str()?).ok())
+            .filter(|version| solar_binary(version).is_ok_and(|binary| binary.is_file()))
+            .collect::<Vec<_>>();
+        versions.sort();
+        versions
+    }
+
+    /// Removes the Solar `version` binary from `~/.foundry/solar`.
+    ///
+    /// Returns `false` if the version is not installed. The lock file stays, as in
+    /// [`Self::blocking_install_solar`].
+    pub fn remove_solar(version: &Version) -> Result<bool> {
+        let dir = solar_dir(version)?;
+        if !dir.is_dir() {
+            return Ok(false);
+        }
+        let _lock = lock_solar_dir(&dir)?;
+        let binary = solar_binary(version)?;
+        match fs::remove_file(&binary) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(SolcError::io(err, &binary)),
+        }
     }
 }
 
@@ -79,33 +126,28 @@ fn install_solar(version: &Version) -> Result<Solc> {
     let dir = solar_dir(version)?;
     fs::create_dir_all(&dir).map_err(|err| SolcError::io(err, &dir))?;
 
-    // Serializes parallel installs of the same version. The lock file is never removed, as in svm.
-    let lock_path = dir.join(".lock");
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|err| SolcError::io(err, &lock_path))?;
-    lock.lock().map_err(|err| SolcError::io(err, &lock_path))?;
+    let _lock = lock_solar_dir(&dir)?;
     if let Some(solar) = Solc::find_installed_solar(version) {
         return Ok(solar);
     }
 
-    let url = format!(
-        "https://github.com/paradigmxyz/solar/releases/download/v{version}/solar-{target}.{ARCHIVE_EXTENSION}"
-    );
-    let (archive, checksum) = RuntimeOrHandle::new().block_on(async {
+    let file_name = format!("solar-{target}.{ARCHIVE_EXTENSION}");
+    let url =
+        format!("https://github.com/paradigmxyz/solar/releases/download/v{version}/{file_name}");
+    let pinned = pinned_checksum(version, &file_name);
+    let (archive, expected) = RuntimeOrHandle::new().block_on(async {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|err| SolcError::msg(format!("failed to create HTTP client: {err}")))?;
-        Ok::<_, SolcError>((
-            download(&client, &url).await?,
-            download(&client, &format!("{url}.sha256")).await?,
-        ))
+        let archive = download(&client, &url).await?;
+        let expected = match pinned {
+            Some(checksum) => checksum.to_vec(),
+            None => parse_checksum(&download(&client, &format!("{url}.sha256")).await?, &url)?,
+        };
+        Ok::<_, SolcError>((archive, expected))
     })?;
-    verify_checksum(&archive, &checksum, &url)?;
+    verify_checksum(&archive, &expected, &url)?;
     let binary = if cfg!(windows) { extract_zip(&archive)? } else { extract_tar_gz(&archive)? };
 
     // Checks the binary under a fresh path before publishing it, since versions are cached by path.
@@ -136,19 +178,45 @@ fn install_solar(version: &Version) -> Result<Solc> {
     Ok(Solc::new_with_version(path, found.version))
 }
 
-/// Returns the directory of the Solar `version` installation: `~/.foundry/solar/<version>`.
+/// Returns the directory of Solar installations: `~/.foundry/solar`.
 ///
 /// This stays outside svm's data directory, since svm-rs 0.5.26 and older fail to list installed
 /// solc versions when it contains an entry that is not a version.
-fn solar_dir(version: &Version) -> Result<PathBuf> {
+fn solar_home() -> Result<PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| SolcError::msg("could not detect the user home directory"))?;
-    Ok(home.join(".foundry").join("solar").join(version.to_string()))
+    Ok(home.join(".foundry").join("solar"))
+}
+
+/// Returns the directory of the Solar `version` installation: `~/.foundry/solar/<version>`.
+fn solar_dir(version: &Version) -> Result<PathBuf> {
+    Ok(solar_home()?.join(version.to_string()))
 }
 
 /// Returns the path of the installed Solar `version` binary.
 fn solar_binary(version: &Version) -> Result<PathBuf> {
     Ok(solar_dir(version)?.join(format!("solar{}", std::env::consts::EXE_SUFFIX)))
+}
+
+/// Locks the Solar installation `dir`, which serializes installs and removals of one version.
+///
+/// The lock file is never removed, as in svm.
+fn lock_solar_dir(dir: &Path) -> Result<fs::File> {
+    let lock_path = dir.join(".lock");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|err| SolcError::io(err, &lock_path))?;
+    lock.lock().map_err(|err| SolcError::io(err, &lock_path))?;
+    Ok(lock)
+}
+
+/// Returns the checksum pinned in this crate for the archive `file_name` of the Solar `version`.
+fn pinned_checksum(version: &Version, file_name: &str) -> Option<&'static [u8; 32]> {
+    let release = SOLAR_RELEASES.iter().find(|release| release.version == *version)?;
+    release.archives.iter().find(|(name, _)| *name == file_name).map(|(_, checksum)| checksum)
 }
 
 async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
@@ -165,13 +233,17 @@ async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     Ok(bytes.into())
 }
 
-/// Checks `archive` against a `<sha256>  <file>` checksum file.
-fn verify_checksum(archive: &[u8], checksum: &[u8], url: &str) -> Result<()> {
-    let expected = std::str::from_utf8(checksum)
+/// Returns the checksum of a `<sha256>  <file>` checksum file.
+fn parse_checksum(checksum: &[u8], url: &str) -> Result<Vec<u8>> {
+    std::str::from_utf8(checksum)
         .ok()
         .and_then(|checksum| checksum.split_whitespace().next())
         .and_then(|checksum| hex::decode(checksum).ok())
-        .ok_or_else(|| SolcError::msg(format!("invalid checksum file for {url}")))?;
+        .ok_or_else(|| SolcError::msg(format!("invalid checksum file for {url}")))
+}
+
+/// Checks `archive` against the `expected` SHA-256 checksum.
+fn verify_checksum(archive: &[u8], expected: &[u8], url: &str) -> Result<()> {
     let detected = sha2::Sha256::digest(archive);
     if detected[..] != expected[..] {
         return Err(SolcError::msg(format!(
@@ -229,9 +301,26 @@ mod tests {
     fn rejects_checksum_mismatch() {
         let archive = b"archive";
         let checksum = format!("{}  solar.tar.gz\n", hex::encode(sha2::Sha256::digest(archive)));
-        verify_checksum(archive, checksum.as_bytes(), "url").unwrap();
-        verify_checksum(b"tampered", checksum.as_bytes(), "url").unwrap_err();
-        verify_checksum(archive, b"not hex", "url").unwrap_err();
+        let expected = parse_checksum(checksum.as_bytes(), "url").unwrap();
+        verify_checksum(archive, &expected, "url").unwrap();
+        verify_checksum(b"tampered", &expected, "url").unwrap_err();
+        parse_checksum(b"not hex", "url").unwrap_err();
+    }
+
+    #[test]
+    fn pins_supported_release_checksums() {
+        assert!(SOLAR_RELEASES.is_sorted_by(|a, b| a.version < b.version));
+        assert!(SOLAR_RELEASES.first().unwrap().version >= Version::new(0, 2, 0));
+        // Every release must pin the archive that this platform downloads.
+        if let Some(target) = RELEASE_TARGET {
+            let file_name = format!("solar-{target}.{ARCHIVE_EXTENSION}");
+            for release in SOLAR_RELEASES {
+                assert!(pinned_checksum(&release.version, &file_name).is_some());
+            }
+        }
+        assert!(
+            pinned_checksum(&Version::new(0, 1, 8), "solar-x86_64-apple-darwin.tar.gz").is_none()
+        );
     }
 
     #[test]
@@ -281,5 +370,7 @@ mod tests {
         let solar = Solc::blocking_install_solar(&version).unwrap();
         assert_eq!(solar.solar_version(), Some(version.clone()));
         assert_eq!(Solc::find_installed_solar(&version).unwrap().solc, solar.solc);
+        assert!(Solc::installed_solar_versions().contains(&version));
+        assert!(!Solc::remove_solar(&Version::new(0, 0, 1)).unwrap());
     }
 }
