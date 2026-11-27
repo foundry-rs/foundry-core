@@ -35,6 +35,8 @@ pub use compiler::{SOLC_EXTENSIONS, Solc};
 
 #[cfg(feature = "svm-solc")]
 mod solar_release;
+#[cfg(feature = "svm-solc")]
+mod solar_releases;
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "svm-solc", derive(Default))]
@@ -536,6 +538,7 @@ impl CompilerSettings for SolcSettings {
             && *debug == other.settings.debug
             && *libraries == other.settings.libraries
             && output_selection.is_subset_of(&other.settings.output_selection)
+            && self.cli_settings.extra_args == other.cli_settings.extra_args
     }
 
     fn with_remappings(mut self, remappings: &[Remapping]) -> Self {
@@ -785,8 +788,8 @@ mod tests {
         AggregatedCompilerOutput,
         buildinfo::RawBuildInfo,
         compilers::{
-            CompilerInput,
-            solc::{SolcCompiler, SolcSettings, SolcVersionedInput},
+            CompilerInput, CompilerSettings,
+            solc::{CliSettings, SolcCompiler, SolcSettings, SolcVersionedInput},
         },
     };
 
@@ -970,5 +973,21 @@ mod tests {
             input.settings_summary().as_deref(),
             Some("optimizer=true, optimizer_runs=777, via_ir=false, evm_version=istanbul")
         );
+    }
+
+    #[test]
+    fn cache_is_invalidated_by_extra_args() {
+        let base = SolcSettings::default();
+        let changed = SolcSettings {
+            cli_settings: CliSettings {
+                extra_args: vec!["--experimental".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(base.can_use_cached(&base.clone()));
+        assert!(!base.can_use_cached(&changed));
+        assert!(!changed.can_use_cached(&base));
     }
 }

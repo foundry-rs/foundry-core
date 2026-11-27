@@ -74,6 +74,10 @@ pub enum SolcError {
     #[error("no artifact found for `{}:{}`", .0.display(), .1)]
     ArtifactNotFound(PathBuf, String),
 
+    /// Compilation is disabled, but these sources are not cached.
+    #[error("compilation is disabled, but {} sources need compiling", .0.len())]
+    StaleSources(Vec<PathBuf>),
+
     #[error(transparent)]
     Fmt(#[from] std::fmt::Error),
 

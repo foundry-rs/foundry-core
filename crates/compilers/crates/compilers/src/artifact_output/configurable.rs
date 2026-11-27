@@ -105,6 +105,7 @@ impl ConfigurableArtifacts {
             ir_optimized_ast,
             ewasm,
             function_debug_data,
+            deployed_function_debug_data,
             generated_sources,
             source_map,
             opcodes,
@@ -143,6 +144,9 @@ impl ConfigurableArtifacts {
         }
         if function_debug_data {
             selection.push(BytecodeOutputSelection::FunctionDebugData.into());
+        }
+        if deployed_function_debug_data {
+            selection.push(DeployedBytecodeOutputSelection::FunctionDebugData.into());
         }
         if method_identifiers {
             selection.push(EvmOutputSelection::MethodIdentifiers.into());
@@ -220,6 +224,7 @@ impl ArtifactOutput for ConfigurableArtifacts {
         let mut artifact_deployed_bytecode = None;
         let mut artifact_gas_estimates = None;
         let mut artifact_function_debug_data = None;
+        let mut artifact_deployed_function_debug_data = None;
         let mut artifact_method_identifiers = None;
         let mut artifact_assembly = None;
         let mut artifact_legacy_assembly = None;
@@ -277,7 +282,7 @@ impl ArtifactOutput for ConfigurableArtifacts {
             let Evm {
                 assembly,
                 mut bytecode,
-                deployed_bytecode,
+                mut deployed_bytecode,
                 method_identifiers,
                 gas_estimates,
                 legacy_assembly,
@@ -286,6 +291,12 @@ impl ArtifactOutput for ConfigurableArtifacts {
             if self.additional_values.function_debug_data {
                 artifact_function_debug_data =
                     bytecode.as_mut().map(|code| std::mem::take(&mut code.function_debug_data));
+            }
+            if self.additional_values.deployed_function_debug_data {
+                artifact_deployed_function_debug_data = deployed_bytecode
+                    .as_mut()
+                    .and_then(|code| code.bytecode.as_mut())
+                    .map(|code| std::mem::take(&mut code.function_debug_data));
             }
             if self.additional_values.generated_sources {
                 generated_sources =
@@ -320,6 +331,7 @@ impl ArtifactOutput for ConfigurableArtifacts {
             legacy_assembly: artifact_legacy_assembly,
             opcodes,
             function_debug_data: artifact_function_debug_data,
+            deployed_function_debug_data: artifact_deployed_function_debug_data,
             method_identifiers: artifact_method_identifiers,
             gas_estimates: artifact_gas_estimates,
             raw_metadata: artifact_raw_metadata,
@@ -397,6 +409,23 @@ impl ArtifactOutput for ConfigurableArtifacts {
             // We can't check if generated sources are missing or just empty.
             return Ok(true);
         }
+        // The compiler settings do not change when the output selection already holds the table,
+        // so a cached artifact may predate the flag. A file without code has no function table.
+        let has_code = |code: Option<&CompactBytecode>| {
+            code.is_some_and(|code| code.object.is_unlinked() || code.object.bytes_len() > 0)
+        };
+        if self.additional_values.function_debug_data
+            && artifact.function_debug_data.is_none()
+            && has_code(artifact.bytecode.as_ref())
+        {
+            return Ok(true);
+        }
+        if self.additional_values.deployed_function_debug_data
+            && artifact.deployed_function_debug_data.is_none()
+            && has_code(artifact.deployed_bytecode.as_ref().and_then(|code| code.bytecode.as_ref()))
+        {
+            return Ok(true);
+        }
         Ok(false)
     }
 
@@ -459,6 +488,7 @@ pub struct ExtraOutputValues {
     pub ir_optimized_ast: bool,
     pub ewasm: bool,
     pub function_debug_data: bool,
+    pub deployed_function_debug_data: bool,
     pub generated_sources: bool,
     pub source_map: bool,
     pub opcodes: bool,
@@ -494,6 +524,7 @@ impl ExtraOutputValues {
             ir_optimized_ast: true,
             ewasm: true,
             function_debug_data: true,
+            deployed_function_debug_data: true,
             generated_sources: true,
             source_map: true,
             opcodes: true,
@@ -550,6 +581,11 @@ impl ExtraOutputValues {
                     }
                     EvmOutputSelection::ByteCode(BytecodeOutputSelection::FunctionDebugData) => {
                         config.function_debug_data = true;
+                    }
+                    EvmOutputSelection::DeployedByteCode(
+                        DeployedBytecodeOutputSelection::FunctionDebugData,
+                    ) => {
+                        config.deployed_function_debug_data = true;
                     }
                     EvmOutputSelection::ByteCode(BytecodeOutputSelection::Opcodes) => {
                         config.opcodes = true;
@@ -845,5 +881,67 @@ impl ExtraOutputFiles {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::Bytes;
+    use semver::Version;
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    fn artifact_file(
+        object: BytecodeObject,
+        function_debug_data: bool,
+    ) -> ArtifactFile<ConfigurableContractArtifact> {
+        let code = || CompactBytecode {
+            object: object.clone(),
+            source_map: None,
+            link_references: Default::default(),
+        };
+        let table = function_debug_data.then(BTreeMap::new);
+        ArtifactFile {
+            artifact: ConfigurableContractArtifact {
+                bytecode: Some(code()),
+                deployed_bytecode: Some(CompactDeployedBytecode {
+                    bytecode: Some(code()),
+                    immutable_references: Default::default(),
+                }),
+                function_debug_data: table.clone(),
+                deployed_function_debug_data: table,
+                ..Default::default()
+            },
+            file: PathBuf::new(),
+            version: Version::new(0, 8, 10),
+            build_id: String::new(),
+            profile: String::new(),
+        }
+    }
+
+    #[test]
+    fn function_debug_data_flags_dirty_artifacts_without_the_tables() {
+        let handler = |function_debug_data, deployed_function_debug_data| ConfigurableArtifacts {
+            additional_values: ExtraOutputValues {
+                function_debug_data,
+                deployed_function_debug_data,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let bytecode = |bytes: &[u8]| BytecodeObject::Bytecode(Bytes::copy_from_slice(bytes));
+        let without = artifact_file(bytecode(&[0x60]), false);
+        let with = artifact_file(bytecode(&[0x60]), true);
+        let no_code = artifact_file(bytecode(&[]), false);
+        let unlinked = artifact_file(BytecodeObject::Unlinked("__$a$__".into()), false);
+
+        assert!(!handler(false, false).is_dirty(&without).unwrap());
+        assert!(handler(true, false).is_dirty(&without).unwrap());
+        assert!(handler(false, true).is_dirty(&without).unwrap());
+        assert!(!handler(true, true).is_dirty(&with).unwrap());
+        // A contract that links a library has code too.
+        assert!(handler(true, true).is_dirty(&unlinked).unwrap());
+        // Files without code, such as interfaces and files without contracts, have no tables.
+        assert!(!handler(true, true).is_dirty(&no_code).unwrap());
     }
 }
