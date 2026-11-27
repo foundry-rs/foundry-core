@@ -109,6 +109,7 @@ impl ConfigurableArtifacts {
             generated_sources,
             source_map,
             opcodes,
+            ethdebug,
             __non_exhaustive,
         } = self.additional_values;
 
@@ -167,6 +168,10 @@ impl ConfigurableArtifacts {
         }
         if transient_storage_layout {
             selection.push(ContractOutputSelection::TransientStorageLayout);
+        }
+        if ethdebug {
+            selection.push(BytecodeOutputSelection::Ethdebug.into());
+            selection.push(DeployedBytecodeOutputSelection::Ethdebug.into());
         }
         selection
     }
@@ -305,6 +310,13 @@ impl ArtifactOutput for ConfigurableArtifacts {
 
             if self.additional_values.opcodes {
                 opcodes = bytecode.as_mut().and_then(|code| code.opcodes.take())
+            }
+
+            if !self.additional_values.ethdebug {
+                let deployed = deployed_bytecode.as_mut().and_then(|code| code.bytecode.as_mut());
+                for code in bytecode.iter_mut().chain(deployed) {
+                    code.ethdebug = None;
+                }
             }
 
             artifact_bytecode = bytecode.map(Into::into);
@@ -492,6 +504,8 @@ pub struct ExtraOutputValues {
     pub generated_sources: bool,
     pub source_map: bool,
     pub opcodes: bool,
+    /// Keeps the ETHDebug programs in the creation and deployed bytecode.
+    pub ethdebug: bool,
 
     /// PRIVATE: This structure may grow, As such, constructing this structure should
     /// _always_ be done using a public constructor or update syntax:
@@ -506,7 +520,10 @@ pub struct ExtraOutputValues {
 }
 
 impl ExtraOutputValues {
-    /// Returns an instance where all values are set to `true`
+    /// Returns an instance where all values are set to `true`, except `ethdebug`.
+    ///
+    /// Compilers select ETHDebug only by its exact output names, and solc also needs experimental
+    /// settings for it.
     pub const fn all() -> Self {
         Self {
             ast: true,
@@ -528,6 +545,7 @@ impl ExtraOutputValues {
             generated_sources: true,
             source_map: true,
             opcodes: true,
+            ethdebug: false,
             __non_exhaustive: (),
         }
     }
@@ -596,6 +614,12 @@ impl ExtraOutputValues {
                     EvmOutputSelection::ByteCode(BytecodeOutputSelection::SourceMap) => {
                         config.source_map = true;
                     }
+                    EvmOutputSelection::ByteCode(BytecodeOutputSelection::Ethdebug)
+                    | EvmOutputSelection::DeployedByteCode(
+                        DeployedBytecodeOutputSelection::Ethdebug,
+                    ) => {
+                        config.ethdebug = true;
+                    }
                     _ => {}
                 },
                 ContractOutputSelection::Ewasm(_) => {
@@ -608,6 +632,9 @@ impl ExtraOutputValues {
                     config.transient_storage_layout = true;
                 }
                 ContractOutputSelection::Abi => {}
+                // The global ETHDebug output is kept in the build info.
+                ContractOutputSelection::EthdebugResources
+                | ContractOutputSelection::EthdebugCompilation => {}
             }
         }
 
@@ -888,8 +915,55 @@ impl ExtraOutputFiles {
 mod tests {
     use super::*;
     use alloy_primitives::Bytes;
+    use foundry_compilers_artifacts::CompilerOutput;
     use semver::Version;
     use std::{collections::BTreeMap, path::PathBuf};
+
+    // Recorded with solc 0.8.37, `viaIR`, `experimental`, the optimizer disabled, and all
+    // ETHDebug outputs selected.
+    const ETHDEBUG_OUTPUT: &str = include_str!("../../../../test-data/ethdebug-0.8.37-output.json");
+
+    #[test]
+    fn ethdebug_artifact_roundtrip() {
+        let output = serde_json::from_str::<CompilerOutput>(ETHDEBUG_OUTPUT).unwrap();
+        let contract = output.contracts["Counter.sol"]["Counter"].clone();
+        let evm = contract.evm.as_ref().unwrap();
+        let creation = evm.bytecode.as_ref().unwrap().ethdebug.clone().unwrap();
+        let deployed = evm.deployed_bytecode.as_ref().unwrap().bytecode.as_ref().unwrap();
+        let runtime = deployed.ethdebug.clone().unwrap();
+
+        let default = ConfigurableArtifacts::default();
+        assert_eq!(default.output_selection(), ContractOutputSelection::basic());
+        let artifact = default.contract_to_artifact(
+            Path::new("Counter.sol"),
+            "Counter",
+            contract.clone(),
+            None,
+        );
+        assert!(artifact.bytecode.unwrap().ethdebug.is_none());
+        assert!(artifact.deployed_bytecode.unwrap().bytecode.unwrap().ethdebug.is_none());
+
+        let selection = [
+            BytecodeOutputSelection::Ethdebug.into(),
+            DeployedBytecodeOutputSelection::Ethdebug.into(),
+        ];
+        let artifacts = ConfigurableArtifacts::new(selection, []);
+        assert!(artifacts.additional_values.ethdebug);
+        assert_eq!(
+            artifacts.output_selection()[ContractOutputSelection::basic().len()..],
+            selection
+        );
+
+        let artifact =
+            artifacts.contract_to_artifact(Path::new("Counter.sol"), "Counter", contract, None);
+        assert_eq!(artifact.bytecode.as_ref().unwrap().ethdebug, Some(creation));
+        let deployed = artifact.deployed_bytecode.as_ref().unwrap().bytecode.as_ref().unwrap();
+        assert_eq!(deployed.ethdebug, Some(runtime));
+
+        let json = serde_json::to_string(&artifact).unwrap();
+        assert_eq!(ConfigurableContractArtifact::from_json(&json).unwrap(), artifact);
+        assert_eq!(serde_json::from_str::<ConfigurableContractArtifact>(&json).unwrap(), artifact);
+    }
 
     fn artifact_file(
         object: BytecodeObject,
@@ -899,6 +973,7 @@ mod tests {
             object: object.clone(),
             source_map: None,
             link_references: Default::default(),
+            ethdebug: None,
         };
         let table = function_debug_data.then(BTreeMap::new);
         ArtifactFile {
