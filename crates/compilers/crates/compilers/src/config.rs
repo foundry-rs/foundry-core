@@ -510,8 +510,57 @@ impl<L> ProjectPathsConfig<L> {
     /// `@openzeppelin/contracts/contracts/token/ERC20/IERC20.sol` we check for this edge case
     /// here so that both styles work out of the box.
     pub fn resolve_library_import(&self, cwd: &Path, import: &Path) -> Option<PathBuf> {
-        // if the import path starts with the name of the remapping then we get the resolved path by
-        // removing the name and adding the remainder to the path of the remapping
+        self.select_remapping(cwd, import, |r, stripped_import| Some((r, stripped_import)))
+            .map(|(r, stripped_import)| {
+                let lib_path = remapped_path(r, stripped_import);
+
+                // Avoid duplicating `contracts/` for Hardhat-style remappings.
+                if let Ok(adjusted_import) = stripped_import.strip_prefix("contracts/")
+                    && r.path.ends_with("contracts/")
+                    && !self.root.join(&lib_path).exists()
+                {
+                    return self.root.join(&r.path).join(adjusted_import);
+                }
+                self.root.join(lib_path)
+            })
+            .or_else(|| utils::resolve_library(&self.libraries, import))
+    }
+
+    /// Applies remappings to a resolved absolute path.
+    ///
+    /// When a file is resolved via relative imports, the resulting path might match a remapping
+    /// pattern. This method checks if the resolved path (relative to the project root) matches
+    /// any remapping and returns the remapped path if so.
+    ///
+    /// This is important for contract verification where the standard JSON input must use
+    /// remapped paths that match what the Solidity compiler expects.
+    ///
+    /// # Arguments
+    /// * `cwd` - The current working directory (parent of the importing file)
+    /// * `resolved_path` - The absolute path that was resolved
+    ///
+    /// # Returns
+    /// The remapped path if a matching remapping exists and the target file exists,
+    /// otherwise returns the original path.
+    pub fn apply_remapping_to_path(&self, cwd: &Path, resolved_path: &Path) -> PathBuf {
+        let Ok(relative_path) = resolved_path.strip_prefix(&self.root) else {
+            return resolved_path.to_path_buf();
+        };
+
+        self.select_remapping(cwd, relative_path, |r, stripped| {
+            let target = self.root.join(remapped_path(r, stripped));
+            target.exists().then_some(target)
+        })
+        .unwrap_or_else(|| resolved_path.to_path_buf())
+    }
+
+    /// Selects the best matching remapping among the candidates accepted by the caller.
+    fn select_remapping<'a, T>(
+        &'a self,
+        cwd: &Path,
+        import: &'a Path,
+        candidate: impl Fn(&'a Remapping, &'a Path) -> Option<T>,
+    ) -> Option<T> {
         let cwd = cwd.strip_prefix(&self.root).unwrap_or(cwd);
         // Select the remapping the way solc does: among the remappings that are global or for
         // `cwd` and whose name is a prefix of the import, the longest context wins, then the
@@ -521,6 +570,8 @@ impl<L> ProjectPathsConfig<L> {
         // candidate matches only this way, solc may not select it, so the first listed candidate
         // wins, as before. Other non-literal names such as `dep/./` never match.
         let import_str = import.to_string_lossy();
+        #[cfg(windows)]
+        let import_str = import_str.replace('\\', "/");
         let mut cwd_str = cwd.to_string_lossy().into_owned();
         if cfg!(windows) {
             cwd_str = cwd_str.replace('\\', "/");
@@ -555,7 +606,7 @@ impl<L> ProjectPathsConfig<L> {
                             cwd_str.starts_with(ctx.as_str())
                         }
                     });
-                Some((r, literal, stripped_import))
+                Some((r, literal, candidate(r, stripped_import)?))
             })
             .collect::<Vec<_>>();
         let best = if candidates.iter().all(|(_, literal, _)| *literal) {
@@ -565,63 +616,7 @@ impl<L> ProjectPathsConfig<L> {
         } else {
             candidates.into_iter().next()
         };
-        if let Some(path) = best.map(|(r, _, stripped_import)| {
-            let lib_path = remapped_path(r, stripped_import);
-
-            // we handle the edge case where the path of a remapping ends with "contracts"
-            // (`<name>/=.../contracts`) and the stripped import also starts with
-            // `contracts`
-            if let Ok(adjusted_import) = stripped_import.strip_prefix("contracts/")
-                && r.path.ends_with("contracts/")
-                && !self.root.join(&lib_path).exists()
-            {
-                return Path::new(&r.path).join(adjusted_import);
-            }
-            lib_path
-        }) {
-            Some(self.root.join(path))
-        } else {
-            utils::resolve_library(&self.libraries, import)
-        }
-    }
-
-    /// Applies remappings to a resolved absolute path.
-    ///
-    /// When a file is resolved via relative imports, the resulting path might match a remapping
-    /// pattern. This method checks if the resolved path (relative to the project root) matches
-    /// any remapping and returns the remapped path if so.
-    ///
-    /// This is important for contract verification where the standard JSON input must use
-    /// remapped paths that match what the Solidity compiler expects.
-    ///
-    /// # Arguments
-    /// * `cwd` - The current working directory (parent of the importing file)
-    /// * `resolved_path` - The absolute path that was resolved
-    ///
-    /// # Returns
-    /// The remapped path if a matching remapping exists and the target file exists,
-    /// otherwise returns the original path.
-    pub fn apply_remapping_to_path(&self, cwd: &Path, resolved_path: &Path) -> PathBuf {
-        // Get the path relative to root
-        let relative_path = match resolved_path.strip_prefix(&self.root) {
-            Ok(p) => p,
-            Err(_) => return resolved_path.to_path_buf(),
-        };
-
-        let cwd_relative = cwd.strip_prefix(&self.root).unwrap_or(cwd);
-
-        // Like solc, pick the matching remapping with the longest context, then the longest name,
-        // then the last one listed. Only use a remapping whose target file exists.
-        self.remappings
-            .iter()
-            .filter(|r| r.context.as_ref().is_none_or(|ctx| cwd_relative.starts_with(ctx)))
-            .filter_map(|r| {
-                let stripped = relative_path.strip_prefix(&r.name).ok()?;
-                let remapped = self.root.join(remapped_path(r, stripped));
-                remapped.exists().then_some((r, remapped))
-            })
-            .max_by_key(|(r, _)| (r.context.as_ref().map_or(0, |ctx| ctx.len()), r.name.len()))
-            .map_or_else(|| resolved_path.to_path_buf(), |(_, remapped)| remapped)
+        best.map(|(_, _, value)| value)
     }
 
     pub fn with_language_ref<Lang>(&self) -> &ProjectPathsConfig<Lang> {
@@ -1556,6 +1551,13 @@ mod tests {
         assert_eq!(resolve(&[file, same_name]), fork_dir.join("LibMem.sol"));
         // As in solc, the longest context wins over the longest name.
         assert_eq!(resolve(&[file, ctx]), fork_dir.join("LibMem.sol"));
+        // A dot component in a remapping name is never a literal source unit prefix.
+        let dotted = "lib/external/utils/./=test/";
+        assert_eq!(resolve(&[dir_remap, dotted]), fork_dir.join("LibMem.sol"));
+        assert_eq!(resolve(&[dotted]), lib_dir.join("LibMem.sol"));
+        // Relative imports still fall back to the best remapping with an existing target.
+        let missing = "lib/external/utils/LibMem.sol=missing/LibMem.sol";
+        assert_eq!(resolve(&[dir_remap, missing]), fork_dir.join("LibMem.sol"));
     }
 
     #[test]
