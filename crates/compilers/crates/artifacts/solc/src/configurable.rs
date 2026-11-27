@@ -94,7 +94,7 @@ impl ConfigurableContractArtifact {
 
     /// Returns the source file of this artifact's contract
     pub fn source_file(&self) -> Option<SourceFile> {
-        self.id.map(|id| SourceFile { id, ast: self.ast.clone() })
+        self.id.map(|id| SourceFile { id, ast: self.ast.clone(), coverage: None })
     }
 }
 
@@ -181,6 +181,8 @@ impl<'de> Deserialize<'de> for DirectDeployed {
             link_references: BTreeMap<String, BTreeMap<String, Vec<Offsets>>>,
             #[serde(default)]
             immutable_references: BTreeMap<String, Vec<Offsets>>,
+            #[serde(default)]
+            coverage_aliases: Vec<crate::CoverageAlias>,
         }
 
         struct MapVisitor;
@@ -201,6 +203,7 @@ impl<'de> Deserialize<'de> for DirectDeployed {
                         object: fields.object,
                         source_map: fields.source_map,
                         link_references: fields.link_references,
+                        coverage_aliases: fields.coverage_aliases,
                     }),
                     immutable_references: fields.immutable_references,
                 }))
@@ -412,6 +415,8 @@ mod tests {
             r#"{"object":"0x12","linkReferences":{"a":{"L":[{"start":1,"length":20,"unknown":1e999}]}}}"#,
             r#"{"object":"0x__placeholder__","sourceMap":"1:2:3","linkReferences":{"a":{"L":[{"start":1,"length":20}]}},"immutableReferences":{"1":[{"start":4,"length":32}]}}"#,
             r#"{"object":"0x12","unknown":[{"nested":true}]}"#,
+            r#"{"object":"0x12","coverageAliases":[[2,1],[4,3]]}"#,
+            r#"{"object":"0x12","coverageAliases":null}"#,
             r#"{"object":123}"#,
             r#"{"object":null}"#,
             r#"{"object":[]}"#,

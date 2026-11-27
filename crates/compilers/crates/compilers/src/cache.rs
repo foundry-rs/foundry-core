@@ -291,31 +291,32 @@ impl<S: CompilerSettings> CompilerCache<S> {
         Ok(())
     }
 
-    /// Removes build infos which don't have any artifacts linked to them.
+    /// Removes build infos which don't have any artifacts or coverage maps linked to them.
     #[instrument(skip_all)]
     pub fn remove_outdated_builds(&mut self) {
         self.remove_outdated_builds_at(&self.paths.build_infos.clone());
     }
 
     fn remove_outdated_builds_at(&mut self, build_infos: &Path) {
-        let mut outdated = Vec::new();
-        for build_id in &self.builds {
-            if !self
-                .entries()
-                .flat_map(|e| e.artifacts.values())
-                .flat_map(|a| a.values())
-                .flat_map(|a| a.values())
-                .any(|a| a.build_id == *build_id)
-            {
-                outdated.push(build_id.to_owned());
-            }
-        }
-
+        let outdated =
+            self.builds.iter().filter(|id| !self.references_build(id)).cloned().collect::<Vec<_>>();
         for build_id in outdated {
             self.builds.remove(&build_id);
             let path = build_infos.join(build_id).with_extension("json");
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// Returns whether an artifact or coverage map of any entry links to the build info.
+    fn references_build(&self, build_id: &str) -> bool {
+        self.entries().any(|e| {
+            e.coverage_build_id.as_deref() == Some(build_id)
+                || e.artifacts
+                    .values()
+                    .flat_map(|a| a.values())
+                    .flat_map(|a| a.values())
+                    .any(|a| a.build_id == build_id)
+        })
     }
 
     /// Sets the `CacheEntry`'s file paths to `root` adjoined to `self.file`.
@@ -634,6 +635,12 @@ pub struct CacheEntry {
     /// If this is false, then artifacts are definitely empty and it should be compiled if we may
     /// need artifacts.
     pub seen_by_compiler: bool,
+    /// The build whose build info holds this file's instrumented coverage map.
+    ///
+    /// It keeps that build info when the file produces no artifacts, such as a file of free
+    /// functions, so a warm build still serves the map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_build_id: Option<String>,
 }
 
 impl CacheEntry {
@@ -892,6 +899,7 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             // artifacts remain empty until we received the compiler output
             artifacts: Default::default(),
             seen_by_compiler: false,
+            coverage_build_id: None,
         };
 
         self.cache.files.insert(file, entry);
@@ -1008,6 +1016,10 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let Some(entry) = self.cache.entry(file) else {
             return Err("missing cache entry");
         };
+
+        if entry.coverage_build_id.as_ref().is_some_and(|id| !self.cached_builds.contains_key(id)) {
+            return Err("missing coverage build info");
+        }
 
         // only check artifact's existence if the file generated artifacts.
         // e.g. a solidity file consisting only of import statements (like interfaces that
@@ -1219,7 +1231,14 @@ impl<T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         }
 
         self.cache.files.retain(|_, entry| {
-            // keep entries which already had no artifacts
+            // keep entries which already had no artifacts; a settings change recompiles them
+            // because their coverage map depends on the settings
+            if !dirty_profiles.is_empty() {
+                entry.coverage_build_id = None;
+                if entry.artifacts.is_empty() {
+                    entry.seen_by_compiler = false;
+                }
+            }
             if entry.artifacts.is_empty() {
                 return true;
             }
@@ -1721,7 +1740,7 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
         let ArtifactsCacheInner {
             mut cache,
             mut cached_artifacts,
-            cached_builds,
+            mut cached_builds,
             dirty_sources,
             sources_in_scope,
             project,
@@ -1776,9 +1795,35 @@ impl<'a, T: ArtifactOutput<CompilerContract = C::CompilerContract>, C: Compiler>
             }
         }
 
+        // A recompiled file drops its reference to missing build info; a new coverage map sets it
+        // again. Files outside this compilation keep theirs and rebuild when requested.
+        for path in
+            written_build_infos.iter().flat_map(|b| b.build_context.source_id_to_path.values())
+        {
+            if let Some(entry) = cache.files.get_mut(&project.root().join(path))
+                && entry
+                    .coverage_build_id
+                    .as_ref()
+                    .is_some_and(|id| !cached_builds.contains_key(id))
+            {
+                entry.coverage_build_id = None;
+            }
+        }
         for build_info in written_build_infos {
             cache.builds.insert(build_info.id.clone());
+            let context = &build_info.build_context;
+            for source_id in context.coverage.keys() {
+                if let Some(path) = context.source_id_to_path.get(source_id)
+                    && let Some(entry) = cache.files.get_mut(&project.root().join(path))
+                {
+                    entry.coverage_build_id = Some(build_info.id.clone());
+                }
+            }
         }
+
+        // Return only build infos the cache still links, so a settings change also drops the old
+        // coverage maps from this output.
+        cached_builds.retain(|id, _| cache.references_build(id));
 
         cache.prune_native_dependency_contexts(project.root());
 
@@ -2137,6 +2182,7 @@ mod tests {
                     version_requirement: None,
                     artifacts: Default::default(),
                     seen_by_compiler: true,
+                    coverage_build_id: None,
                 },
             );
         }
@@ -2168,5 +2214,33 @@ mod tests {
             cache.source_context_dirty_sources(root, |source| source == sensitive),
             HashSet::from([sensitive, importer, native, conservative])
         );
+    }
+
+    #[test]
+    fn coverage_keeps_build_info_without_artifacts() {
+        let build_infos = tempfile::tempdir().unwrap();
+        let mut cache = CompilerCache::<SolcSettings>::default();
+        cache.files.insert(
+            PathBuf::from("/project/src/Free.sol"),
+            CacheEntry {
+                last_modification_date: 0,
+                content_hash: String::new(),
+                interface_repr_hash: None,
+                source_name: PathBuf::from("src/Free.sol"),
+                imports: BTreeSet::new(),
+                version_requirement: None,
+                artifacts: Default::default(),
+                seen_by_compiler: true,
+                coverage_build_id: Some("coverage".to_owned()),
+            },
+        );
+        for id in ["coverage", "stale"] {
+            cache.builds.insert(id.to_owned());
+            fs::write(build_infos.path().join(id).with_extension("json"), "{}").unwrap();
+        }
+        cache.remove_outdated_builds_at(build_infos.path());
+        assert_eq!(cache.builds, BTreeSet::from(["coverage".to_owned()]));
+        assert!(build_infos.path().join("coverage.json").is_file());
+        assert!(!build_infos.path().join("stale.json").exists());
     }
 }
