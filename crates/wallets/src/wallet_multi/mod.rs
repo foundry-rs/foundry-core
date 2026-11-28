@@ -101,7 +101,9 @@ macro_rules! create_hw_wallets {
 /// 5. Private Keys (cleartext in CLI)
 /// 6. Private Keys (interactively via secure prompt)
 /// 7. AWS KMS
-/// 8. Turnkey
+/// 8. Google Cloud KMS
+/// 9. Turnkey
+/// 10. Azure Key Vault
 #[derive(Builder, Clone, Debug, Default, Serialize, Parser)]
 #[command(next_help_heading = "Wallet options", about = None, long_about = None)]
 pub struct MultiWalletOpts {
@@ -245,6 +247,17 @@ pub struct MultiWalletOpts {
     #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "turnkey"))]
     pub turnkey: bool,
 
+    /// Use Azure Key Vault.
+    ///
+    /// Ensure either one of AZURE_KEY_VAULT_KEY_IDS (comma-separated) or AZURE_KEY_VAULT_KEY_ID
+    /// environment variables are set to key identifiers, e.g.
+    /// `https://<vault>.vault.azure.net/keys/<name>/<version>`. Without a version, the latest
+    /// version is used, so the address changes when the key is rotated.
+    ///
+    /// See: <https://learn.microsoft.com/azure/key-vault/keys/about-keys>
+    #[arg(long, help_heading = "Wallet options - remote", hide = !cfg!(feature = "azure-key-vault"))]
+    pub azure: bool,
+
     /// Browser wallet options
     #[cfg(feature = "browser")]
     #[command(flatten)]
@@ -271,6 +284,9 @@ impl MultiWalletOpts {
         }
         if let Some(turnkey_signers) = self.turnkey_signers()? {
             signers.extend(turnkey_signers);
+        }
+        if let Some(azure_signers) = self.azure_signers().await? {
+            signers.extend(azure_signers);
         }
         if let Some((pending_keystores, unlocked)) = self.keystores()? {
             pending.extend(pending_keystores);
@@ -445,13 +461,11 @@ impl MultiWalletOpts {
         #[cfg(feature = "aws-kms")]
         if self.aws {
             let mut wallets = vec![];
-            let aws_keys = std::env::var("AWS_KMS_KEY_IDS")
-                .or(std::env::var("AWS_KMS_KEY_ID"))?
-                .split(',')
-                .map(|k| k.to_string())
-                .collect::<Vec<_>>();
-
-            for key in aws_keys {
+            for key in key_ids_from_env(
+                |key| std::env::var(key).ok(),
+                "AWS_KMS_KEY_IDS",
+                "AWS_KMS_KEY_ID",
+            )? {
                 let aws_signer = WalletSigner::from_aws(key).await?;
                 wallets.push(aws_signer)
             }
@@ -513,6 +527,29 @@ impl MultiWalletOpts {
         Ok(None)
     }
 
+    /// Returns a list of Azure Key Vault signers if the Azure flag is set.
+    ///
+    /// The key identifiers are read from `AZURE_KEY_VAULT_KEY_IDS` (comma-separated) or
+    /// `AZURE_KEY_VAULT_KEY_ID`, e.g. `https://<vault>.vault.azure.net/keys/<name>/<version>`.
+    pub async fn azure_signers(&self) -> Result<Option<Vec<WalletSigner>>> {
+        #[cfg(feature = "azure-key-vault")]
+        if self.azure {
+            let mut wallets = vec![];
+            for key_id in key_ids_from_env(
+                |key| std::env::var(key).ok(),
+                "AZURE_KEY_VAULT_KEY_IDS",
+                "AZURE_KEY_VAULT_KEY_ID",
+            )? {
+                let azure_signer = WalletSigner::from_azure(key_id).await?;
+                wallets.push(azure_signer);
+            }
+
+            return Ok(Some(wallets));
+        }
+
+        Ok(None)
+    }
+
     /// Returns the Turnkey address if `--turnkey` flag is set and `TURNKEY_ADDRESS` is available.
     pub fn turnkey_address(&self) -> Option<alloy_primitives::Address> {
         #[cfg(feature = "turnkey")]
@@ -528,6 +565,30 @@ impl MultiWalletOpts {
     pub async fn browser_signer<N: Network>(&self) -> Result<Option<BrowserSigner<N>>> {
         self.browser.run().await
     }
+}
+
+/// Reads comma-separated key identifiers from `ids_var`, falling back to the single `id_var`.
+///
+/// Whitespace around identifiers and empty entries are ignored, and a blank `ids_var` falls back to
+/// `id_var`. At least one identifier is required.
+#[cfg(any(feature = "aws-kms", feature = "azure-key-vault"))]
+fn key_ids_from_env(
+    env: impl Fn(&str) -> Option<String>,
+    ids_var: &str,
+    id_var: &str,
+) -> Result<Vec<String>> {
+    let ids = env(ids_var)
+        .filter(|ids| !ids.trim().is_empty())
+        .or_else(|| env(id_var))
+        .unwrap_or_default();
+    let ids = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    eyre::ensure!(!ids.is_empty(), "{ids_var} or {id_var} must be set to at least one key ID");
+    Ok(ids)
 }
 
 #[cfg(test)]
@@ -622,6 +683,7 @@ mod tests {
             ("trezor", "--mnemonic-indexes", 2),
             ("aws", "--mnemonic-indexes", 10),
             ("turnkey", "--mnemonic-indexes", 11),
+            ("azure", "--mnemonic-indexes", 12),
         ];
 
         for test_case in wallet_options {
@@ -637,6 +699,7 @@ mod tests {
                 "trezor" => assert!(args.trezor),
                 "aws" => assert!(args.aws),
                 "turnkey" => assert!(args.turnkey),
+                "azure" => assert!(args.azure),
                 _ => panic!("Should have matched one of the previous wallet options"),
             }
 
@@ -723,5 +786,29 @@ mod tests {
         let args = args.unwrap();
         assert_eq!(args.keystore_password_files, Some(vec!["/path/to/password-file".to_string()]));
         assert_eq!(args.private_keys.map(|keys| keys.len()), Some(1));
+    }
+
+    #[test]
+    #[cfg(any(feature = "aws-kms", feature = "azure-key-vault"))]
+    fn key_ids_prefer_list() {
+        let key_ids = |vars: &[(&str, &str)]| {
+            let env = |key: &str| {
+                vars.iter().find(|(name, _)| *name == key).map(|(_, value)| value.to_string())
+            };
+            key_ids_from_env(env, "KEY_IDS", "KEY_ID").map_err(|err| err.to_string())
+        };
+
+        assert_eq!(key_ids(&[("KEY_ID", "single")]).unwrap(), ["single"]);
+        assert_eq!(key_ids(&[("KEY_ID", "single"), ("KEY_IDS", " ")]).unwrap(), ["single"]);
+        assert_eq!(
+            key_ids(&[("KEY_ID", "single"), ("KEY_IDS", "first, second,")]).unwrap(),
+            ["first", "second"]
+        );
+        for vars in [&[][..], &[("KEY_IDS", " , ")]] {
+            assert_eq!(
+                key_ids(vars).unwrap_err(),
+                "KEY_IDS or KEY_ID must be set to at least one key ID"
+            );
+        }
     }
 }
